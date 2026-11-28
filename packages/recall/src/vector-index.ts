@@ -467,6 +467,9 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
         total: missingTotal,
       }) ?? Effect.void;
 
+      if (missingTotal > 1) {
+        desiredChunks.sort((left, right) => compareCodeUnits(left.id, right.id));
+      }
       for (let pageStart = 0; pageStart < desiredChunks.length; pageStart += VECTOR_INDEX_PAGE_SIZE) {
         const page = desiredChunks.slice(pageStart, pageStart + VECTOR_INDEX_PAGE_SIZE);
         const existingIds = yield* selectExistingChunkIds(

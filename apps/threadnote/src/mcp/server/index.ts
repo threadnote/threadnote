@@ -58,6 +58,7 @@ import {
   withStaleVersionNotice,
 } from './common.js';
 import {registerCodeGraphTool, registerContextBriefTool} from './code_graph.js';
+import {registerSemanticTool, registerSemanticQueryTool} from './semantic.js';
 import {
   makeCodeGraphDiagramResources,
   registerCodeGraphDiagramResource,
@@ -363,6 +364,8 @@ function registerTools(
 
   if (capabilities.graphLocal) {
     registerCodeGraphTool(server, config, {allowWorkset: capabilities.graphWorkset, diagramResources});
+    registerSemanticTool(server);
+    registerSemanticQueryTool(server, config, capabilities.memoryRead);
   }
   if (capabilities.contextBrief) registerContextBriefTool(server, config);
 

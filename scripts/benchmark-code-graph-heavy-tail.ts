@@ -1,3 +1,4 @@
+import {requireNativeTypeScriptAsset} from './support/native-typescript-preflight.js';
 import {NATIVE_PERFORMANCE_CONTRACT} from '@threadnote/evidence/native-performance';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
@@ -1999,4 +2000,7 @@ const git = Effect.fn('benchmarkCodeGraphHeavyTail.git')((cwd: string, args: rea
   ),
 );
 
-if (import.meta.main) BunRuntime.runMain(provideScriptLayer(benchmark, ApplicationLayer));
+if (import.meta.main) {
+  requireNativeTypeScriptAsset('bench:code-graph:heavy-tail');
+  BunRuntime.runMain(provideScriptLayer(benchmark, ApplicationLayer));
+}

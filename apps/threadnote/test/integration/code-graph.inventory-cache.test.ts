@@ -4,7 +4,7 @@ import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {Effect, Option} from 'effect';
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterAll, afterEach, describe, expect, it} from 'vitest';
 import {
   createPackageAttributor,
   extractRepositoryFileFacts,
@@ -20,6 +20,18 @@ import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {runEffect} from '../helpers/effect-runtime.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {
+  createNativeTypeScriptTestSession,
+  skipWithoutNativeTypeScript,
+} from '@threadnote/graph/test/helpers/native-typescript-session';
+import type {NativeTypeScriptSession} from '@threadnote/graph/typescript_runtime';
+
+// One native session serves this file; it is created on first use and closed after the file.
+let session: Promise<NativeTypeScriptSession> | undefined;
+const nativeSession = () => (session ??= createNativeTypeScriptTestSession());
+afterAll(async () => {
+  await (await session)?.close();
+});
 
 describe('code graph inventory cache rehydration', () => {
   const roots: string[] = [];
@@ -28,7 +40,8 @@ describe('code graph inventory cache rehydration', () => {
     for (const root of roots.splice(0)) rmSync(root, {force: true, recursive: true});
   });
 
-  it('keeps compact package, TypeScript, and Go context across mixed cache hits without changing hashes', async () => {
+  it('keeps compact package, TypeScript, and Go context across mixed cache hits without changing hashes', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = mkdtempSync(join(tmpdir(), 'threadnote-inventory-cache-'));
     roots.push(root);
     createResolutionFixture(root);
@@ -93,9 +106,9 @@ describe('code graph inventory cache rehydration', () => {
       );
     }
 
-    const initialFacts = extractRepositoryFileFacts(firstBatches.flat());
+    const initialFacts = await extractRepositoryFileFacts(firstBatches.flat(), undefined, await nativeSession());
+    const freshFacts = await extractRepositoryFileFacts(secondBatches.flat(), undefined, await nativeSession());
     const cachedFacts = EffectArray.filter(initialFacts, facts => facts.path !== 'src/helper.ts');
-    const freshFacts = extractRepositoryFileFacts(secondBatches.flat());
     const attributed = createPackageAttributor(second.files)([...cachedFacts, ...freshFacts]);
     const resolved = resolveExtractedRepositoryFacts(attributed, second.files);
     const symbols = EffectArray.flatMap(resolved, facts => facts.symbols);
@@ -245,7 +258,8 @@ describe('code graph inventory cache rehydration', () => {
     expect(EffectArray.every(second.files, file => file.content === undefined)).toBe(true);
   });
 
-  it('rehydrates cached manifests during a new-commit rebuild without losing attribution or resolution', async () => {
+  it('rehydrates cached manifests during a new-commit rebuild without losing attribution or resolution', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = mkdtempSync(join(tmpdir(), 'threadnote-inventory-cache-rebuild-'));
     const home = join(root, '.threadnote-home');
     roots.push(root);

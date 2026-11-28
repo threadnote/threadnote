@@ -40,7 +40,7 @@ describe('graph share TCG1 delta publication and apply', () => {
             path.join(repository, 'package.json'),
             '{"name":"graph-share-deltas","private":true,"type":"module"}\n',
           );
-          yield* fs.writeFileString(path.join(repository, 'src', 'index.ts'), 'export const shared = 1;\n');
+          yield* fs.writeFileString(path.join(repository, 'src', 'index.py'), 'shared = 1\n');
           yield* git(repository, ['init', '-q', '--initial-branch=main']);
           yield* git(repository, ['config', 'core.ignorecase', 'false']);
           yield* git(repository, ['remote', 'add', 'origin', 'https://github.com/acme/graph-share-deltas.git']);
@@ -94,8 +94,8 @@ describe('graph share TCG1 delta publication and apply', () => {
             threadnoteHome: clientHome,
           });
           expect(firstImport.snapshot.id).toMatch(/^cgsn_/);
-          yield* fs.writeFileString(path.join(repository, 'src', 'next.ts'), 'export const next = 2;\n');
-          yield* git(repository, ['add', 'src/next.ts']);
+          yield* fs.writeFileString(path.join(repository, 'src', 'next.py'), 'next = 2\n');
+          yield* git(repository, ['add', 'src/next.py']);
           yield* git(repository, [
             '-c',
             'user.name=Threadnote Test',
@@ -205,7 +205,7 @@ describe('graph share TCG1 delta publication and apply', () => {
             path.join(repository, 'package.json'),
             '{"name":"graph-share-compact","private":true,"type":"module"}\n',
           );
-          yield* fs.writeFileString(path.join(repository, 'src', 'index.ts'), 'export const shared = 1;\n');
+          yield* fs.writeFileString(path.join(repository, 'src', 'index.py'), 'shared = 1\n');
           yield* git(repository, ['init', '-q', '--initial-branch=main']);
           yield* git(repository, ['remote', 'add', 'origin', 'https://github.com/acme/graph-share-compact.git']);
           yield* git(repository, ['add', '.']);
@@ -254,10 +254,7 @@ describe('graph share TCG1 delta publication and apply', () => {
             path.join(repository, 'packages', 'lib', 'package.json'),
             '{"name":"@acme/lib","private":true,"type":"module"}\n',
           );
-          yield* fs.writeFileString(
-            path.join(repository, 'packages', 'lib', 'src', 'index.ts'),
-            'export const lib = 1;\n',
-          );
+          yield* fs.writeFileString(path.join(repository, 'packages', 'lib', 'src', 'index.py'), 'lib = 1\n');
           yield* git(repository, ['add', '.']);
           yield* git(repository, [
             '-c',

@@ -31,6 +31,41 @@ needed:
 bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
 ```
 
+Generation selects source imports with the official npm `typescript` package's
+syntax API, so it needs only `bun install`; it never reads a native TypeScript
+asset.
+
+Native TypeScript tests read the prepared asset named by
+`THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR`. Generation declares
+`inherited_env` only for vitest test targets whose closure includes the native
+test gate `packages/graph/test/helpers/native-typescript-session.ts`; lint,
+format, typecheck and workspace targets inherit nothing. Those targets inherit
+exactly two names: the asset location and `THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED`.
+`bun.bzl` fails analysis for any other name, and the runner allowlists the same
+two names again and applies the fixed `HOME`, `TMPDIR` and `PATH` after them.
+`CI` itself never reaches a Bazel test, so CI sets
+`THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED=1` wherever it provides the asset: on a
+reviewed-pin host a gated test file then fails when the asset is missing instead
+of skipping. Locally, with neither variable set, the native tests skip and state
+why; set `THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED=1` to get CI's behaviour. The
+inherited values are part of the test action key, so CI exports a fixed per-host
+path (`$RUNNER_TEMP/threadnote-native-typescript/<host>`) and a cached result
+stays reusable across runners of the same image; a different local path is
+simply a different key. These native targets are tagged `no-sandbox`: inside the Linux sandbox's
+unprivileged user namespace, root-owned ancestors such as `/` and `/home`
+appear as the overflow uid (65534), and the runtime's ancestor-ownership check
+deliberately refuses an asset below an owner it cannot identify. Leaving the
+sandbox for these targets keeps that check strict rather than trusting unmapped
+owners in product code. The cost is deliberate and limited to these targets: outside
+the sandbox they lose network denial (`--sandbox_default_allow_network=false`),
+detection of reads of undeclared inputs, and a private `/tmp`; they use their own
+`TEST_TMPDIR` homes instead. When extracting a construction artifact use
+`tar -xpf`, because a umask otherwise strips the required `0755` `tsc` mode. See
+"Native TypeScript 7.1 source asset" in `docs/releasing.md` for which tests need
+the asset, how to construct one with `--prepare` when no artifact is available
+(construction artifacts last 14 days and exist only for construction pull
+requests and manual dispatches), CI provisioning and the supported hosts.
+
 `bun run bazel:check` prepares and validates generated semantics, byte-stable
 regeneration, and target analysis. Direct `bun tools/bazel/generate.mjs --check`
 is verification-only: it requires existing prepared inputs and does not repair

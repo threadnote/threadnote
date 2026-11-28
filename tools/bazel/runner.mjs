@@ -17,6 +17,16 @@ const [manifestPath, destination, ...testArgs] = process.argv.slice(2);
 const manifest = await Bun.file(manifestPath).json();
 const inputRoot = process.cwd();
 const testing = destination === '--test';
+// Allowlist again at execution: only this declared name crosses into the otherwise fixed test environment.
+const INHERITABLE = new Set([
+  'THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR',
+  'THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED',
+]);
+const inheritedEnv = {};
+for (const name of manifest.inheritedEnv ?? []) {
+  if (!INHERITABLE.has(name)) throw new Error(`Test manifest may not inherit host variable ${name}`);
+  if (process.env[name] !== undefined) inheritedEnv[name] = process.env[name];
+}
 const workspaceTesting = destination === '--workspace-test';
 if (workspaceTesting) {
   const workspaceRoot = dirname(realpathSync(join(inputRoot, 'package.json')));
@@ -84,6 +94,8 @@ try {
   const result = Bun.spawnSync([process.execPath, ...args.map(arg => arg.replaceAll('{output}', output ?? ''))], {
     cwd: stage,
     env: {
+      // Inherited values come first, so the fixed HOME/TMPDIR/PATH below always win.
+      ...inheritedEnv,
       HOME: home,
       TMPDIR: temp,
       PATH: `${bin}${delimiter}/usr/bin${delimiter}/bin${delimiter}/usr/sbin${delimiter}/sbin`,

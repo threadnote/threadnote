@@ -37,7 +37,12 @@ import {
   pendingCandidateQueuePath,
   persistGraphSharePendingSignedCandidates,
 } from '@threadnote/graph/sharing/signed/candidate';
-import type {CodeGraphParserPoolShape, CodeGraphParserResult} from '@threadnote/graph/parser_worker';
+import {compareCodeUnits} from '@threadnote/graph/ordering';
+import type {
+  CodeGraphParserLane,
+  CodeGraphParserPoolShape,
+  CodeGraphParserResult,
+} from '@threadnote/graph/parser_worker';
 import type {CodeGraphDirectPersistentCapacityProtector} from '@threadnote/graph/store';
 import type {TreeSitterRuntimeShape} from '@threadnote/graph/tree_sitter/runtime';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphStoreFailure} from '@threadnote/graph/types';
@@ -263,6 +268,95 @@ describe('code graph parser cache coalescer', () => {
           value => value.completed === value.total,
         ),
       ).toBe(true);
+    }),
+  );
+
+  effectIt.effect('extracts TypeScript groups only on native lanes', () =>
+    Effect.gen(function* () {
+      const files = [
+        ...Array.from({length: 6}, (_, index) => cacheFile(index, 'src/alpha')),
+        ...Array.from({length: 6}, (_, index) => {
+          const file = cacheFile(100 + index, 'src/beta');
+          return {...file, language: 'json', path: EffectString.replace(/\.ts$/u, '.json')(file.path)};
+        }),
+      ];
+      // Each extraction yields, so lanes overlap and an unsafe routing would be visible.
+      const facts = (file: CodeGraphInventoryFile) =>
+        Effect.yieldNow.pipe(Effect.as({degraded: false, facts: emptyFacts(file.path), parseMilliseconds: 0}));
+      const run = (nativeCapacity: number) =>
+        Effect.gen(function* () {
+          const harness = coalescerHarness({capacity: 4, nativeCapacity, facts});
+          yield* harness.run(files, cacheContext(files.length));
+          yield* harness.flush;
+          return harness;
+        });
+      const routed = yield* run(1);
+      const allNative = yield* run(4);
+      // A pool without native slots still extracts every group, on general lanes.
+      const noNative = yield* run(0);
+      const paths = EffectArray.map(files, file => file.path).sort(compareCodeUnits);
+      for (const harness of [routed, allNative, noNative])
+        expect(EffectArray.map(harness.lanes, entry => entry.path).sort(compareCodeUnits)).toEqual(paths);
+      // The native lane holds the native slot for TypeScript only; general slots take every other group.
+      for (const entry of routed.lanes)
+        expect(entry.lane).toBe(EffectString.endsWith('.ts')(entry.path) ? 'native' : 'general');
+      expect(EffectArray.every(noNative.lanes, entry => entry.lane === 'general')).toBe(true);
+      expect(routed.openLanes.nativePeak).toBe(1);
+      for (const harness of [allNative, noNative]) {
+        expect(cacheCallIdentity(routed.calls)).toEqual(cacheCallIdentity(harness.calls));
+        expect(EffectArray.map(routed.calls, call => call.facts)).toEqual(
+          EffectArray.map(harness.calls, call => call.facts),
+        );
+      }
+    }),
+  );
+
+  effectIt.effect('runs only the general lanes that the planned general work needs', () =>
+    Effect.gen(function* () {
+      const files = [
+        ...Array.from({length: 6}, (_, index) => cacheFile(index, 'src/alpha')),
+        ...Array.from({length: 6}, (_, index) => {
+          const file = cacheFile(100 + index, 'src/beta');
+          return {...file, language: 'json', path: EffectString.replace(/\.ts$/u, '.json')(file.path)};
+        }),
+      ];
+      const facts = (file: CodeGraphInventoryFile) =>
+        Effect.yieldNow.pipe(Effect.as({degraded: false, facts: emptyFacts(file.path), parseMilliseconds: 0}));
+      const run = (parserLaneWork?: CodeGraphContentBatchContext['parserLaneWork']) =>
+        Effect.gen(function* () {
+          const harness = coalescerHarness({capacity: 4, nativeCapacity: 1, facts});
+          yield* harness.run(files, {...cacheContext(files.length), ...(parserLaneWork ? {parserLaneWork} : {})});
+          yield* harness.flush;
+          return harness;
+        });
+      const light = yield* run({nativeWorkUnits: 100, generalWorkUnits: 10});
+      const heavy = yield* run({nativeWorkUnits: 100, generalWorkUnits: 900});
+      const unplanned = yield* run();
+      expect(EffectArray.map([light, heavy, unplanned], harness => harness.openLanes.generalPeak)).toEqual([1, 3, 3]);
+      // A window without TypeScript lets the native lane take general groups beside the one planned general lane.
+      const generalOnly = coalescerHarness({capacity: 4, nativeCapacity: 1, facts});
+      const jsonFiles = EffectArray.filter(files, file => file.language === 'json');
+      yield* generalOnly.run(jsonFiles, {
+        ...cacheContext(jsonFiles.length),
+        parserLaneWork: {nativeWorkUnits: 100, generalWorkUnits: 10},
+      });
+      yield* generalOnly.flush;
+      expect([generalOnly.openLanes.generalPeak, generalOnly.openLanes.nativePeak]).toEqual([1, 1]);
+      expect(EffectArray.some(generalOnly.lanes, entry => entry.lane === 'native')).toBe(true);
+      // Without planned native work no native worker exists, so the native lane stays idle.
+      const noNativePlan = coalescerHarness({capacity: 4, nativeCapacity: 1, facts});
+      yield* noNativePlan.run(jsonFiles, {
+        ...cacheContext(jsonFiles.length),
+        parserLaneWork: {nativeWorkUnits: 0, generalWorkUnits: 10},
+      });
+      yield* noNativePlan.flush;
+      expect([noNativePlan.openLanes.generalPeak, noNativePlan.openLanes.nativePeak]).toEqual([3, 0]);
+      for (const harness of [heavy, unplanned]) {
+        expect(EffectArray.map(light.lanes, entry => entry.path).sort(compareCodeUnits)).toEqual(
+          EffectArray.map(harness.lanes, entry => entry.path).sort(compareCodeUnits),
+        );
+        expect(cacheCallIdentity(light.calls)).toEqual(cacheCallIdentity(harness.calls));
+      }
     }),
   );
 
@@ -796,6 +890,7 @@ function checkCacheGroupCheckpoint(firstRows: number, secondRows: number, stop: 
 
 function coalescerHarness(options: {
   readonly capacity: number;
+  readonly nativeCapacity?: number;
   readonly facts?: (
     file: CodeGraphInventoryFile,
   ) => CodeGraphParserResult | Effect.Effect<CodeGraphParserResult, never>;
@@ -806,7 +901,10 @@ function coalescerHarness(options: {
   readonly preparationGate?: CodeGraphIndexResourceGate;
 }) {
   const calls: CacheCall[] = [];
-  const extract = (file: CodeGraphInventoryFile) => {
+  const lanes: {readonly path: string; readonly lane: CodeGraphParserLane | 'direct'}[] = [];
+  const openLanes = {native: 0, general: 0, nativePeak: 0, generalPeak: 0};
+  const extractOn = (lane: CodeGraphParserLane | 'direct') => (file: CodeGraphInventoryFile) => {
+    lanes.push({path: file.path, lane});
     const result = options.facts?.(file) ?? {
       degraded: false,
       facts: emptyFacts(file.path),
@@ -814,12 +912,24 @@ function coalescerHarness(options: {
     };
     return Effect.isEffect(result) ? result : Effect.succeed(result);
   };
+  const extract = extractOn('direct');
   const parserPool = {
     capacity: options.capacity,
+    nativeCapacity: options.nativeCapacity ?? 1,
     extract,
-    withParserSlot: (_threadnoteHome, _files, use) => use(extract),
+    withParserSlot: (_threadnoteHome, _files, use, lane = 'general') =>
+      Effect.acquireUseRelease(
+        Effect.sync(() => {
+          openLanes[lane] += 1;
+          openLanes.nativePeak = Math.max(openLanes.nativePeak, openLanes.native);
+          openLanes.generalPeak = Math.max(openLanes.generalPeak, openLanes.general);
+        }),
+        () => use(extractOn(lane)),
+        () => Effect.sync(() => void (openLanes[lane] -= 1)),
+      ),
     warm: () => Effect.void,
     trimIdle: Effect.void,
+    projectSourceSequence: () => Effect.succeed({status: 'unavailable'}),
   } satisfies CodeGraphParserPoolShape;
   const recordCache = (files: readonly CodeGraphInventoryFile[], facts: CacheCall['facts'], cacheIdentity: string) =>
     Effect.sync(() => {
@@ -872,7 +982,7 @@ function coalescerHarness(options: {
       withParsedSource: () => Effect.die(new Error('Parser fixture does not use Tree-sitter.')),
     } satisfies TreeSitterRuntimeShape,
   });
-  return {...coalescer, calls, run: coalescer.onContentBatch};
+  return {...coalescer, calls, lanes, openLanes, run: coalescer.onContentBatch};
 }
 
 function cacheFile(index: number, directory: string): CodeGraphInventoryFile {

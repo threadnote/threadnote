@@ -37,7 +37,7 @@ describe('graph share publisher freeze cycle', () => {
             path.join(repository, 'package.json'),
             '{"name":"graph-share-freeze","private":true,"type":"module"}\n',
           );
-          yield* fs.writeFileString(path.join(repository, 'src', 'index.ts'), 'export const shared = 1;\n');
+          yield* fs.writeFileString(path.join(repository, 'src', 'index.py'), 'shared = 1\n');
           yield* git(repository, ['init', '-q', '--initial-branch=main']);
           yield* git(repository, ['remote', 'add', 'origin', 'https://github.com/acme/graph-share-freeze.git']);
           yield* git(repository, ['add', '.']);
@@ -91,8 +91,8 @@ describe('graph share publisher freeze cycle', () => {
           yield* indexer.index({cwd: repository, ensureVectors: false, threadnoteHome: contributorB});
           const afterJoin = yield* graphShareControlGetStatus(coordinatorUrl);
           expect(afterJoin.receipts.length).toBeGreaterThan(0);
-          yield* fs.writeFileString(path.join(repository, 'src', 'next.ts'), 'export const next = 2;\n');
-          yield* git(repository, ['add', 'src/next.ts']);
+          yield* fs.writeFileString(path.join(repository, 'src', 'next.py'), 'next = 2\n');
+          yield* git(repository, ['add', 'src/next.py']);
           yield* git(repository, [
             '-c',
             'user.name=Threadnote Test',
@@ -148,7 +148,7 @@ describe('graph share publisher freeze cycle', () => {
             path.join(repository, 'package.json'),
             '{"name":"graph-share-unrelated","private":true,"type":"module"}\n',
           );
-          yield* fs.writeFileString(path.join(repository, 'src', 'index.ts'), 'export const shared = 1;\n');
+          yield* fs.writeFileString(path.join(repository, 'src', 'index.py'), 'shared = 1\n');
           yield* git(repository, ['init', '-q', '--initial-branch=main']);
           yield* git(repository, ['remote', 'add', 'origin', 'https://github.com/acme/graph-share-unrelated.git']);
           yield* git(repository, ['add', '.']);
@@ -187,7 +187,7 @@ describe('graph share publisher freeze cycle', () => {
           });
           const bootstrapped = yield* runGraphPublisherBootstrap(config(publisherHome), {cas, cwd: repository});
           yield* git(repository, ['checkout', '--orphan', 'other']);
-          yield* fs.writeFileString(path.join(repository, 'src', 'index.ts'), 'export const other = 1;\n');
+          yield* fs.writeFileString(path.join(repository, 'src', 'index.py'), 'other = 1\n');
           yield* git(repository, ['add', '.']);
           yield* git(repository, [
             '-c',
@@ -224,7 +224,7 @@ describe('graph share publisher freeze cycle', () => {
             path.join(repository, 'package.json'),
             '{"name":"graph-share-clean-export","private":true,"type":"module"}\n',
           );
-          yield* fs.writeFileString(path.join(repository, 'src', 'index.ts'), 'export const shared = 1;\n');
+          yield* fs.writeFileString(path.join(repository, 'src', 'index.py'), 'shared = 1\n');
           yield* git(repository, ['init', '-q', '--initial-branch=main']);
           yield* git(repository, ['remote', 'add', 'origin', 'https://github.com/acme/graph-share-clean-export.git']);
           yield* git(repository, ['add', '.']);
@@ -262,8 +262,8 @@ describe('graph share publisher freeze cycle', () => {
             threadnoteHome: publisherHome,
           });
           const bootstrapped = yield* runGraphPublisherBootstrap(config(publisherHome), {cas, cwd: repository});
-          yield* fs.writeFileString(path.join(repository, 'src', 'next.ts'), 'export const next = 2;\n');
-          yield* git(repository, ['add', 'src/next.ts']);
+          yield* fs.writeFileString(path.join(repository, 'src', 'next.py'), 'next = 2\n');
+          yield* git(repository, ['add', 'src/next.py']);
           yield* git(repository, [
             '-c',
             'user.name=Threadnote Test',
@@ -303,7 +303,7 @@ describe('graph share publisher freeze cycle', () => {
             path.join(repository, 'package.json'),
             '{"name":"graph-share-export-fail","private":true,"type":"module"}\n',
           );
-          yield* fs.writeFileString(path.join(repository, 'src', 'index.ts'), 'export const shared = 1;\n');
+          yield* fs.writeFileString(path.join(repository, 'src', 'index.py'), 'shared = 1\n');
           yield* git(repository, ['init', '-q', '--initial-branch=main']);
           yield* git(repository, ['remote', 'add', 'origin', 'https://github.com/acme/graph-share-export-fail.git']);
           yield* git(repository, ['add', '.']);
@@ -341,8 +341,8 @@ describe('graph share publisher freeze cycle', () => {
             threadnoteHome: publisherHome,
           });
           const bootstrapped = yield* runGraphPublisherBootstrap(config(publisherHome), {cas, cwd: repository});
-          yield* fs.writeFileString(path.join(repository, 'src', 'next.ts'), 'export const next = 2;\n');
-          yield* git(repository, ['add', 'src/next.ts']);
+          yield* fs.writeFileString(path.join(repository, 'src', 'next.py'), 'next = 2\n');
+          yield* git(repository, ['add', 'src/next.py']);
           yield* git(repository, [
             '-c',
             'user.name=Threadnote Test',
@@ -352,7 +352,7 @@ describe('graph share publisher freeze cycle', () => {
             '-qm',
             'advance',
           ]);
-          yield* fs.writeFileString(path.join(repository, 'src', 'dirty.ts'), 'export const dirty = 1;\n');
+          yield* fs.writeFileString(path.join(repository, 'src', 'dirty.py'), 'dirty = 1\n');
           const phases = yield* Ref.make<string[]>([]);
           const failed = yield* advanceGraphPublisherFrontier(config(publisherHome), {
             cas,

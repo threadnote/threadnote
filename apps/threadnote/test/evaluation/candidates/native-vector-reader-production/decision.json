@@ -1,10 +1,19 @@
 {
   "schemaVersion": 1,
   "capability": "rust-owned-vector-reader",
-  "status": "unqualified",
-  "adoptionDecision": "rollback-required",
+  "status": "qualified",
+  "adoptionDecision": "promote-to-6.0.0",
   "privateMatchingCandidatePayloadExecutes": true,
-  "qualifiedPlatforms": [],
+  "qualifiedPlatforms": [
+    "bun-darwin-arm64",
+    "bun-darwin-x64",
+    "bun-linux-arm64",
+    "bun-linux-arm64-musl",
+    "bun-linux-x64-baseline",
+    "bun-linux-x64-baseline-musl",
+    "bun-windows-arm64",
+    "bun-windows-x64-baseline"
+  ],
   "qualificationCandidates": [
     "bun-darwin-arm64",
     "bun-darwin-x64",
@@ -28,20 +37,36 @@
     "exactQueryAndScalarOracleParityRequired": true,
     "productionCanonicalWorkerAndUnchangedDeadlinesRequired": true
   },
-  "evidence": {
-    "darwin": "local-results.json",
-    "linux": "linux-results.json",
-    "allProfiles": "platform-results.json"
-  },
-  "reason": "The shipped reader missed the unchanged R5 gates in complete paired comparisons. Darwin ARM64 10,000-vector dense p95 rose from 273.503 ms to 338.412 ms in pair 3, above the permitted 5% rise. Linux ARM64 musl 10,000-vector tied process-tree peak RSS rose 12.30% in pair 1, above the 10% limit. Ten of 32 required comparisons completed, and none of the eight profiles qualified.",
-  "qualificationRun": {
-    "candidateCommit": "18f102c69d4d6418d412c8e0c64974d3f98c34b1",
-    "candidateTree": "70645cd2155b227603a1da65c4931f986603e510",
-    "url": "https://github.com/threadnote/threadnote/actions/runs/45044682108"
-  },
+  "reason": "The frozen R5 candidate passed all four local performance cases on an Apple M1 Max. All eight native targets passed the numeric and compiled worker contracts. The release head requires its own CI results.",
   "rollout": "native-only-all-eight",
   "baseline": {
     "commit": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
     "method": "independently frozen TypeScript semantic executable; shared verified inference overlay explicitly identified"
+  },
+  "qualificationMethod": "local-performance-and-native-ci",
+  "candidate": {
+    "commit": "305e147754fd3088dd0b8ce46c495840fe0affdf",
+    "tree": "8cdbb3b7c5a7cb5edac7810a702baf8af8bf7903"
+  },
+  "historicalQualification": {
+    "status": "unqualified",
+    "adoptionDecision": "rollback-required",
+    "reason": "The shipped reader missed the unchanged R5 gates in complete paired comparisons. Darwin ARM64 10,000-vector dense p95 rose from 273.503 ms to 338.412 ms in pair 3, above the permitted 5% rise. Linux ARM64 musl 10,000-vector tied process-tree peak RSS rose 12.30% in pair 1, above the 10% limit. Ten of 32 required comparisons completed, and none of the eight profiles qualified.",
+    "qualificationRun": {
+      "candidateCommit": "18f102c69d4d6418d412c8e0c64974d3f98c34b1",
+      "candidateTree": "70645cd2155b227603a1da65c4931f986603e510",
+      "url": "https://github.com/threadnote/threadnote/actions/runs/45044682108"
+    },
+    "evidence": {
+      "darwin": "local-results.json",
+      "linux": "linux-results.json",
+      "allProfiles": "platform-results.json"
+    },
+    "hostedCampaign": "https://github.com/threadnote/threadnote/blob/5882dc7db71256f4d1151059fa6da527388f2515/apps/threadnote/test/evaluation/candidates/native-vector-reader-production/writer-qualification/results.md"
+  },
+  "evidence": {
+    "report": "https://github.com/threadnote/threadnote/blob/13d0581e4741cf7aff157974a65262b612c2bf45/apps/threadnote/test/evaluation/candidates/native-vector-reader-production/local-performance-platform-validation/results.md",
+    "localPerformance": "https://github.com/threadnote/threadnote/blob/13d0581e4741cf7aff157974a65262b612c2bf45/apps/threadnote/test/evaluation/candidates/native-vector-reader-production/local-performance-platform-validation/local-results.json",
+    "nativeCi": "https://github.com/threadnote/threadnote/blob/13d0581e4741cf7aff157974a65262b612c2bf45/apps/threadnote/test/evaluation/candidates/native-vector-reader-production/local-performance-platform-validation/platform-results.json"
   }
 }

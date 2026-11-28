@@ -7,6 +7,7 @@ import {
 } from '@threadnote/threadnote/dev_skills/manifest';
 import {integrationStaticFiles} from '@threadnote/threadnote/manager/static-files';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
+import {NATIVE_TYPESCRIPT_STAGING_DEFERRED_ENV} from './native-typescript-staging.js';
 import {runBunBuild} from './effect/bun-build.js';
 import {assertRuntimeSourceIdentity, runtimeSourceIdentity} from './runtime-source-identity.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -15,6 +16,12 @@ import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {javascriptStringLiteral, optionalNativePackageFallbackModule} from './effect/javascript.js';
 import {isDevelopmentBuildVersion} from './development-runtime.js';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {nativeTypeScriptHostKey} from '@threadnote/graph/typescript_native_asset_pins';
+import {CPU_TYPE_ARM64, CPU_TYPE_X86_64, machoCodeSignature} from '../tools/ci/macho-code-identity.js';
+import {
+  assertNativeTypeScriptAssetOutsideReleaseOutput,
+  stageReviewedNativeTypeScriptRuntimeAsset,
+} from '../tools/semantic/build-typescript-native.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -24,6 +31,21 @@ const PackageManifestSchema = Schema.Struct({
   packageManager: Schema.optional(Schema.String),
   version: Schema.optional(Schema.String),
 });
+
+/** The verifier record (tools/ci/signed-native-typescript.ts) that the relink compiles into the outer executable. */
+const SignedNativeTypeScriptRecordSchema = Schema.Struct({
+  kind: Schema.Literal('threadnote-signed-native-typescript-v1'),
+  host: Schema.Literals(['darwin-arm64', 'darwin-x64']),
+  sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+  cdhash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/u)),
+});
+const ReleaseIdentitySchema = Schema.Struct({
+  executable: Schema.String,
+  target: Schema.String,
+  version: Schema.String,
+  sourceIdentity: Schema.Unknown,
+});
+const RELINK_SIGNED_NATIVE_TYPESCRIPT = '--relink-signed-native-typescript';
 
 const ROOT_URL = new URL('..', import.meta.url);
 const RELEASE_DIRECTORIES = ['assets', 'config', 'cursor-plugin'] as const;
@@ -40,23 +62,17 @@ const build = Effect.gen(function* () {
   const path = yield* Path.Path;
   const root = yield* path.fromFileUrl(ROOT_URL);
   const outputRoot = path.join(root, 'dist');
+  yield* Effect.tryPromise({
+    try: () => assertNativeTypeScriptAssetOutsideReleaseOutput(Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR, root),
+    catch: cause => ScriptError.make({message: 'Native TypeScript release input preflight failed.', cause}),
+  });
   const manifest = yield* readPackageManifest(fs, path.join(root, 'package.json'));
   if (manifest.packageManager !== `bun@${Bun.version}`) {
     return yield* ScriptError.make({
       message: `Standalone builds require ${manifest.packageManager ?? 'an exact Bun packageManager pin'}; running bun@${Bun.version}.`,
     });
   }
-  const configuredDevelopmentVersion = Effect2.pipe(
-    Bun.env.THREADNOTE_DEVELOPMENT_BUILD_VERSION,
-    effectOptionalString =>
-      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
-  );
-  if (configuredDevelopmentVersion && !isDevelopmentBuildVersion(configuredDevelopmentVersion)) {
-    return yield* ScriptError.make({
-      message: 'THREADNOTE_DEVELOPMENT_BUILD_VERSION must be a SHA-bound local development version.',
-    });
-  }
-  const version = configuredDevelopmentVersion ?? manifest.version;
+  const version = yield* buildVersion(manifest);
   const nativeRuntimeVersion = manifest.dependencies?.[NATIVE_RUNTIME_PACKAGE];
   if (!version || !nativeRuntimeVersion || !EXACT_PACKAGE_VERSION.test(nativeRuntimeVersion)) {
     return yield* ScriptError.make({
@@ -110,34 +126,7 @@ const build = Effect.gen(function* () {
   }
 
   const sourceIdentity = yield* runtimeSourceIdentity(root, target);
-  yield* runBunBuild({
-    compile: {
-      autoloadBunfig: false,
-      autoloadDotenv: false,
-      autoloadPackageJson: false,
-      autoloadTsconfig: false,
-      outfile: executablePath,
-      target,
-    },
-    define: {
-      'process.env.MSGPACKR_NATIVE_ACCELERATION_DISABLED': JSON.stringify('true'),
-      THREADNOTE_STANDALONE: 'true',
-      THREADNOTE_VERSION: JSON.stringify(version),
-      THREADNOTE_RUNTIME_SOURCE_IDENTITY: JSON.stringify(sourceIdentity ?? null),
-    },
-    bytecode: true,
-    entrypoints: [path.join(root, 'apps', 'threadnote', 'src', 'standalone.ts')],
-    format: 'esm',
-    minify: true,
-    sourcemap: 'linked',
-    target: 'bun',
-  });
-  yield* assertRuntimeSourceIdentity(root, target, sourceIdentity).pipe(
-    Effect.onError(() => fs.remove(executablePath, {force: true}).pipe(Effect.ignore)),
-  );
-  if (!Effect2.pipe(target, EffectString.includes('windows'))) {
-    yield* fs.chmod(executablePath, 0o755);
-  }
+  yield* compileStandaloneExecutable({root, executablePath, target, version, sourceIdentity});
 
   yield* runBunBuild({
     entrypoints: [path.join(root, 'apps', 'threadnote', 'src', 'manager', 'browser.tsx')],
@@ -164,6 +153,13 @@ const build = Effect.gen(function* () {
   );
 
   const nativeRuntimeRoot = path.join(outputRoot, 'runtime');
+  // A glibc 2.17 build container cannot start the staging subprocess; it defers staging to its host (see below).
+  const typescriptNativeAssetPending = Bun.env[NATIVE_TYPESCRIPT_STAGING_DEFERRED_ENV] === '1';
+  if (typescriptNativeAssetPending && Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR)
+    return yield* ScriptError.make({
+      message: `${NATIVE_TYPESCRIPT_STAGING_DEFERRED_ENV} defers native TypeScript staging; do not also name its payload.`,
+    });
+  const typescriptNativeAsset = yield* stageTypeScriptNativeAsset(fs, path, root, outputRoot);
   if (Effect2.pipe(target, EffectString.includes('darwin'))) {
     yield* fs.makeDirectory(nativeRuntimeRoot, {recursive: true});
     const keychainLibrary = path.join(nativeRuntimeRoot, 'graph-keychain.dylib');
@@ -212,6 +208,7 @@ const build = Effect.gen(function* () {
   );
   yield* fs.remove(path.join(nativeRuntimeRoot, 'native'), {recursive: true, force: true});
   yield* fs.remove(path.join(outputRoot, 'llama', 'localBuilds'), {recursive: true, force: true});
+  yield* fs.remove(path.join(nativeRuntimeRoot, 'LLAMA-CPP-LICENSE'), {force: true});
   if (nativePackageRoot) {
     yield* fs.copy(path.join(nativePackageRoot, 'bins'), path.join(nativeRuntimeRoot, 'native'), {overwrite: true});
     yield* fs.copyFile(path.join(nativePackageRoot, 'LICENSE'), path.join(nativeRuntimeRoot, 'NATIVE-LICENSE'));
@@ -228,31 +225,229 @@ const build = Effect.gen(function* () {
   );
   yield* fs.writeFileString(
     path.join(outputRoot, 'release.json'),
-    `${JSON.stringify(
-      {
-        codeGraphAssets: {
-          manifest: 'assets/code-graph/manifest.json',
-          version: 1,
-        },
-        codeSignature: Effect2.pipe(target, EffectString.includes('windows'))
-          ? 'unsigned'
-          : Effect2.pipe(target, EffectString.includes('darwin'))
-            ? 'developer-id'
-            : 'none',
-        executable: executableName,
-        devSkills: {digest: devSkills.digest, manifest: 'config/dev-skills.json', protocol: devSkills.workflowProtocol},
-        nativeRuntime: `runtime/${NATIVE_RUNTIME_PACKAGE}.js`,
-        nativeRuntimePackage: nativePackage ?? 'portable-local-build',
-        runtime: `bun-${Bun.version}`,
-        target,
-        sourceIdentity: sourceIdentity ?? null,
-        version,
+    releaseMetadataText({
+      codeGraphAssets: {
+        manifest: 'assets/code-graph/manifest.json',
+        version: 1,
       },
-      null,
-      2,
-    )}\n`,
+      codeSignature: Effect2.pipe(target, EffectString.includes('windows'))
+        ? 'unsigned'
+        : Effect2.pipe(target, EffectString.includes('darwin'))
+          ? 'developer-id'
+          : 'none',
+      executable: executableName,
+      devSkills: {digest: devSkills.digest, manifest: 'config/dev-skills.json', protocol: devSkills.workflowProtocol},
+      nativeRuntime: `runtime/${NATIVE_RUNTIME_PACKAGE}.js`,
+      ...(typescriptNativeAsset ? {typescriptNativeAsset} : {}),
+      ...(typescriptNativeAssetPending ? {typescriptNativeAssetPending: true} : {}),
+      nativeRuntimePackage: nativePackage ?? 'portable-local-build',
+      runtime: `bun-${Bun.version}`,
+      target,
+      sourceIdentity: sourceIdentity ?? null,
+      version,
+    }),
   );
   yield* Console.log(`Built standalone Threadnote ${version} for ${target}: ${executablePath}`);
+});
+
+const buildVersion = Effect.fn('build.version')(function* (manifest: typeof PackageManifestSchema.Type) {
+  const configuredDevelopmentVersion = Effect2.pipe(
+    Bun.env.THREADNOTE_DEVELOPMENT_BUILD_VERSION,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
+  if (configuredDevelopmentVersion && !isDevelopmentBuildVersion(configuredDevelopmentVersion)) {
+    return yield* ScriptError.make({
+      message: 'THREADNOTE_DEVELOPMENT_BUILD_VERSION must be a SHA-bound local development version.',
+    });
+  }
+  return configuredDevelopmentVersion ?? manifest.version;
+});
+
+/** The one standalone compile, shared by the build and the signed-release relink. */
+const compileStandaloneExecutable = Effect.fn('build.compileStandaloneExecutable')(function* (input: {
+  readonly root: string;
+  readonly executablePath: string;
+  readonly target: Bun.Build.CompileTarget;
+  readonly version: string;
+  readonly sourceIdentity: Effect.Success<ReturnType<typeof runtimeSourceIdentity>>;
+  readonly signedNativeTypeScript?: {readonly host: string; readonly sha256: string; readonly cdhash: string};
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const {root, executablePath, target, version, sourceIdentity, signedNativeTypeScript} = input;
+  yield* runBunBuild({
+    compile: {
+      autoloadBunfig: false,
+      autoloadDotenv: false,
+      autoloadPackageJson: false,
+      autoloadTsconfig: false,
+      outfile: executablePath,
+      target,
+    },
+    define: {
+      'process.env.MSGPACKR_NATIVE_ACCELERATION_DISABLED': JSON.stringify('true'),
+      THREADNOTE_STANDALONE: 'true',
+      THREADNOTE_VERSION: JSON.stringify(version),
+      THREADNOTE_RUNTIME_SOURCE_IDENTITY: JSON.stringify(sourceIdentity ?? null),
+      // Always defined, so a compiled build never reads a runtime global of that name: null outside a signed release.
+      THREADNOTE_SIGNED_NATIVE_TYPESCRIPT: JSON.stringify(
+        signedNativeTypeScript
+          ? {
+              host: signedNativeTypeScript.host,
+              sha256: signedNativeTypeScript.sha256,
+              cdhash: signedNativeTypeScript.cdhash,
+            }
+          : null,
+      ),
+    },
+    bytecode: true,
+    entrypoints: [path.join(root, 'apps', 'threadnote', 'src', 'standalone.ts')],
+    format: 'esm',
+    minify: true,
+    sourcemap: 'linked',
+    target: 'bun',
+  });
+  yield* assertRuntimeSourceIdentity(root, target, sourceIdentity).pipe(
+    Effect.onError(() => fs.remove(executablePath, {force: true}).pipe(Effect.ignore)),
+  );
+  if (!Effect2.pipe(target, EffectString.includes('windows'))) {
+    yield* fs.chmod(executablePath, 0o755);
+  }
+});
+
+/**
+ * Publish (macOS only): after `runtime/typescript/tsc` is signed and verified, recompile only the outer executable
+ * with the verified signed digest and cdhash, before the outer executable is signed. Everything else in `dist` stays.
+ * The record must describe the bytes now in `dist`, and the source, version and target must equal the staged release.
+ * The compiled-in SHA-256 and cdhash are recomputed from the staged compiler, never taken from the record alone.
+ */
+const relinkSignedNativeTypeScript = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* path.fromFileUrl(ROOT_URL);
+  const outputRoot = path.join(root, 'dist');
+  const recordPath = process.argv[process.argv.indexOf(RELINK_SIGNED_NATIVE_TYPESCRIPT) + 1];
+  if (!recordPath)
+    return yield* ScriptError.make({message: `${RELINK_SIGNED_NATIVE_TYPESCRIPT} needs the verifier record path.`});
+  const decodeJson = <S extends Schema.Top>(schema: S, file: string) =>
+    fs.readFileString(file).pipe(
+      Effect.flatMap(content =>
+        Effect.try({
+          try: (): unknown => JSON.parse(content),
+          catch: cause => ScriptError.make({message: `Could not parse ${file}.`, cause}),
+        }),
+      ),
+      Effect.flatMap(value =>
+        Schema.decodeUnknownEffect(schema)(value).pipe(
+          Effect.mapError(cause => ScriptError.make({message: `Unexpected content in ${file}.`, cause})),
+        ),
+      ),
+    );
+  const record = yield* decodeJson(SignedNativeTypeScriptRecordSchema, recordPath);
+  const target = buildTarget();
+  assertNativeTargetMatchesHost(target);
+  if (
+    !Effect2.pipe(target, EffectString.includes('darwin')) ||
+    record.host !== nativeTypeScriptHostKey(process.platform, process.arch)
+  )
+    return yield* ScriptError.make({message: `The signed native TypeScript record does not match ${target}.`});
+  const manifest = yield* readPackageManifest(fs, path.join(root, 'package.json'));
+  if (manifest.packageManager !== `bun@${Bun.version}`)
+    return yield* ScriptError.make({message: `The relink requires ${manifest.packageManager ?? 'an exact Bun pin'}.`});
+  const version = yield* buildVersion(manifest);
+  const release = yield* decodeJson(ReleaseIdentitySchema, path.join(outputRoot, 'release.json'));
+  const sourceIdentity = yield* runtimeSourceIdentity(root, target);
+  if (
+    release.executable !== 'threadnote' ||
+    release.target !== target ||
+    release.version !== version ||
+    JSON.stringify(release.sourceIdentity) !== JSON.stringify(sourceIdentity ?? null)
+  )
+    return yield* ScriptError.make({message: 'The staged release differs from this source, version or target.'});
+  const compiler = yield* fs.readFile(path.join(outputRoot, 'runtime', 'typescript', 'tsc'));
+  const signature = yield* Effect.try({
+    try: () => machoCodeSignature(compiler, record.host === 'darwin-arm64' ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64),
+    catch: cause => ScriptError.make({message: 'Could not read the staged native TypeScript signature.', cause}),
+  });
+  const staged = {host: record.host, sha256: yield* sha256Hex(compiler), cdhash: signature.cdhash};
+  if (staged.sha256 !== record.sha256 || staged.cdhash !== record.cdhash || signature.violations.length > 0)
+    return yield* ScriptError.make({message: 'The staged native TypeScript compiler is not the verified signed one.'});
+  const executablePath = path.join(outputRoot, release.executable);
+  yield* compileStandaloneExecutable({
+    root,
+    executablePath,
+    target,
+    version,
+    sourceIdentity,
+    signedNativeTypeScript: staged,
+  });
+  yield* Console.log(`Relinked ${executablePath} with signed native TypeScript ${staged.sha256} (${staged.cdhash}).`);
+});
+
+// release.json key order. Host staging rewrites the file through this order, so it is byte-identical to a host build.
+const RELEASE_METADATA_KEYS = [
+  'codeGraphAssets',
+  'codeSignature',
+  'executable',
+  'devSkills',
+  'nativeRuntime',
+  'typescriptNativeAsset',
+  'typescriptNativeAssetPending',
+  'nativeRuntimePackage',
+  'runtime',
+  'target',
+  'sourceIdentity',
+  'version',
+] as const;
+
+/** The exact release.json bytes for these fields; an unknown field is refused instead of being reordered. */
+export function releaseMetadataText(metadata: Readonly<Record<string, unknown>>): string {
+  const known = new Set<string>(RELEASE_METADATA_KEYS);
+  for (const key of EffectRecord.keys(metadata))
+    if (!known.has(key)) throw new Error(`release.json field ${key} has no declared position.`);
+  const ordered = EffectRecord.fromEntries(
+    EffectArray.flatMap(RELEASE_METADATA_KEYS, key => (key in metadata ? [[key, metadata[key]] as const] : [])),
+  );
+  return `${JSON.stringify(ordered, null, 2)}\n`;
+}
+
+/** A release input is a verified derivative payload, never the old npm native binary. */
+export const stageTypeScriptNativeAsset = Effect.fn('build.stageTypeScriptNativeAsset')(function* (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  root: string,
+  outputRoot: string,
+) {
+  const staged = path.join(outputRoot, 'runtime', 'typescript');
+  const assetRoot = Bun.env.THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR;
+  if (!assetRoot) {
+    if (yield* fs.exists(staged)) yield* fs.remove(staged, {recursive: true});
+    return undefined;
+  }
+  // The release-output preflight owns source/output separation, including aliased staged paths; assembly owns
+  // canonical paths and output freshness. Both receive the real paths resolved here.
+  yield* Effect.tryPromise({
+    try: () => assertNativeTypeScriptAssetOutsideReleaseOutput(assetRoot, root),
+    catch: cause => ScriptError.make({message: 'Native TypeScript release input preflight failed.', cause}),
+  });
+  const sourceReal = yield* fs.realPath(path.resolve(assetRoot));
+  const rootReal = yield* fs.realPath(root);
+  if (yield* fs.exists(staged)) yield* fs.remove(staged, {recursive: true});
+  yield* fs.makeDirectory(path.dirname(staged), {recursive: true});
+  const stagedReal = path.join(yield* fs.realPath(path.dirname(staged)), path.basename(staged));
+  const manifest = yield* Effect.tryPromise({
+    try: () => stageReviewedNativeTypeScriptRuntimeAsset(sourceReal, stagedReal, rootReal),
+    catch: cause => ScriptError.make({message: 'Could not stage the reviewed native TypeScript asset.', cause}),
+  });
+  return {
+    manifest: 'runtime/typescript/manifest.json',
+    sdk: 'runtime/typescript/sdk',
+    frontend: 'runtime/typescript/frontend',
+    sdkTreeDigest: manifest.frontend.derivedSdkTreeSha256,
+    version: manifest.version,
+    provenance: manifest.provenance.kind,
+  };
 });
 
 function readPackageManifest(fs: FileSystem.FileSystem, path: string) {
@@ -629,4 +824,10 @@ export const buildDevSkillsManifest = Effect.fn('build.devSkillsManifest')(funct
   return parseDevSkillsManifest({...manifest, digest: yield* sha256Hex(JSON.stringify(manifest))});
 });
 
-if (import.meta.main) BunRuntime.runMain(provideScriptLayer(build, BunServices.layer));
+if (import.meta.main)
+  BunRuntime.runMain(
+    provideScriptLayer(
+      process.argv.includes(RELINK_SIGNED_NATIVE_TYPESCRIPT) ? relinkSignedNativeTypeScript : build,
+      BunServices.layer,
+    ),
+  );

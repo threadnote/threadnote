@@ -4,6 +4,7 @@ import {graphShareContributionFixture} from '../helpers/graph-share-contribution
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {describe, expect, it} from 'vitest';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 import {mkdir, mkdtemp, readFile, rm, unlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -15,7 +16,7 @@ import * as Effect from 'effect';
 import {Array as EffectArray} from 'effect';
 
 describe('MCP-owned passive graph contribution retries', () => {
-  it.each(['persisted queue', 'strict graph impact', 'dirty graph then clean restart'] as const)(
+  native(it.each(['persisted queue', 'strict graph impact', 'dirty graph then clean restart'] as const))(
     'recovers automatically after an outage from %s',
     async source => {
       const root = await mkdtemp(join(tmpdir(), 'threadnote-mcp-contribution-retry-'));

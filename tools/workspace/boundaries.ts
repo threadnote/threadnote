@@ -1,5 +1,6 @@
 import {Array as EffectArray} from 'effect';
-import ts from 'typescript-compiler';
+import * as ts from 'typescript/ast';
+import type {TypeScriptSyntaxSession} from './typescript-syntax.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -71,7 +72,19 @@ const allowedDependencies: Readonly<Record<string, readonly string[]>> = {
   inference: ['platform', 'store'],
   recall: ['platform', 'store', 'memory', 'inference', 'workspace', 'protocol'],
   graph: ['platform', 'store', 'workspace', 'inference', 'protocol'],
-  context: ['platform', 'store', 'memory', 'inference', 'recall', 'graph', 'workspace', 'protocol', 'integrations'],
+  semantic: ['platform', 'store', 'workspace', 'protocol'],
+  context: [
+    'platform',
+    'store',
+    'memory',
+    'inference',
+    'recall',
+    'graph',
+    'semantic',
+    'workspace',
+    'protocol',
+    'integrations',
+  ],
   'remote-memory': ['platform', 'store', 'memory', 'protocol', 'recall', 'workspace', 'context', 'graph'],
   'integration-core': ['platform', 'store', 'workspace'],
   'integration-runtime': ['integration-core', 'platform', 'store', 'workspace'],
@@ -106,40 +119,55 @@ const allowedDependencies: Readonly<Record<string, readonly string[]>> = {
   'integration-linear': ['integration-core', 'integration-runtime', 'platform', 'store', 'workspace', 'manager'],
 };
 
-export function moduleSpecifiers(path: string, content: string): readonly string[] {
-  const source = ts.createSourceFile(path, content, ts.ScriptTarget.Latest, true);
-  const imports = new Set<string>();
-  function visit(node: ts.Node): void {
-    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
-      if (ts.isStringLiteral(node.moduleSpecifier)) imports.add(node.moduleSpecifier.text);
-    } else if (
-      ts.isCallExpression(node) &&
-      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-        (ts.isIdentifier(node.expression) && node.expression.text === 'require'))
-    ) {
-      const argument = node.arguments[0];
-      if (argument && ts.isStringLiteralLike(argument)) imports.add(argument.text);
-    } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
-      if (ts.isStringLiteral(node.argument.literal)) imports.add(node.argument.literal.text);
+export function analyzeSourceModule(
+  session: TypeScriptSyntaxSession,
+  path: string,
+  content: string,
+): Promise<SourceModule> {
+  return session.withSourceFile({fileName: path, text: content}, source => {
+    const imports = new Set<string>();
+    function visit(node: ts.Node): void {
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
+        if (ts.isStringLiteral(node.moduleSpecifier)) imports.add(node.moduleSpecifier.text);
+      } else if (
+        ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+      ) {
+        const argument = node.arguments[0];
+        if (argument && ts.isStringLiteralLikeNode(argument)) imports.add(argument.text);
+      } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+        if (ts.isStringLiteral(node.argument.literal)) imports.add(node.argument.literal.text);
+      }
+      node.forEachChild(visit);
     }
-    ts.forEachChild(node, visit);
-  }
-  visit(source);
-  return [...imports].sort();
+    visit(source);
+    const modules: string[] = [];
+    for (const statement of source.statements) {
+      if (
+        ts.isModuleDeclaration(statement) &&
+        ts.isStringLiteral(statement.name) &&
+        Effect.pipe(statement.name.text, EffectString.startsWith('virtual:'))
+      )
+        modules.push(statement.name.text);
+    }
+    return {path, imports: [...imports].sort(), virtualModules: modules.sort()};
+  });
 }
 
-export function declaredVirtualModules(path: string, content: string): readonly string[] {
-  const source = ts.createSourceFile(path, content, ts.ScriptTarget.Latest, true);
-  const modules: string[] = [];
-  for (const statement of source.statements) {
-    if (
-      ts.isModuleDeclaration(statement) &&
-      ts.isStringLiteral(statement.name) &&
-      Effect.pipe(statement.name.text, EffectString.startsWith('virtual:'))
-    )
-      modules.push(statement.name.text);
-  }
-  return modules.sort();
+export async function moduleSpecifiers(
+  session: TypeScriptSyntaxSession,
+  path: string,
+  content: string,
+): Promise<readonly string[]> {
+  return (await analyzeSourceModule(session, path, content)).imports;
+}
+export async function declaredVirtualModules(
+  session: TypeScriptSyntaxSession,
+  path: string,
+  content: string,
+): Promise<readonly string[]> {
+  return (await analyzeSourceModule(session, path, content)).virtualModules ?? [];
 }
 
 function relativeTarget(source: string, specifier: string): string {

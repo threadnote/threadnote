@@ -1,3 +1,4 @@
+import {requireNativeTypeScriptAsset} from './support/native-typescript-preflight.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -223,4 +224,7 @@ const sourceGit = Effect.fn('benchmarkCodeGraphWorkset.git')((args: readonly str
   ),
 );
 
-if (import.meta.main) BunRuntime.runMain(provideScriptLayer(benchmarkCodeGraphWorkset, ApplicationLayer));
+if (import.meta.main) {
+  requireNativeTypeScriptAsset('bench:code-graph-workset');
+  BunRuntime.runMain(provideScriptLayer(benchmarkCodeGraphWorkset, ApplicationLayer));
+}

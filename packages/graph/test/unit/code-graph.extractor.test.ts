@@ -2,14 +2,16 @@ import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {readFileSync, readdirSync, statSync} from '@threadnote/testing/node-fs';
 import {join, relative} from '@threadnote/testing/node-path';
 import * as FC from 'fast-check';
-import {describe, expect, it} from 'vitest';
+import {beforeAll, describe, expect, it, afterAll} from 'vitest';
+import {isNativeTypeScriptSource, type NativeTypeScriptSession} from '@threadnote/graph/typescript_runtime';
+import {native, createNativeTypeScriptTestSession} from '../helpers/native-typescript-session.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   createPackageAttributor,
   createRepositoryFactAttributor,
   createRepositoryFactResolver,
-  extractRepositoryFacts,
-  extractRepositoryFileFacts,
+  extractRepositoryFacts as nativeRepositoryFacts,
+  extractRepositoryFileFacts as nativeRepositoryFileFacts,
 } from '@threadnote/graph/extractor';
 import {
   createRepositoryFactAttributionContext,
@@ -22,19 +24,43 @@ import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
+// One native session serves this file; each operation has its own budget.
+let session: Promise<NativeTypeScriptSession> | undefined;
+afterAll(async () => {
+  await (await session)?.close();
+});
+const currentSession = () => (session ??= createNativeTypeScriptTestSession());
+const extractRepositoryFacts = async (
+  files: readonly CodeGraphInventoryFile[],
+  observer?: Parameters<typeof nativeRepositoryFacts>[1],
+) =>
+  nativeRepositoryFacts(
+    files,
+    observer,
+    EffectArray.some(files, file => isNativeTypeScriptSource(file.path)) ? await currentSession() : undefined,
+  );
+const extractRepositoryFileFacts = async (files: readonly CodeGraphInventoryFile[]) =>
+  nativeRepositoryFileFacts(
+    files,
+    undefined,
+    EffectArray.some(files, file => isNativeTypeScriptSource(file.path)) ? await currentSession() : undefined,
+  );
 const REPOSITORY = join(
   import.meta.dirname,
   '../../../../apps/threadnote/test/evaluation/fixtures/code-graph-v1/repository',
 );
 
-describe('native code graph extraction', () => {
+native(describe)('native code graph extraction', () => {
   const files = fixtureFiles(REPOSITORY);
-  const facts = extractRepositoryFacts(files);
-  const symbols = EffectArray.flatMap(facts, file => file.symbols);
-  const edges = EffectArray.flatMap(facts, file => file.edges);
+  let facts: Awaited<ReturnType<typeof nativeRepositoryFacts>>;
+  beforeAll(async () => {
+    facts = await extractRepositoryFacts(files);
+  });
+  const symbols = () => EffectArray.flatMap(facts, file => file.symbols);
+  const edges = () => EffectArray.flatMap(facts, file => file.edges);
 
-  it('extracts the reviewed symbol contract with repository-relative evidence', () => {
-    expect(symbols).toEqual(
+  it('extracts the reviewed symbol contract with repository-relative evidence', async () => {
+    expect(symbols()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({kind: 'function', name: 'withExclusiveFileLock', path: 'packages/core/src/lock.ts'}),
         expect.objectContaining({kind: 'class', name: 'FileLock', path: 'packages/core/src/lock.ts'}),
@@ -46,7 +72,7 @@ describe('native code graph extraction', () => {
     );
     expect(
       EffectArray.every(
-        symbols,
+        symbols(),
         symbol =>
           !Effect.pipe(symbol.path, EffectString.startsWith('/')) &&
           !Effect.pipe(symbol.path, EffectString.includes('\\')),
@@ -54,9 +80,9 @@ describe('native code graph extraction', () => {
     ).toBe(true);
   });
 
-  it('resolves only grounded cross-file relationships and keeps provenance explicit', () => {
+  it('resolves only grounded cross-file relationships and keeps provenance explicit', async () => {
     const keys = EffectArray.map(
-      edges,
+      edges(),
       edge => `${edge.sourceName}:${edge.relation}:${edge.targetName}:${edge.provenance}`,
     );
     expect(keys).toEqual(
@@ -71,16 +97,19 @@ describe('native code graph extraction', () => {
     );
     expect(
       EffectArray.every(
-        EffectArray.filter(edges, edge => edge.provenance === 'resolved'),
+        EffectArray.filter(edges(), edge => edge.provenance === 'resolved'),
         edge => Boolean(edge.sourceId && edge.targetId),
       ),
     ).toBe(true);
-    expect(EffectArray.some(edges, edge => edge.targetName === 'Error' && edge.provenance === 'resolved')).toBe(false);
+    expect(EffectArray.some(edges(), edge => edge.targetName === 'Error' && edge.provenance === 'resolved')).toBe(
+      false,
+    );
   });
 
-  it('resolves file batches equivalently while retaining only symbols and reexports globally', () => {
+  it('resolves file batches equivalently while retaining only symbols and reexports globally', async () => {
     const attributePackages = createPackageAttributor(files);
-    const attributed = EffectArray.map(files, file => attributePackages(extractRepositoryFileFacts([file]))[0]);
+    const attributed = [];
+    for (const file of files) attributed.push(attributePackages(await extractRepositoryFileFacts([file]))[0]);
     const resolver = createRepositoryFactResolver(
       EffectArray.map(attributed, file => ({
         diagnostics: [],
@@ -95,7 +124,7 @@ describe('native code graph extraction', () => {
     expect(streamed).toEqual(facts);
   });
 
-  it('rehydrates deferred raw references before applying Node workspace scopes', () => {
+  it('rehydrates deferred raw references before applying Node workspace scopes', async () => {
     const cachedFiles = [
       sourceFile('package.json', '{"name":"cached-workspace"}\n'),
       sourceFile('dependency.ts', 'export function dependency(): number { return 1; }\n'),
@@ -105,7 +134,7 @@ describe('native code graph extraction', () => {
           'export function consumer(): number { return dependency(); }\n',
       ),
     ];
-    const raw = extractRepositoryFileFacts(cachedFiles);
+    const raw = await extractRepositoryFileFacts(cachedFiles);
     expect(
       EffectOption.getOrUndefined(
         EffectOption.map(
@@ -170,13 +199,13 @@ describe('native code graph extraction', () => {
     ).toMatchObject({provenance: 'resolved', targetId: dependency?.id, targetName: 'dependency'});
   });
 
-  it('resolves documentation through explicit global lookup keys only', () => {
+  it('resolves documentation through explicit global lookup keys only', async () => {
     const cachedFiles = [
       sourceFile('src/service.ts', 'class Service { private privateValue(): number { return 1; } }\n'),
       sourceFile('docs/note.md', '# Internals\n\nSee `privateValue`.\n'),
     ];
     const workspace = discoverManifestWorkspace(cachedFiles);
-    const raw = extractRepositoryFileFacts(cachedFiles);
+    const raw = await extractRepositoryFileFacts(cachedFiles);
     const derived = deriveCachedCodeGraphFacts(cachedFiles, workspace, raw);
     const privateSymbol = EffectOption.getOrUndefined(
       EffectArray.findFirst(
@@ -235,7 +264,7 @@ describe('native code graph extraction', () => {
     ).toMatchObject({provenance: 'syntactic', targetId: explicitPrivateSymbol?.id, targetName: 'privateValue'});
 
     const documentationFiles = [sourceFile('docs/a.md', 'See `Target`.\n'), sourceFile('docs/b.md', '# Target\n')];
-    const rawDocumentation = extractRepositoryFacts(documentationFiles);
+    const rawDocumentation = await extractRepositoryFacts(documentationFiles);
     const rawHeading = EffectOption.getOrUndefined(
       EffectArray.findFirst(
         EffectArray.flatMap(rawDocumentation, file => file.symbols),
@@ -245,7 +274,7 @@ describe('native code graph extraction', () => {
     const derivedDocumentation = deriveCachedCodeGraphFacts(
       documentationFiles,
       discoverManifestWorkspace(documentationFiles),
-      extractRepositoryFileFacts(documentationFiles),
+      await extractRepositoryFileFacts(documentationFiles),
     );
     const resolvedDocumentation = createRepositoryFactResolver(derivedDocumentation, documentationFiles).resolve(
       derivedDocumentation,
@@ -267,7 +296,7 @@ describe('native code graph extraction', () => {
     expect(derivedDocumentEdge?.targetId).toBe(rawHeading?.id);
   });
 
-  it('reuses immutable repository attribution across materialization batches', () => {
+  it('reuses immutable repository attribution across materialization batches', async () => {
     const cachedFiles = [
       sourceFile('package.json', '{"name":"root-package"}\n'),
       sourceFile('packages/app/package.json', '{"name":"nested-package"}\n'),
@@ -280,7 +309,7 @@ describe('native code graph extraction', () => {
       sourceFile('packages/application/src/unrelated.ts', 'export const unrelated = true;\n'),
     ];
     const workspace = discoverManifestWorkspace(cachedFiles);
-    const raw = extractRepositoryFileFacts(cachedFiles);
+    const raw = await extractRepositoryFileFacts(cachedFiles);
     const attributeFacts = createCachedCodeGraphFactsAttributor(cachedFiles, workspace);
     const streamed = EffectArray.flatMap(raw, file => attributeFacts([file]));
     const rebuiltPerBatch = EffectArray.flatMap(raw, file =>
@@ -307,9 +336,9 @@ describe('native code graph extraction', () => {
     ).toBe('root-package');
   });
 
-  it('replays repository attribution from bounded context plus exact path-membership probes', () => {
-    FC.assert(
-      FC.property(FC.integer({max: 100, min: 0}), packageIndex => {
+  it('replays repository attribution from bounded context plus exact path-membership probes', async () => {
+    await FC.assert(
+      FC.asyncProperty(FC.integer({max: 100, min: 0}), async packageIndex => {
         const root = `packages/package-${packageIndex}`;
         const contextFiles = [sourceFile(`${root}/package.json`, `{"name":"package-${packageIndex}"}\n`)];
         const dependency = sourceFile(
@@ -322,7 +351,7 @@ describe('native code graph extraction', () => {
             'export function consumer(): number { return dependency(); }\n',
         );
         const repositoryFiles = [...contextFiles, dependency, consumer];
-        const rawConsumer = extractRepositoryFileFacts([consumer]);
+        const rawConsumer = await extractRepositoryFileFacts([consumer]);
         const candidates = repositoryFactCandidatePaths(contextFiles, rawConsumer);
         const attribution = createRepositoryFactAttributionContext(contextFiles);
         const repositoryPaths = new Set(EffectArray.map(repositoryFiles, file => file.path));
@@ -347,7 +376,7 @@ describe('native code graph extraction', () => {
     );
   });
 
-  it('reuses parsed manifest context across candidate discovery and exact attribution', () => {
+  it('reuses parsed manifest context across candidate discovery and exact attribution', async () => {
     let manifestReads = 0;
     const manifest = sourceFile('packages/app/package.json', '{"name":"app"}\n');
     Object.defineProperty(manifest, 'content', {
@@ -366,7 +395,7 @@ describe('native code graph extraction', () => {
       'packages/app/src/consumer.ts',
       'import {dependency} from "./dependency.js";\n' + 'export function consumer(): number { return dependency(); }\n',
     );
-    const rawConsumer = extractRepositoryFileFacts([consumer]);
+    const rawConsumer = await extractRepositoryFileFacts([consumer]);
     const expected = createRepositoryFactAttributor([manifest, dependency, consumer])(rawConsumer);
     manifestReads = 0;
     const attribution = createRepositoryFactAttributionContext([manifest]);
@@ -379,8 +408,8 @@ describe('native code graph extraction', () => {
     expect(manifestReads).toBe(parsedManifestReads);
   });
 
-  it('indexes documentation without promoting prose similarity to a source dependency', () => {
-    expect(symbols).toEqual(
+  it('indexes documentation without promoting prose similarity to a source dependency', async () => {
+    expect(symbols()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: 'heading',
@@ -390,13 +419,13 @@ describe('native code graph extraction', () => {
       ]),
     );
     expect(
-      EffectArray.some(edges, edge => edge.provenance === 'model' || edge.relation === 'semantic_association'),
+      EffectArray.some(edges(), edge => edge.provenance === 'model' || edge.relation === 'semantic_association'),
     ).toBe(false);
   });
 
-  it('keeps explicit document and media links as resolvable graph evidence', () => {
+  it('keeps explicit document and media links as resolvable graph evidence', async () => {
     const linked = EffectArray.flatMap(
-      extractRepositoryFacts([
+      await extractRepositoryFacts([
         sourceFile(
           'docs/architecture.md',
           '# Retry design\n\nSee [the flow](../diagrams/retry-flow.png) and `docs/reliability.pdf`.\n',
@@ -421,8 +450,8 @@ describe('native code graph extraction', () => {
     ).toBe(true);
   });
 
-  it('proves imported targets through their module instead of globally unique names', () => {
-    const resolved = extractRepositoryFacts([
+  it('proves imported targets through their module instead of globally unique names', async () => {
+    const resolved = await extractRepositoryFacts([
       sourceFile('src/a.ts', 'export function collision(): string { return "a"; }\n'),
       sourceFile('src/b.ts', 'export function collision(): string { return "b"; }\n'),
       sourceFile(
@@ -459,16 +488,16 @@ describe('native code graph extraction', () => {
     expect(missingCall?.targetId).toBeUndefined();
   });
 
-  it('resolves randomized TypeScript overload groups without collapsing their symbols', () => {
-    FC.assert(
-      FC.property(
+  it('resolves randomized TypeScript overload groups without collapsing their symbols', async () => {
+    await FC.assert(
+      FC.asyncProperty(
         FC.uniqueArray(FC.integer({max: 4, min: 0}), {maxLength: 5, minLength: 2}),
         FC.integer({max: 100, min: 0}),
-        (generatedArities, selectedIndex) => {
+        async (generatedArities, selectedIndex) => {
           const arities = [...generatedArities].sort((left, right) => left - right);
           const selectedArity = arities[selectedIndex % arities.length];
           const secondArity = arities[(selectedIndex + 1) % arities.length];
-          const resolved = extractRepositoryFacts([
+          const resolved = await extractRepositoryFacts([
             sourceFile('src/overloads.ts', overloadFixture(arities)),
             sourceFile('src/use-overloads.ts', overloadUseFixture(selectedArity, secondArity)),
           ]);
@@ -536,8 +565,8 @@ describe('native code graph extraction', () => {
     );
   });
 
-  it('scopes repeated TypeScript path aliases to the importing package', () => {
-    const scoped = extractRepositoryFacts([
+  it('scopes repeated TypeScript path aliases to the importing package', async () => {
+    const scoped = await extractRepositoryFacts([
       sourceFile(
         'packages/a/tsconfig.json',
         JSON.stringify({compilerOptions: {baseUrl: '.', paths: {'@/*': ['src/*']}}}),
@@ -574,8 +603,8 @@ describe('native code graph extraction', () => {
     expect(targetPath('useB')).toBe('packages/b/src/shared.ts');
   });
 
-  it('uses the deepest package and TypeScript scopes inside a nested monorepo', () => {
-    const nested = extractRepositoryFacts([
+  it('uses the deepest package and TypeScript scopes inside a nested monorepo', async () => {
+    const nested = await extractRepositoryFacts([
       sourceFile(
         'package.json',
         JSON.stringify({name: '@fixture/root', workspaces: ['apps/*', 'apps/app/modules/*', 'libs/*']}),
@@ -661,7 +690,7 @@ describe('native code graph extraction', () => {
     ).toBe('@fixture/nested-app');
   });
 
-  it('selects each alias project scope once per importing source', () => {
+  it('selects each alias project scope once per importing source', async () => {
     let scopeScans = 0;
     const projectFiles = Array.from({length: 20}, (_, index) => {
       const root = `packages/p${Effect.pipe(String(index), EffectString.padStart(2, '0'))}`;
@@ -685,13 +714,13 @@ describe('native code graph extraction', () => {
       ),
     ];
 
-    extractRepositoryFacts(files, {onAliasScopeScan: () => (scopeScans += 1)});
+    await extractRepositoryFacts(files, {onAliasScopeScan: () => (scopeScans += 1)});
 
     expect(scopeScans).toBe(1);
   });
 
-  it('does not resolve relative imports that escape above the repository root', () => {
-    const escaped = extractRepositoryFacts([
+  it('does not resolve relative imports that escape above the repository root', async () => {
+    const escaped = await extractRepositoryFacts([
       sourceFile('src/foo.ts', 'export function phantom(): string { return "inside"; }\n'),
       sourceFile(
         'src/deep/use.ts',
@@ -709,8 +738,8 @@ describe('native code graph extraction', () => {
     expect(call?.targetId).toBeUndefined();
   });
 
-  it('fails closed for ambiguous package export conditions', () => {
-    const ambiguous = extractRepositoryFacts([
+  it('fails closed for ambiguous package export conditions', async () => {
+    const ambiguous = await extractRepositoryFacts([
       sourceFile(
         'packages/library/package.json',
         JSON.stringify({
@@ -736,8 +765,8 @@ describe('native code graph extraction', () => {
     expect(call?.targetId).toBeUndefined();
   });
 
-  it('leaves duplicate workspace package names unresolved', () => {
-    const duplicate = extractRepositoryFacts([
+  it('leaves duplicate workspace package names unresolved', async () => {
+    const duplicate = await extractRepositoryFacts([
       sourceFile('packages/a/package.json', JSON.stringify({exports: './src/index.ts', name: '@fixture/duplicate'})),
       sourceFile('packages/b/package.json', JSON.stringify({exports: './src/index.ts', name: '@fixture/duplicate'})),
       sourceFile('packages/a/src/index.ts', 'export function duplicateValue(): string { return "a"; }\n'),
@@ -774,8 +803,8 @@ describe('native code graph extraction', () => {
     ).toHaveLength(2);
   });
 
-  it('applies TypeScript aliases only to files included by that project', () => {
-    const scoped = extractRepositoryFacts([
+  it('applies TypeScript aliases only to files included by that project', async () => {
+    const scoped = await extractRepositoryFacts([
       sourceFile(
         'tsconfig.json',
         JSON.stringify({
@@ -812,8 +841,8 @@ describe('native code graph extraction', () => {
     expect(call('generatedUse')).toMatchObject({provenance: 'syntactic'});
   });
 
-  it('fails closed for empty projects, undeclared package entries, and cross-class this members', () => {
-    const scoped = extractRepositoryFacts([
+  it('fails closed for empty projects, undeclared package entries, and cross-class this members', async () => {
+    const scoped = await extractRepositoryFacts([
       sourceFile(
         'tsconfig.json',
         JSON.stringify({compilerOptions: {baseUrl: '.', paths: {'@/*': ['src/*']}}, files: []}),
@@ -852,8 +881,8 @@ describe('native code graph extraction', () => {
     expect(call('invoke', 'this.missing')?.targetId).toBeUndefined();
   });
 
-  it('keeps shadowed parameters, locals, and nested declarations syntactic', () => {
-    const scoped = extractRepositoryFacts([
+  it('keeps shadowed parameters, locals, and nested declarations syntactic', async () => {
+    const scoped = await extractRepositoryFacts([
       sourceFile('src/helper.ts', 'export function helper(): string { return "module"; }\n'),
       sourceFile(
         'src/use.ts',
@@ -893,8 +922,8 @@ describe('native code graph extraction', () => {
     expect(call('importedUse', 'helper')).toMatchObject({provenance: 'resolved'});
   });
 
-  it('keeps named function and class expression self-references syntactic', () => {
-    const scoped = extractRepositoryFacts([
+  it('keeps named function and class expression self-references syntactic', async () => {
+    const scoped = await extractRepositoryFacts([
       sourceFile('src/helper.ts', 'export function helper(): string { return "module"; }\n'),
       sourceFile(
         'src/use.ts',

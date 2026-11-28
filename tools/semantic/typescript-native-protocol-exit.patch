@@ -1,0 +1,449 @@
+--- a/tsc/internal/lsp/server.go
++++ b/tsc/internal/lsp/server.go
+@@ -893,11 +893,15 @@
+ 	return lsutil.ParseUserPreferences(configMap), nil
+ }
+ 
++var errProtocolExit = errors.New("LSP protocol exit")
++
+ func (s *Server) Run(ctx context.Context) error {
++	parentCtx := ctx
+ 	g, ctx := errgroup.WithContext(ctx)
+ 	s.backgroundCtx = ctx
+-	g.Go(func() error { return s.dispatchLoop(ctx) })
+-	g.Go(func() error { return s.writeLoop(ctx) })
++	var dispatchErr, writeErr, readErr error
++	g.Go(func() error { dispatchErr = s.dispatchLoop(ctx); return dispatchErr })
++	g.Go(func() error { writeErr = s.writeLoop(ctx); return writeErr })
+ 
+ 	// Don't run readLoop in the group, as it blocks on stdin read and cannot be cancelled.
+ 	readLoopErr := make(chan error, 1)
+@@ -906,12 +910,37 @@
+ 		case <-ctx.Done():
+ 			return ctx.Err()
+ 		case err := <-readLoopErr:
++			readErr = err
++			if errors.Is(err, io.EOF) {
++				// Preserve FIFO: queued exit must be dispatched before transport EOF.
++				return s.requestQueue.Put(ctx, nil)
++			}
+ 			return err
+ 		}
+ 	})
+ 	go func() { readLoopErr <- s.readLoop(ctx) }()
+ 
+-	if err := g.Wait(); err != nil && !errors.Is(err, io.EOF) && ctx.Err() != nil {
++	err := g.Wait()
++	if readErr == nil {
++		select {
++		case readErr = <-readLoopErr:
++		default:
++		}
++	}
++	if parentCtx.Err() != nil {
++		return parentCtx.Err()
++	}
++	if !errors.Is(dispatchErr, errProtocolExit) {
++		return err
++	}
++	// A proper exit may cancel queue waits, but must not hide an actual I/O error.
++	if writeErr != nil && writeErr != context.Canceled {
++		return writeErr
++	}
++	if readErr != nil && !errors.Is(readErr, io.EOF) && readErr != context.Canceled {
++		return readErr
++	}
++	if err != nil && !errors.Is(err, errProtocolExit) && err != context.Canceled {
+ 		return err
+ 	}
+ 	return nil
+@@ -936,7 +965,7 @@
+ 				}
+ 				continue
+ 			}
+-			return err
++			return fmt.Errorf("failed to read message: %w", err)
+ 		}
+ 
+ 		if s.initializeParams == nil && msg.Kind == jsonrpc.MessageKindRequest {
+@@ -1005,10 +1034,14 @@
+ func (s *Server) dispatchLoop(ctx context.Context) error {
+ 	ctx, lspExit := context.WithCancelCause(ctx)
+ 	defer lspExit(nil)
++	shutdownHandled := false
+ 	for {
+ 		req, err := s.requestQueue.Get(ctx)
+ 		if err != nil {
+-			return err
++			return context.Cause(ctx)
++		}
++		if req == nil {
++			return errors.New("LSP input ended before protocol exit")
+ 		}
+ 
+ 		s.lastRequestTimeMs.Store(time.Now().UnixMilli())
+@@ -1030,7 +1063,7 @@
+ 					lspExit(err)
+ 				}
+ 			} else if errors.Is(err, io.EOF) {
+-				lspExit(nil)
++				lspExit(err)
+ 			} else {
+ 				if err := s.sendError(req.ID, err); err != nil {
+ 					lspExit(err)
+@@ -1048,6 +1081,16 @@
+ 		}
+ 
+ 		if doAsyncWork, err := s.handleRequestOrNotification(requestCtx, req); err != nil {
++			if errors.Is(err, errProtocolExit) {
++				removeRequest()
++				if req.Method != lsproto.MethodExit || req.ID != nil || !shutdownHandled {
++					return errors.New("LSP exit requires a completed shutdown request")
++				}
++				if ctx.Err() != nil {
++					return context.Cause(ctx)
++				}
++				return errProtocolExit
++			}
+ 			handleError(err)
+ 			removeRequest()
+ 		} else if doAsyncWork != nil {
+@@ -1058,6 +1101,9 @@
+ 				removeRequest()
+ 			}()
+ 		} else {
++			if req.Method == lsproto.MethodShutdown && req.ID != nil {
++				shutdownHandled = true
++			}
+ 			removeRequest()
+ 		}
+ 	}
+@@ -1189,6 +1235,9 @@
+ 			idStr = " (" + req.ID.String() + ")"
+ 		}
+ 		if err != nil {
++			if errors.Is(err, errProtocolExit) {
++				return nil, err
++			}
+ 			if resp, ok := contentMapperFallbackResponse(req.Method, err); ok {
+ 				if !s.logger.IsTracing() {
+ 					s.logger.Info("handled method '", req.Method, "'", idStr, " in ", time.Since(start))
+@@ -1835,7 +1884,7 @@
+ }
+ 
+ func (s *Server) handleExit(ctx context.Context, _ lsproto.NoParams) error {
+-	return io.EOF
++	return errProtocolExit
+ }
+ 
+ func (s *Server) handleDidChangeWorkspaceConfiguration(ctx context.Context, params *lsproto.DidChangeConfigurationParams) error {
+--- a/tsc/internal/lsp/server_test.go
++++ b/tsc/internal/lsp/server_test.go
+@@ -3,7 +3,10 @@
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"io"
++	"strings"
++	"sync"
+ 	"testing"
+ 
+ 	"github.com/microsoft/TypeScript/tsc/internal/bundled"
+@@ -37,6 +40,296 @@
+ 		w.cancel()
+ 	}
+ 	return nil
++}
++
++type protocolExitReaderFunc func() (*lsproto.Message, error)
++
++func (f protocolExitReaderFunc) Read() (*lsproto.Message, error) { return f() }
++
++type protocolExitWriterFunc func(*lsproto.Message) error
++
++func (f protocolExitWriterFunc) Write(msg *lsproto.Message) error { return f(msg) }
++
++func protocolExitMessage(t *testing.T, body string) *lsproto.Message {
++	t.Helper()
++	reader := ToReader(strings.NewReader(fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body)))
++	msg, err := reader.Read()
++	if err != nil {
++		t.Fatal(err)
++	}
++	return msg
++}
++
++// Reuse the initialized real session fixture below. These examples exercise Run's
++// Reader/Writer lifecycle, not project initialization or an external executable.
++func newProtocolExitServer(t *testing.T, ctx context.Context, reader Reader, writer Writer) *Server {
++	t.Helper()
++	if !bundled.Embedded {
++		t.Skip("bundled files are not embedded")
++	}
++	fs := bundled.WrapFS(vfstest.FromMap(map[string]string{
++		"/test/tsconfig.json": "{}",
++		"/test/index.ts":      "const x = 1;",
++	}, tspath.CaseInsensitive))
++	server := NewServer(&ServerOptions{
++		In: reader, Out: writer, Err: io.Discard, Cwd: "/test",
++		FS: fs, DefaultLibraryPath: bundled.LibPath(),
++	})
++	server.initializeParams = &lsproto.InitializeParams{}
++	server.initStarted.Store(true)
++	server.session = project.NewSession(&project.SessionInit{
++		BackgroundCtx: ctx,
++		Options: &project.SessionOptions{
++			CurrentDirectory: "/test", DefaultLibraryPath: bundled.LibPath(),
++			PositionEncoding: lsproto.PositionEncodingKindUTF8,
++			WatchEnabled:     false, LoggingEnabled: false,
++		},
++		FS: fs, Logger: server.logger,
++	})
++	// Session.Close is idempotent for this fixture (no content-mapper host).
++	// Also close sessions when invalid input never reaches handleShutdown.
++	t.Cleanup(server.session.Close)
++	return server
++}
++
++const protocolShutdown = `{"jsonrpc":"2.0","id":"shutdown","method":"shutdown"}`
++const protocolExit = `{"jsonrpc":"2.0","method":"exit"}`
++
++func TestServerProtocolExitWithImmediateEOF(t *testing.T) {
++	t.Parallel()
++	messages := []*lsproto.Message{protocolExitMessage(t, protocolShutdown), protocolExitMessage(t, protocolExit)}
++	index := 0
++	reader := protocolExitReaderFunc(func() (*lsproto.Message, error) {
++		if index == len(messages) {
++			return nil, io.EOF
++		}
++		msg := messages[index]
++		index++
++		return msg, nil
++	})
++	server := newProtocolExitServer(t, t.Context(), reader, shutdownTestWriter{})
++	if err := server.Run(t.Context()); err != nil {
++		t.Fatalf("proper exit followed immediately by input EOF failed: %v", err)
++	}
++}
++
++func TestServerProtocolExitWithoutInputEOF(t *testing.T) {
++	t.Parallel()
++	releaseInput := make(chan struct{})
++	readerReturned := make(chan struct{})
++	readerBlocked := make(chan struct{})
++	var releaseOnce sync.Once
++	release := func() { releaseOnce.Do(func() { close(releaseInput) }) }
++	t.Cleanup(release)
++	messages := []*lsproto.Message{protocolExitMessage(t, protocolShutdown), protocolExitMessage(t, protocolExit)}
++	index := 0
++	reader := protocolExitReaderFunc(func() (*lsproto.Message, error) {
++		if index < len(messages) {
++			msg := messages[index]
++			index++
++			return msg, nil
++		}
++		close(readerBlocked)
++		<-releaseInput
++		close(readerReturned)
++		return nil, io.EOF
++	})
++	server := newProtocolExitServer(t, t.Context(), reader, shutdownTestWriter{})
++	if err := server.Run(t.Context()); err != nil {
++		t.Fatalf("proper exit required an input EOF: %v", err)
++	}
++	// Run intentionally cannot join a blocking Reader; release our actual read
++	// before test cleanup. Do not treat destroying a pipe as process completion.
++	release()
++	select {
++	case <-readerBlocked:
++		select {
++		case <-readerReturned:
++		case <-t.Context().Done():
++			t.Fatal("held reader did not return during cleanup")
++		}
++	default:
++		// Cancellation may win before the read loop starts its next read.
++		// releaseInput is already closed if that call starts later.
++	}
++}
++
++func TestServerProtocolExitRejectsInvalidTermination(t *testing.T) {
++	for _, tc := range []struct {
++		name     string
++		messages []string
++	}{
++		{"exit-before-shutdown", []string{protocolExit}},
++		{"exit-request", []string{protocolShutdown, `{"jsonrpc":"2.0","id":"bad-exit","method":"exit"}`}},
++		{"invalid-exit-params", []string{protocolShutdown, `{"jsonrpc":"2.0","method":"exit","params":123}`}},
++		{"eof-without-exit", []string{protocolShutdown}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Parallel()
++			messages := make([]*lsproto.Message, len(tc.messages))
++			for i, body := range tc.messages {
++				messages[i] = protocolExitMessage(t, body)
++			}
++			index := 0
++			reader := protocolExitReaderFunc(func() (*lsproto.Message, error) {
++				if index == len(messages) {
++					return nil, io.EOF
++				}
++				msg := messages[index]
++				index++
++				return msg, nil
++			})
++			server := newProtocolExitServer(t, t.Context(), reader, shutdownTestWriter{})
++			if err := server.Run(t.Context()); err == nil {
++				t.Fatal("invalid termination was accepted as a proper protocol exit")
++			}
++		})
++	}
++}
++
++func TestServerProtocolExitPreservesReadFailure(t *testing.T) {
++	t.Parallel()
++	failure := errors.New("reader failed")
++	server := newProtocolExitServer(t, t.Context(), protocolExitReaderFunc(func() (*lsproto.Message, error) {
++		return nil, failure
++	}), shutdownTestWriter{})
++	if err := server.Run(t.Context()); !errors.Is(err, failure) {
++		t.Fatalf("lost original reader failure: %v", err)
++	}
++}
++
++type protocolExitLateReadFailure struct {
++	error
++	classifyEOF func()
++}
++
++func (e *protocolExitLateReadFailure) Is(target error) bool {
++	if target == io.EOF {
++		e.classifyEOF()
++	}
++	return false
++}
++
++func TestServerProtocolExitPreservesQueuedLateReadFailure(t *testing.T) {
++	t.Parallel()
++	classified := make(chan struct{})
++	var once sync.Once
++	var server *Server
++	failure := &protocolExitLateReadFailure{
++		error: errors.New("late reader failure after queued exit"),
++		classifyEOF: func() {
++			once.Do(func() { close(classified) })
++			// The original read watcher has assigned readErr before this error
++			// classification. Let actual dispatch exit cancel the group first.
++			<-server.backgroundCtx.Done()
++		},
++	}
++	messages := []*lsproto.Message{protocolExitMessage(t, protocolShutdown), protocolExitMessage(t, protocolExit)}
++	index := 0
++	reader := protocolExitReaderFunc(func() (*lsproto.Message, error) {
++		if index < len(messages) {
++			msg := messages[index]
++			index++
++			return msg, nil
++		}
++		return nil, failure
++	})
++	ctx, cancel := context.WithCancel(t.Context())
++	defer cancel()
++	server = newProtocolExitServer(t, ctx, reader, shutdownTestWriter{})
++	// Reuse the real FIFO's state seam. Holding the outgoing idle state blocks
++	// shutdown's response enqueue, but the reader can queue exit and its fault.
++	state := <-server.outgoingQueue.idle
++	var released sync.Once
++	release := func() { released.Do(func() { server.outgoingQueue.idle <- state }) }
++	defer release()
++	done := make(chan error, 1)
++	go func() { done <- server.Run(ctx) }()
++	select {
++	case <-classified:
++	case <-t.Context().Done():
++		t.Fatal("queued late read failure was not classified")
++	}
++	release()
++	select {
++	case err := <-done:
++		if err == nil || !errors.Is(err, failure) {
++			t.Fatalf("proper exit masked the original queued reader failure: %v", err)
++		}
++	case <-t.Context().Done():
++		t.Fatal("server did not finish after releasing the queue")
++	}
++}
++
++func TestServerProtocolExitPreservesConcurrentWriteFailure(t *testing.T) {
++	for _, failure := range []error{io.ErrClosedPipe, context.Canceled} {
++		t.Run(failure.Error(), func(t *testing.T) {
++			t.Parallel()
++			writeStarted, exitRead, releaseInput := make(chan struct{}), make(chan struct{}), make(chan struct{})
++			t.Cleanup(func() { close(releaseInput) })
++			shutdown := protocolExitMessage(t, protocolShutdown)
++			exit := protocolExitMessage(t, protocolExit)
++			index := 0
++			reader := protocolExitReaderFunc(func() (*lsproto.Message, error) {
++				index++
++				switch index {
++				case 1:
++					return shutdown, nil
++				case 2:
++					select {
++					case <-writeStarted:
++						close(exitRead)
++						return exit, nil
++					case <-releaseInput:
++						return nil, io.EOF
++					}
++				default:
++					return nil, io.EOF
++				}
++			})
++			var server *Server
++			writer := protocolExitWriterFunc(func(*lsproto.Message) error {
++				close(writeStarted)
++				<-exitRead
++				// Make the valid exit's group cancellation happen first; a real
++				// writer failure must still dominate that success sentinel.
++				<-server.backgroundCtx.Done()
++				return failure
++			})
++			server = newProtocolExitServer(t, t.Context(), reader, writer)
++			if err := server.Run(t.Context()); err == nil || !errors.Is(err, failure) || !strings.Contains(err.Error(), "failed to write message") {
++				t.Fatalf("proper exit masked real concurrent writer failure: %v", err)
++			}
++		})
++	}
++}
++
++func TestServerProtocolExitPreservesParentCancellation(t *testing.T) {
++	t.Parallel()
++	ctx, cancel := context.WithCancel(t.Context())
++	defer cancel()
++	shutdown := protocolExitMessage(t, protocolShutdown)
++	exit := protocolExitMessage(t, protocolExit)
++	index := 0
++	reader := protocolExitReaderFunc(func() (*lsproto.Message, error) {
++		index++
++		if index == 1 {
++			return shutdown, nil
++		}
++		<-ctx.Done()
++		if index == 2 {
++			return exit, nil
++		}
++		return nil, io.EOF
++	})
++	writer := protocolExitWriterFunc(func(*lsproto.Message) error {
++		cancel()
++		return nil
++	})
++	server := newProtocolExitServer(t, ctx, reader, writer)
++	if err := server.Run(ctx); !errors.Is(err, context.Canceled) {
++		t.Fatalf("parent cancellation was treated as protocol success: %v", err)
++	}
+ }
+ 
+ // TestServerShutdownNoDeadlock verifies that operations after shutdown

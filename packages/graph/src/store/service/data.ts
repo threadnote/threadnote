@@ -1,3 +1,4 @@
+import * as EffectArray from 'effect/Array';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../../index_scope.js';
 import {
   selectScopeApplicability,
@@ -10,7 +11,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphDirectPersistentCapacityBoundary} from '../../disk/capacity.js';
 import {configureConnection, useDatabase, useReadOnlyDatabase, withFreshCodeGraphReadTransaction} from '../session.js';
 import {CodeGraphStoreError} from '../../types.js';
-import {upsertRepository, storeError} from '../utilities.js';
+import {upsertRepository, storeError, factBodyDiscovery} from '../utilities.js';
 import {selectCachedCommittedFileKeys} from '../query/core.js';
 import {
   recordResolutionCandidateIndex,
@@ -39,14 +40,16 @@ import {
   selectStoredGraph,
   selectStoredSymbols,
   selectEdgePage,
-  selectDiagramAdjacentCandidates,
-  selectDiagramAdjacentPage,
-  selectDiagramSubjectPage,
   selectEdgesForNodes,
   selectTraversalEdgesForNodes,
   selectEdgesByIds,
   selectDirectEdgeBetweenNodes,
 } from '../queries.js';
+import {
+  selectDiagramAdjacentCandidates,
+  selectDiagramAdjacentPage,
+  selectDiagramSubjectPage,
+} from '../diagram_queries.js';
 import {selectSnapshotPackProvenance} from '../pack_provenance.js';
 import {pruneCachedFileBlobs} from '../cleanup_core.js';
 import {prepareActivationTables} from '../staging_core.js';
@@ -386,7 +389,10 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
               const preparation = preparePersistedIncrementalActivation(baseSnapshotId, files, facts, options);
               return yield* persistentCapacityProtector
                 ? persistentCapacityProtector(
-                    temporaryIncrementalActivationCapacity(files, facts, options?.deletedPaths, options?.foldForward),
+                    incrementalBodyCapacity(
+                      temporaryIncrementalActivationCapacity(files, facts, options?.deletedPaths, options?.foldForward),
+                      facts,
+                    ),
                     preparation,
                   )
                 : preparation;
@@ -402,7 +408,7 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
             databasePath,
             persistentCapacityProtector
               ? persistentCapacityProtector(
-                  temporaryIncrementalActivationCapacity(files, facts),
+                  incrementalBodyCapacity(temporaryIncrementalActivationCapacity(files, facts), facts),
                   replaceStagedModifiedFiles(baseSnapshotId, files, facts),
                 )
               : replaceStagedModifiedFiles(baseSnapshotId, files, facts),
@@ -1095,4 +1101,23 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
         Effect.mapError(cause => storeError('repair code graph database', cause)),
       ),
   } as const;
+}
+
+/** Added private payload and both delete/reinsert posting rows use the existing capacity boundary. */
+function incrementalBodyCapacity(
+  boundary: CodeGraphDirectPersistentCapacityBoundary,
+  facts: readonly import('../../types.js').CodeGraphFileFacts[],
+): CodeGraphDirectPersistentCapacityBoundary {
+  const bodies = factBodyDiscovery(facts);
+  if (bodies.length === 0) return boundary;
+  const postingRows = EffectArray.reduce(
+    bodies,
+    0,
+    (total, body) => total + EffectArray.reduce(body.records, 0, (sum, record) => sum + record.terms.length),
+  );
+  return {
+    ...boundary,
+    rowCount: boundary.rowCount + postingRows * 2,
+    finalFactBytes: boundary.finalFactBytes + Buffer.byteLength(JSON.stringify(bodies), 'utf8') + postingRows * 512,
+  };
 }

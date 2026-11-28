@@ -69,7 +69,7 @@ effectIt.effect(
         yield* git(['config', 'core.ignorecase', 'false']);
         yield* git(['remote', 'add', 'origin', 'https://github.com/acme/oci-test.git']);
         yield* fs.writeFileString(path.join(repository, '.gitignore'), '.threadnote/\n');
-        yield* fs.writeFileString(path.join(repository, 'index.ts'), 'export const shared = 1;\n');
+        yield* fs.writeFileString(path.join(repository, 'index.py'), 'shared = 1\n');
         yield* git(['add', '.']);
         yield* commit('base');
         const initial = yield* runGraphShareInit(publisher, {
@@ -122,7 +122,7 @@ effectIt.effect(
         expect(messages.at(-1)).toMatch(/^Published generation 1/u);
         expect(base.publication.status).toBe('acknowledged');
         const firstIdentity = yield* resolveRepositoryIdentity(repository);
-        yield* fs.writeFileString(path.join(repository, 'next.ts'), 'export const next = 2;\n');
+        yield* fs.writeFileString(path.join(repository, 'next.py'), 'next = 2\n');
         yield* git(['add', '.']);
         yield* commit('advance');
         yield* indexer.index({cwd: repository, ensureVectors: false, threadnoteHome: publisher.agentContextHome});

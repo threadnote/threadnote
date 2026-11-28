@@ -32,6 +32,7 @@ import {withCodeGraphDatabaseWriteLock} from '@threadnote/graph/maintenance/gate
 import {runCodeGraphEmbeddingWorkerUnit} from '@threadnote/graph/vector/worker';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -47,10 +48,10 @@ const events = (home: string) =>
         const value: unknown = JSON.parse(line);
         if (!Predicate.isObject(value) || typeof value.event !== 'string' || typeof value.pid !== 'number')
           throw TestError.make({message: 'Embedding worker emitted a malformed event.'});
-        for (const key of ['childPid', 'inputs', 'pool', 'limit', 'rows'])
+        for (const key of ['childPid', 'inputs', 'pool', 'limit', 'rows', 'attempt'])
           if (value[key] !== undefined && typeof value[key] !== 'number')
             throw TestError.make({message: 'Embedding worker event contained a malformed numeric field.'});
-        for (const key of ['state', 'modelId'])
+        for (const key of ['state', 'modelId', 'reason'])
           if (value[key] !== undefined && typeof value[key] !== 'string')
             throw TestError.make({message: 'Embedding worker event contained a malformed text field.'});
         return {
@@ -61,7 +62,9 @@ const events = (home: string) =>
           ...(typeof value.pool === 'number' ? {pool: value.pool} : {}),
           ...(typeof value.limit === 'number' ? {limit: value.limit} : {}),
           ...(typeof value.rows === 'number' ? {rows: value.rows} : {}),
+          ...(typeof value.attempt === 'number' ? {attempt: value.attempt} : {}),
           ...(typeof value.state === 'string' ? {state: value.state} : {}),
+          ...(typeof value.reason === 'string' ? {reason: value.reason} : {}),
           ...(typeof value.modelId === 'string' ? {modelId: value.modelId} : {}),
         };
       },
@@ -490,39 +493,89 @@ effectIt.effect(
         const layout = yield* seed(home, 130);
         // The durable publication exists before either host has attempted a spawn.
         expect((yield* lanes(home))[0]?.state).toBe('queued');
-        const results = yield* Effect.all([host(home), host(home)], {concurrency: 2});
-        for (const result of results) {
-          expect(result.error).toBe('');
-          expect(result.code).toBe(0);
-          expect(JSON.parse(result.output).accepted).toBe(true);
-        }
-        // The one-input contract requires130 durable checkpoint/IPC turns. This case
-        // has scheduling headroom for loaded CI; native and batch deadlines are unchanged.
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const inferenceLock =
+          codeGraphVectorWriteLockPath(path, home, layout.checkoutId, sha256HexSync(manifest.id)) + '.inference';
+        yield* fs.writeFileString(path.join(home, 'observe-page-deferrals'), '');
+        // A turn can read a page and defer before it acquires inference authority.
+        yield* withExclusiveFileLock(
+          fs,
+          inferenceLock,
+          {retryIntervalMilliseconds: 1, staleAfterMilliseconds: 60_000, waitTimeoutMilliseconds: 0},
+          Effect.gen(function* () {
+            const results = yield* Effect.all([host(home), host(home)], {concurrency: 2});
+            for (const result of results) {
+              expect(result.error).toBe('');
+              expect(result.code).toBe(0);
+              expect(JSON.parse(result.output).accepted).toBe(true);
+            }
+            yield* until(
+              events(home).pipe(
+                Effect.map(records => {
+                  const firstPage = EffectArray.findFirstIndex(records, row => row.event === 'symbol-page');
+                  return (
+                    EffectOption.isSome(firstPage) &&
+                    EffectArray.some(
+                      records.slice(firstPage.value + 1),
+                      row => row.event === 'unit-result' && row.state === 'deferred',
+                    )
+                  );
+                }),
+              ),
+              'page read before inference deferral',
+            );
+          }),
+        );
+        // The one-input contract requires 130 durable checkpoint and IPC turns.
         yield* until(
-          lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'ready')),
+          events(home).pipe(
+            Effect.map(records =>
+              EffectArray.some(records, record => record.event === 'unit-result' && record.state === 'ready'),
+            ),
+          ),
           '130-symbol completion',
           Number.POSITIVE_INFINITY,
         );
-        yield* Effect.sync(() => {
-          const db = new Database(layout.databasePath);
+        expect((yield* lanes(home))[0]?.state).toBe('ready');
+        const expectedSymbols = yield* Effect.sync(() => {
+          const db = new Database(layout.databasePath, {readonly: true});
           try {
             expect(db.query('SELECT COUNT(*) AS count FROM snapshot_leases').get()).toEqual({count: 0});
+            return db.query('SELECT id AS symbol_id FROM symbols WHERE snapshot_id = ? ORDER BY id').all(snapshotId);
           } finally {
             db.close();
           }
         });
+        expect(expectedSymbols).toHaveLength(130);
         const records = yield* events(home);
         expect(EffectArray.filter(records, record => record.event === 'worker-ready')).toHaveLength(1);
         const calls = EffectArray.filter(records, record => record.event === 'inference');
         expect(calls).toHaveLength(130);
         expect(EffectArray.filter(records, row => row.event === 'symbol-count')).toHaveLength(1);
-        expect(
-          EffectArray.reduce(
-            EffectArray.filter(records, row => row.event === 'symbol-page'),
-            0,
-            (sum, row) => sum + (row.rows ?? 0),
-          ),
-        ).toBe(130);
+        let pageRows: number | undefined;
+        let inferred = false;
+        let deferralsAfterPageRead = 0;
+        for (const record of records) {
+          if (record.event === 'symbol-page') {
+            expect(pageRows).toBeUndefined();
+            expect(record.rows).toBeDefined();
+            pageRows = record.rows;
+          } else if (record.event === 'inference') {
+            expect(pageRows).toBe(1);
+            expect(inferred).toBe(false);
+            inferred = true;
+          } else if (record.event === 'unit-result') {
+            if (pageRows && !inferred) {
+              expect(record).toMatchObject({state: 'deferred', attempt: 0, reason: 'contention'});
+              deferralsAfterPageRead++;
+            }
+            pageRows = undefined;
+            inferred = false;
+          }
+        }
+        expect(pageRows).toBeUndefined();
+        expect(deferralsAfterPageRead).toBeGreaterThan(0);
         let activeBatches = 0;
         let maximumBatches = 0;
         for (const event of records) {
@@ -546,6 +599,7 @@ effectIt.effect(
               {state: 'ready', count: 130},
             ]);
             expect(db.query('SELECT COUNT(*) AS count FROM vector_pointers').get()).toEqual({count: 1});
+            expect(db.query('SELECT symbol_id FROM vectors ORDER BY symbol_id').all()).toEqual(expectedSymbols);
           } finally {
             db.close();
           }

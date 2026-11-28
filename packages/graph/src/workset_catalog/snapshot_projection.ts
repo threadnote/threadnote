@@ -1,3 +1,5 @@
+import {isLexicalV2Snapshot} from '../store/lexical_projection.js';
+import {codeGraphEffectiveSymbolTermsQueryStatement} from '../store/queries.js';
 import {Array as EffectArray} from 'effect';
 import {Cause, Effect, Option, Predicate, Ref, Result, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -1087,6 +1089,19 @@ function projectionLookupParameters(snapshotId: string, baseId: string): readonl
   return [snapshotId, baseId, snapshotId, snapshotId];
 }
 
+function projectionTermsStatement(snapshotId: string, baseId: string) {
+  if (!isLexicalV2Snapshot(snapshotId))
+    return {text: PROJECTION_TERMS_MATERIALIZATION_SQL, parameters: projectionTermsParameters(snapshotId, baseId)};
+  const relation = codeGraphEffectiveSymbolTermsQueryStatement(snapshotId, baseId || undefined);
+  return {
+    parameters: relation.parameters,
+    text: `WITH effective_terms AS (${relation.text})
+    INSERT INTO temp.${PROJECTION_TERMS_TABLE}(symbol_id,term,weight)
+    SELECT symbol_id,term,weight FROM effective_terms WHERE TRUE
+    ON CONFLICT(symbol_id,term) DO UPDATE SET weight=MAX(${PROJECTION_TERMS_TABLE}.weight,excluded.weight)`,
+  };
+}
+
 function projectionTermsParameters(snapshotId: string, baseId: string): readonly string[] {
   return [snapshotId, snapshotId, baseId, snapshotId, snapshotId, baseId, snapshotId, snapshotId];
 }
@@ -1107,8 +1122,8 @@ export const inspectCodeGraphWorksetProjectionPreparationQueryPlan = Effect.fn(
         projectionLookupParameters(snapshotId, baseId),
       ),
       sql.unsafe<ProjectionPreparationQueryPlanRow>(
-        `EXPLAIN QUERY PLAN ${PROJECTION_TERMS_MATERIALIZATION_SQL}`,
-        projectionTermsParameters(snapshotId, baseId),
+        `EXPLAIN QUERY PLAN ${projectionTermsStatement(snapshotId, baseId).text}`,
+        projectionTermsStatement(snapshotId, baseId).parameters,
       ),
     ] as const,
     {concurrency: 1},
@@ -1161,7 +1176,8 @@ export const prepareCodeGraphWorksetProjectionRoutingSurface = Effect.fn(
       weight INTEGER NOT NULL,
       PRIMARY KEY (symbol_id, term)
     ) WITHOUT ROWID`);
-      yield* sql.unsafe(PROJECTION_TERMS_MATERIALIZATION_SQL, projectionTermsParameters(snapshotId, baseId));
+      const termStatement = projectionTermsStatement(snapshotId, baseId);
+      yield* sql.unsafe(termStatement.text, termStatement.parameters);
       return observe === undefined
         ? undefined
         : {
@@ -1238,7 +1254,7 @@ function selectLexicalReceipts(sql: SqlClient.SqlClient, snapshotId: string, bas
   return Effect.gen(function* () {
     const rows = yield* sql.unsafe<LexicalReceiptRow>(
       `SELECT snapshot_id, format_version, posting_count, symbol_count, term_count
-       FROM lexical_storage_formats
+       FROM ${isLexicalV2Snapshot(snapshotId) ? 'lexical_v2_formats' : 'lexical_storage_formats'}
        WHERE snapshot_id IN (?, ?)
        ORDER BY snapshot_id`,
       [snapshotId, baseSnapshotId ?? ''],
@@ -1373,7 +1389,14 @@ function validateOptionalReceipts(
   if (component !== undefined && (component.version !== 1 || !SHA256_HEX.test(component.digest))) {
     throw corrupt('The ready snapshot component receipt is inconsistent.');
   }
-  if (EffectArray.some(lexical, receipt => receipt.formatVersion !== CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION)) {
+  if (
+    EffectArray.some(
+      lexical,
+      receipt =>
+        receipt.formatVersion !==
+        (isLexicalV2Snapshot(receipt.snapshotId) ? 2 : CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION),
+    )
+  ) {
     throw corrupt('The ready snapshot lexical receipt is incompatible.');
   }
 }

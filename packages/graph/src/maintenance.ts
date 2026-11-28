@@ -139,7 +139,7 @@ type CodeGraphQuickCheck =
 
 const OBSOLETE_GRAPH_FILE_PATTERN = /^graph-v([1-9]\d*)\.sqlite(?:-(wal|shm))?$/;
 const MATERIALIZATION_SPOOL_FILE_PATTERN =
-  /^materialization-spool-v(?:1|2)-(cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?)\.sqlite(?:-(?:journal|shm|wal))?$/u;
+  /^materialization-spool-v(?:1|2|3)-(cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16}|-lx2)?)\.sqlite(?:-(?:journal|shm|wal))?$/u;
 
 /**
  * Inventories obsolete checkout-local SQLite artifacts using directory metadata only.

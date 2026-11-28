@@ -290,6 +290,7 @@ describe('Context Brief anonymous telemetry', () => {
   it.each([
     ['ambiguous-relocation', 'ambiguous-relocation'],
     ['citation-limit', 'budget-exhausted'],
+    ['extraction-unavailable', 'unsupported'],
     ['extractor-mismatch', 'unsupported'],
     ['graph-incomplete', 'snapshot-unavailable'],
     ['graph-stale', 'snapshot-not-current'],

@@ -28,6 +28,7 @@ import {Path} from 'effect';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const layer = Layer.mergeAll(
   BunServices.layer,
@@ -103,7 +104,7 @@ describe('scoped inventory', () => {
     }).pipe(provideTestLayer(layer), TestClock.withLive),
   );
 
-  effectIt.effect(
+  native(effectIt.effect)(
     'materializes only a one-file scoped body edit and an in-scope commit',
     () =>
       Effect.gen(function* () {
@@ -168,7 +169,7 @@ describe('scoped inventory', () => {
     60_000,
   );
 
-  effectIt.effect(
+  native(effectIt.effect)(
     'keeps a scoped dirty preparation fallback out of the full-repository view',
     () =>
       Effect.gen(function* () {

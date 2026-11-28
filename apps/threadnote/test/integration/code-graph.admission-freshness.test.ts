@@ -12,6 +12,7 @@ import type {CodeGraphProgress} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 describe('current graph admission freshness', () => {
   it.effect(
@@ -105,7 +106,7 @@ describe('current graph admission freshness', () => {
     60_000,
   );
 
-  it.effect(
+  native(it.effect)(
     'refreshes clean and dirty graphs after policy changes, including changes during a query',
     () =>
       Effect.gen(function* () {

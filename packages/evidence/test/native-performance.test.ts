@@ -4,6 +4,7 @@ import {describe, expect, it} from 'vitest';
 import {benchmarkMeasurement, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
 import {
   NATIVE_VECTOR_PROFILES,
+  evaluateNativeVectorDeadlineCompletion,
   nativePerformanceGates,
   nativeStagePartition,
   validateNativePerformancePairs,
@@ -506,6 +507,172 @@ describe('exclusive stage interval accounting', () => {
     expect(nativeStagePartition({start: 2n, end: 1n}, [])).toMatchObject({
       available: false,
       errors: ['negative-envelope'],
+    });
+  });
+});
+
+type DeadlineInput = Parameters<typeof evaluateNativeVectorDeadlineCompletion>[0];
+type DeadlineObservation = DeadlineInput['arms'][number]['samples'][number];
+
+function deadlineCapture(): DeadlineInput {
+  const warmSamples = 30;
+  const oracleControls = Array.from({length: warmSamples}, (_, sample) => ({
+    querySha256: EffectString.padStart(64, '0')(sample.toString(16)),
+    scoresSha256: EffectString.padStart(64, 'a')(sample.toString(16)),
+  }));
+  const observations = (backend: 'baseline' | 'candidate'): DeadlineObservation[] =>
+    EffectArray.map(oracleControls, (digests, sample) =>
+      backend === 'baseline'
+        ? {sample, success: false, reason: 'budget-exhausted', deadlineExhaustion: 'RecallReadyReadBoundaryError'}
+        : {sample, success: true, completedWithinFullDeadline: true, ...digests},
+    );
+  return {
+    documents: 100_000,
+    distribution: 'dense',
+    warmSamples,
+    expectedPairs: 3,
+    fullQueryDeadlineMilliseconds: 2000,
+    integrityVerified: true,
+    executionVerified: true,
+    oracleControls,
+    firstUse: [
+      {backend: 'baseline', result: observations('baseline')[0]},
+      {backend: 'candidate', result: observations('candidate')[0]},
+    ],
+    arms: EffectArray.flatMap([1, 2, 3], pair =>
+      EffectArray.map(['baseline', 'candidate'] as const, backend => ({
+        pair,
+        backend,
+        resourceEvidenceComplete: true,
+        sampledTreePeakRssBytes: backend === 'baseline' ? 100 : 200,
+        samples: observations(backend),
+      })),
+    ),
+  };
+}
+
+describe('native vector deadline completion evidence', () => {
+  it('records exclusive exact completion even when sampled arm peaks differ', () => {
+    expect(evaluateNativeVectorDeadlineCompletion(deadlineCapture())).toEqual({
+      version: 1,
+      outcome: 'candidate-only-deadline-completion',
+      matchedPairs: 3,
+      warmObservationsPerArm: 30,
+      comparativeP95: 'unavailable',
+      comparableCompletedWorkRss: 'unavailable',
+    });
+  });
+
+  const replaceWarmSample = (input: DeadlineInput, armIndex: number, sample: DeadlineObservation): DeadlineInput => ({
+    ...input,
+    arms: EffectArray.map(input.arms, (arm, index) =>
+      index === armIndex ? {...arm, samples: [sample, ...arm.samples.slice(1)]} : arm,
+    ),
+  });
+
+  it.each<[string, (input: DeadlineInput) => DeadlineInput]>([
+    ['tied data', input => ({...input, distribution: 'tied'})],
+    ['10k data', input => ({...input, documents: 10_000})],
+    ['extended deadline', input => ({...input, fullQueryDeadlineMilliseconds: 2100})],
+    ['failed integrity fence', input => ({...input, integrityVerified: false})],
+    ['missing execution proof', input => ({...input, executionVerified: false})],
+    ['missing oracle', input => ({...input, oracleControls: input.oracleControls.slice(1)})],
+    ['too few pairs', input => ({...input, expectedPairs: 2, arms: input.arms.slice(0, 4)})],
+    [
+      'too few warm observations',
+      input => ({
+        ...input,
+        warmSamples: 29,
+        oracleControls: input.oracleControls.slice(0, 29),
+        arms: EffectArray.map(input.arms, arm => ({...arm, samples: arm.samples.slice(0, 29)})),
+      }),
+    ],
+    ['missing first use', input => ({...input, firstUse: input.firstUse.slice(1)})],
+    ['duplicate first use', input => ({...input, firstUse: [input.firstUse[0], input.firstUse[0]]})],
+    [
+      'incorrect first-use sample ID',
+      input => ({
+        ...input,
+        firstUse: [input.firstUse[0], {...input.firstUse[1], result: {...input.firstUse[1].result, sample: 1}}],
+      }),
+    ],
+    [
+      'inexact first use',
+      input => ({
+        ...input,
+        firstUse: [
+          input.firstUse[0],
+          {...input.firstUse[1], result: {...input.firstUse[1].result, querySha256: 'wrong'}},
+        ],
+      }),
+    ],
+    ['missing arm', input => ({...input, arms: input.arms.slice(1)})],
+    ['duplicate arm', input => ({...input, arms: [input.arms[2], ...input.arms.slice(1)]})],
+    ['unmatched pair', input => ({...input, arms: [{...input.arms[0], pair: 4}, ...input.arms.slice(1)]})],
+    [
+      'out-of-range complete pair',
+      input => ({
+        ...input,
+        arms: EffectArray.map(input.arms, arm => (arm.pair === 3 ? {...arm, pair: 4} : arm)),
+      }),
+    ],
+    [
+      'sparse warm observations',
+      input => {
+        const samples = [...input.arms[0].samples];
+        Reflect.deleteProperty(samples, 0);
+        return {...input, arms: [{...input.arms[0], samples}, ...input.arms.slice(1)]};
+      },
+    ],
+    [
+      'missing warm sample',
+      input => ({
+        ...input,
+        arms: [{...input.arms[0], samples: input.arms[0].samples.slice(1)}, ...input.arms.slice(1)],
+      }),
+    ],
+    ['duplicate warm sample', input => replaceWarmSample(input, 0, input.arms[0].samples[1])],
+    ['mixed TS66 outcomes', input => replaceWarmSample(input, 0, input.arms[1].samples[0])],
+    [
+      'contradictory boundary failure reason',
+      input => replaceWarmSample(input, 0, {...input.arms[0].samples[0], reason: 'worker-failed'}),
+    ],
+    ['ordinary failure', input => replaceWarmSample(input, 0, {sample: 0, success: false})],
+    [
+      'untrusted timeout string',
+      input => {
+        const sample = {sample: 0, success: false, reason: 'budget-exhausted', milliseconds: 2100};
+        return replaceWarmSample(input, 0, sample);
+      },
+    ],
+    ['Rust timeout', input => replaceWarmSample(input, 1, input.arms[0].samples[0])],
+    [
+      'late Rust result',
+      input => replaceWarmSample(input, 1, {...input.arms[1].samples[0], completedWithinFullDeadline: false}),
+    ],
+    [
+      'incorrect Rust scores',
+      input =>
+        replaceWarmSample(input, 1, {...input.arms[1].samples[0], scoresSha256: input.oracleControls[1].scoresSha256}),
+    ],
+    [
+      'incomplete baseline RSS',
+      input => ({
+        ...input,
+        arms: [{...input.arms[0], resourceEvidenceComplete: false}, ...input.arms.slice(1)],
+      }),
+    ],
+    [
+      'missing candidate peak RSS',
+      input => ({
+        ...input,
+        arms: [input.arms[0], {...input.arms[1], sampledTreePeakRssBytes: undefined}, ...input.arms.slice(2)],
+      }),
+    ],
+  ])('withholds deadline completion for %s', (_, alter) => {
+    expect(evaluateNativeVectorDeadlineCompletion(alter(deadlineCapture()))).toEqual({
+      version: 1,
+      outcome: 'not-established',
     });
   });
 });

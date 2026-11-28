@@ -26,6 +26,7 @@ import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {ManagerGraphBusyError, type ManagerGraphNode} from '@threadnote/graph/visualization';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const PERFORMANCE_CONTROLS = [
   {expectedLanguage: 'java', expectedPath: 'src/Main.java', query: 'Main'},
@@ -188,7 +189,7 @@ describe('external performance evidence', () => {
     ).toThrow('exceeded or misreported');
   });
 
-  effectIt.effect(
+  native(effectIt.effect)(
     'measures real Manager catalog, visualization, detail, query, payload, and client layout preparation',
     () =>
       Effect.gen(function* () {
@@ -231,7 +232,7 @@ describe('external performance evidence', () => {
     30_000,
   );
 
-  effectIt.effect(
+  native(effectIt.effect)(
     'indexes and reads two dirty linked worktrees concurrently without cross-contamination',
     () =>
       Effect.gen(function* () {

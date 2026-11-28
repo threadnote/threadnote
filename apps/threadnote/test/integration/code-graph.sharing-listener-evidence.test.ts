@@ -32,7 +32,7 @@ describe('publisher listener source-use evidence', () => {
           const cas = path.join(root, 'cas');
           yield* fs.makeDirectory(path.join(repository, 'src'), {recursive: true});
           yield* fs.writeFileString(path.join(repository, 'package.json'), '{"private":true,"type":"module"}\n');
-          yield* fs.writeFileString(path.join(repository, 'src', 'index.ts'), 'export const baseline = 1;\n');
+          yield* fs.writeFileString(path.join(repository, 'src', 'index.py'), 'baseline = 1\n');
           yield* git(repository, ['init', '-q', '--initial-branch=main']);
           yield* git(repository, ['remote', 'add', 'origin', 'https://github.com/acme/listener-evidence.git']);
           yield* git(repository, ['add', '.']);
@@ -52,8 +52,8 @@ describe('publisher listener source-use evidence', () => {
             }),
           );
           yield* Deferred.await(ready);
-          yield* fs.writeFileString(path.join(repository, 'src', 'next.ts'), 'export const next = 2;\n');
-          yield* git(repository, ['add', 'src/next.ts']);
+          yield* fs.writeFileString(path.join(repository, 'src', 'next.py'), 'next = 2\n');
+          yield* git(repository, ['add', 'src/next.py']);
           yield* commit(repository, 'next');
           const sourceCommit = (yield* resolveRepositoryIdentity(repository)).headCommit;
           let status: Effect.Success<ReturnType<typeof readGraphPublisherRegistryStatus>> | undefined;

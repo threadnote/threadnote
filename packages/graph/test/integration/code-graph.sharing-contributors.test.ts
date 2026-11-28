@@ -48,7 +48,7 @@ describe('code graph sharing multi-contributor HTTP', () => {
     try {
       await mkdir(join(repository, 'src'), {recursive: true});
       await writeFile(join(repository, 'package.json'), '{"name":"graph-share-http","private":true,"type":"module"}\n');
-      await writeFile(join(repository, 'src', 'index.ts'), 'export const shared = 1;\n');
+      await writeFile(join(repository, 'src', 'index.py'), 'def shared():\n    return 1\n');
       await git(repository, ['init', '-q', '--initial-branch=main']);
       await git(repository, ['remote', 'add', 'origin', 'https://github.com/acme/graph-share-http.git']);
       await git(repository, ['add', '.']);
@@ -197,7 +197,7 @@ describe('code graph sharing multi-contributor HTTP', () => {
       const unenrolled = join(root, 'unenrolled');
       await mkdir(join(unenrolled, 'src'), {recursive: true});
       await writeFile(join(unenrolled, 'package.json'), '{"name":"local-only","private":true,"type":"module"}\n');
-      await writeFile(join(unenrolled, 'src', 'index.ts'), 'export const localOnly = 1;\n');
+      await writeFile(join(unenrolled, 'src', 'index.py'), 'def localOnly():\n    return 1\n');
       await git(unenrolled, ['init', '-q', '--initial-branch=main']);
       await git(unenrolled, ['remote', 'add', 'origin', 'https://github.com/acme/local-only.git']);
       await git(unenrolled, ['add', '.']);

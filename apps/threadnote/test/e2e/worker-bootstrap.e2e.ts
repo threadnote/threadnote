@@ -24,43 +24,41 @@ afterAll(async () => {
 
 describe('standalone worker bootstrap', () => {
   it('preserves parser protocol facts and digest in source and one-file compiled executions', async () => {
-    const content = EffectArray.join(
-      [
-        "import {Effect} from 'effect';",
-        'export function parseThroughWorker(value: number): number {',
-        '  return value > 0 ? parseThroughWorker(value - 1) : value;',
-        '}',
-      ],
-      '\n',
+    // A Tree-sitter language proves that both executions boot the worker and its grammar assets alike.
+    const request = parserRequest(
+      'worker-bootstrap-e2e',
+      'src/worker_bootstrap_e2e.py',
+      'python',
+      'def parse_through_worker(value):\n    return parse_through_worker(value - 1) if value > 0 else value\n',
     );
-    const request = {
-      file: {
-        blobId: 'worker-bootstrap-e2e',
-        content,
-        contentHash: createHash('sha256').update(content).digest('hex'),
-        language: 'typescript',
-        mode: '100644',
-        path: 'src/worker-bootstrap-e2e.ts',
-        size: Buffer.byteLength(content),
-        source: 'commit',
-      },
-      id: 'worker-bootstrap-e2e',
-      protocol: 1,
-    };
-    const [source, packaged] = await Promise.all([
-      runWorker(
-        'source-parser',
-        process.execPath,
-        [join(root, 'apps', 'threadnote', 'src', 'standalone.ts'), CODE_GRAPH_PARSER_WORKER_ARGUMENT],
-        request,
-      ),
-      runWorker('compiled-parser', compiled, [CODE_GRAPH_PARSER_WORKER_ARGUMENT], request),
-    ]);
+    const [source, packaged] = await runParserWorkers(request);
 
     expect(source).toMatchObject({id: request.id, ok: true, protocol: 1});
     expect(packaged).toMatchObject({id: request.id, ok: true, protocol: 1});
     expect(packaged.facts).toEqual(source.facts);
     expect(factsDigest(packaged.facts)).toBe(factsDigest(source.facts));
+  });
+
+  it('refuses TypeScript in a bare worker without a parent-owned compiler', async () => {
+    const request = parserRequest(
+      'worker-bootstrap-typescript-e2e',
+      'src/worker-bootstrap-e2e.ts',
+      'typescript',
+      EffectArray.join(
+        [
+          "import {Effect} from 'effect';",
+          'export function parseThroughWorker(value: number): number {',
+          '  return value > 0 ? parseThroughWorker(value - 1) : value;',
+          '}',
+        ],
+        '\n',
+      ),
+    );
+    const [source, packaged] = await runParserWorkers(request);
+
+    expect(source).toMatchObject({id: request.id, ok: false, protocol: 1});
+    expect(packaged).toMatchObject({id: request.id, ok: false, protocol: 1});
+    expect(packaged).toEqual(source);
   });
 
   it('preserves the local-model failure protocol without loading a model', async () => {
@@ -79,6 +77,35 @@ describe('standalone worker bootstrap', () => {
     expect(packaged).toEqual(source);
   });
 });
+
+function parserRequest(id: string, path: string, language: string, content: string) {
+  return {
+    file: {
+      blobId: 'worker-bootstrap-e2e',
+      content,
+      contentHash: createHash('sha256').update(content).digest('hex'),
+      language,
+      mode: '100644',
+      path,
+      size: Buffer.byteLength(content),
+      source: 'commit',
+    },
+    id,
+    protocol: 1,
+  };
+}
+
+function runParserWorkers(request: ReturnType<typeof parserRequest>) {
+  return Promise.all([
+    runWorker(
+      `source-parser-${request.id}`,
+      process.execPath,
+      [join(root, 'apps', 'threadnote', 'src', 'standalone.ts'), CODE_GRAPH_PARSER_WORKER_ARGUMENT],
+      request,
+    ),
+    runWorker(`compiled-parser-${request.id}`, compiled, [CODE_GRAPH_PARSER_WORKER_ARGUMENT], request),
+  ]);
+}
 
 interface WorkerResponse {
   readonly error?: {readonly tag?: string};

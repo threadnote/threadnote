@@ -34,6 +34,13 @@ import {
 import {observeStdioClientTransportClose} from '../helpers/stdio-client-transport-close.js';
 import {installedRecallDiagnostic} from '../helpers/installed-recall-diagnostic.js';
 import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
+import {
+  nativeTypeScriptHostUnpinned,
+  nativeTypeScriptSourceModeRefused,
+} from '@threadnote/graph/test/helpers/native-typescript-kernel';
+
+// This payload runs no native TypeScript compiler: refused by the kernel, or never staged on an unpinned host.
+const nativeTypeScriptAbsent = nativeTypeScriptSourceModeRefused || nativeTypeScriptHostUnpinned;
 import * as Schema from 'effect/Schema';
 import {windowsCommandLauncherInvocation} from '@threadnote/testing/windows-command-launcher';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
@@ -468,318 +475,324 @@ describe('built self-contained distribution', () => {
     await expect(readFile(canonical, 'utf8')).resolves.toContain('QZ9 native recall');
   });
 
-  it('lazily builds and queries the native code graph with visible packaged progress', async () => {
-    const firstQuery = await runCli([
-      'graph',
-      'query',
-      '--cwd',
-      graphRepository,
-      '--query',
-      'exclusive file lock',
-      '--read-timeout-ms',
-      String(coldGraphReadTimeoutMs),
-    ]);
-    expect(firstQuery).toContain('Scanning repository source from Git.');
-    expect(firstQuery).toMatch(/Scanning · \d+\/\d+ \(\d+%\) files/);
-    expect(firstQuery).toMatch(/Materializing · \d+\/\d+ \(\d+%\) files/);
-    expect(firstQuery).toContain('Code graph: code-graph-repository');
-    expect(firstQuery).toContain('withExclusiveFileLock');
+  // Without a runnable native compiler TypeScript indexes as degraded modules (see nativeTypeScriptAbsent).
+  it.skipIf(nativeTypeScriptAbsent)(
+    'lazily builds and queries the native code graph with visible packaged progress',
+    async () => {
+      const firstQuery = await runCli([
+        'graph',
+        'query',
+        '--cwd',
+        graphRepository,
+        '--query',
+        'exclusive file lock',
+        '--read-timeout-ms',
+        String(coldGraphReadTimeoutMs),
+      ]);
+      expect(firstQuery).toContain('Scanning repository source from Git.');
+      expect(firstQuery).toMatch(/Scanning · \d+\/\d+ \(\d+%\) files/);
+      expect(firstQuery).toMatch(/Materializing · \d+\/\d+ \(\d+%\) files/);
+      expect(firstQuery).toContain('Code graph: code-graph-repository');
+      expect(firstQuery).toContain('withExclusiveFileLock');
 
-    const rebuilt = await runCli(['graph', 'index', '--cwd', graphRepository]);
-    expect(rebuilt).toContain('Indexing code graph: code-graph-repository');
-    expect(rebuilt).toContain('Code graph ready for code-graph-repository:');
+      const rebuilt = await runCli(['graph', 'index', '--cwd', graphRepository]);
+      expect(rebuilt).toContain('Indexing code graph: code-graph-repository');
+      expect(rebuilt).toContain('Code graph ready for code-graph-repository:');
 
-    const pathResult = await runCliJson(PathResultSchema, [
-      'graph',
-      'path',
-      '--cwd',
-      graphRepository,
-      '--from',
-      'runApplication',
-      '--to',
-      'withExclusiveFileLock',
-      '--json',
-    ]);
-    expect(pathResult.operation).toBe('path');
-    expect(pathResult.edges).toEqual(
-      expect.arrayContaining([expect.objectContaining({relation: 'calls', targetName: 'withExclusiveFileLock'})]),
-    );
-    const runApplicationId = EffectOption.getOrUndefined(
-      EffectOption.map(EffectOption.fromNullishOr(pathResult.nodes), __effectArrayReceiver =>
-        EffectOption.getOrUndefined(
-          EffectArray.findFirst(__effectArrayReceiver, node => node.name === 'runApplication'),
-        ),
-      ),
-    )?.id;
-    const lockId = EffectOption.getOrUndefined(
-      EffectOption.map(EffectOption.fromNullishOr(pathResult.nodes), __effectArrayReceiver =>
-        EffectOption.getOrUndefined(
-          EffectArray.findFirst(__effectArrayReceiver, node => node.name === 'withExclusiveFileLock'),
-        ),
-      ),
-    )?.id;
-    expect(runApplicationId).toMatch(/^cgs_[a-f0-9]{32,64}$/);
-    expect(lockId).toMatch(/^cgs_[a-f0-9]{32,64}$/);
-    if (!runApplicationId || !lockId) throw TestError.make({message: 'Expected packaged graph fixture node IDs.'});
-
-    const exactNode = await runCliJson(PathResultSchema, [
-      'graph',
-      'node',
-      '--cwd',
-      graphRepository,
-      '--node-id',
-      lockId,
-      '--json',
-    ]);
-    expect(exactNode).toMatchObject({
-      nodes: [expect.objectContaining({id: lockId, name: 'withExclusiveFileLock'})],
-      operation: 'node',
-    });
-
-    const neighbors = await runCliJson(NeighborResultSchema, [
-      'graph',
-      'neighbors',
-      '--cwd',
-      graphRepository,
-      '--node-id',
-      lockId,
-      '--direction',
-      'incoming',
-      '--depth',
-      '1',
-      '--json',
-    ]);
-    expect(neighbors.operation).toBe('neighbors');
-    expect(neighbors.nodes).toEqual(expect.arrayContaining([expect.objectContaining({id: lockId})]));
-    expect(neighbors.edges).toEqual(
-      expect.arrayContaining([expect.objectContaining({provenance: 'resolved', targetId: lockId})]),
-    );
-
-    const stableIdPath = await runCliJson(PathResultSchema, [
-      'graph',
-      'path',
-      '--cwd',
-      graphRepository,
-      '--from',
-      runApplicationId,
-      '--to',
-      lockId,
-      '--json',
-    ]);
-    expect(stableIdPath.operation).toBe('path');
-    expect(stableIdPath.edges).toEqual(
-      expect.arrayContaining([expect.objectContaining({relation: 'calls', targetId: lockId})]),
-    );
-
-    const semanticQuery = 'serialize concurrent tasks via mutual exclusion';
-    const repositoryTokens = new Set(
-      Effect.pipe(
-        EffectArray.join(
-          await Promise.all(
-            EffectArray.map(await readdir(graphRepository, {recursive: true}), async relative => {
-              if (
-                Effect.pipe(relative, __effectPipeInput1 => {
-                  const __effectPipeStage20 = Effect.pipe(__effectPipeInput1, EffectString.replaceAll('\\', '/'));
-                  const __effectPipeStage21 = Effect.pipe(
-                    __effectPipeStage20,
-                    EffectString.match(/^\.git(?:\/|$)/),
-                    Effect.Option.getOrElse(() => null),
-                  );
-                  return __effectPipeStage21;
-                })
-              )
-                return '';
-              const target = join(graphRepository, relative);
-              return (await stat(target)).isFile() ? await readFile(target, 'utf8') : '';
-            }),
+      const pathResult = await runCliJson(PathResultSchema, [
+        'graph',
+        'path',
+        '--cwd',
+        graphRepository,
+        '--from',
+        'runApplication',
+        '--to',
+        'withExclusiveFileLock',
+        '--json',
+      ]);
+      expect(pathResult.operation).toBe('path');
+      expect(pathResult.edges).toEqual(
+        expect.arrayContaining([expect.objectContaining({relation: 'calls', targetName: 'withExclusiveFileLock'})]),
+      );
+      const runApplicationId = EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(pathResult.nodes), __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(__effectArrayReceiver, node => node.name === 'runApplication'),
           ),
-          '\n',
         ),
-        __effectPipeInput => {
-          const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.toLowerCase);
-          const __effectPipeStage1 = Effect.pipe(
-            __effectPipeStage0,
-            EffectString.match(/[a-z0-9_]+/g),
-            Effect.Option.getOrElse(() => null),
-          );
-          return __effectPipeStage1;
-        },
-      ) ?? [],
-    );
-    expect(
-      EffectArray.every(Effect.pipe(semanticQuery, EffectString.split(' ')), term => !repositoryTokens.has(term)),
-    ).toBe(true);
-    const semanticStartedAt = new Date().toISOString();
-    const semanticStart = performance.now();
-    let semanticOutput: {readonly stderr: string; readonly stdout: string} | undefined;
-    const semantic = await runCliJson(
-      SemanticResultSchema,
-      ['graph', 'query', '--cwd', graphRepository, '--query', semanticQuery, '--json'],
-      {},
-      output => {
-        semanticOutput = output;
-      },
-    );
-    const semanticElapsedMs = performance.now() - semanticStart;
-    try {
-      expect(semantic).toMatchObject({
-        freshness: 'current',
-        operation: 'query',
-        snapshot: {
-          commit: Effect.pipe(await runGit(['rev-parse', 'HEAD'], graphRepository), EffectString.trim),
-          dirty: false,
-          id: expect.stringMatching(/^cgsn_[a-f0-9]{40}$/),
-          worktreeId: expect.stringMatching(/^[a-f0-9]{64}$/),
-        },
+      )?.id;
+      const lockId = EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(pathResult.nodes), __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(__effectArrayReceiver, node => node.name === 'withExclusiveFileLock'),
+          ),
+        ),
+      )?.id;
+      expect(runApplicationId).toMatch(/^cgs_[a-f0-9]{32,64}$/);
+      expect(lockId).toMatch(/^cgs_[a-f0-9]{32,64}$/);
+      if (!runApplicationId || !lockId) throw TestError.make({message: 'Expected packaged graph fixture node IDs.'});
+
+      const exactNode = await runCliJson(PathResultSchema, [
+        'graph',
+        'node',
+        '--cwd',
+        graphRepository,
+        '--node-id',
+        lockId,
+        '--json',
+      ]);
+      expect(exactNode).toMatchObject({
+        nodes: [expect.objectContaining({id: lockId, name: 'withExclusiveFileLock'})],
+        operation: 'node',
       });
-      const budgetWarning =
-        'Semantic graph search reached its elapsed-time budget; lexical graph results were returned.';
-      if (semantic.warnings?.includes(budgetWarning)) {
-        expect(semantic.warnings).toEqual([budgetWarning]);
-        expect(semantic.nodes).toEqual([]);
-        expect(semantic.edges).toEqual([]);
-      } else {
-        expect(semantic.warnings).toEqual([]);
-        expect(semantic.nodes).toEqual(
-          expect.arrayContaining([expect.objectContaining({path: 'docs/architecture.md', score: expect.any(Number)})]),
-        );
-      }
-    } catch (cause) {
-      try {
-        const scrub = (text: string | undefined, limit: number) => {
-          let value = text ?? '';
-          for (const [path, replacement] of [
-            [home, '<fixture-home>'],
-            [userHome, '<fixture-user>'],
-            [temporaryRoot, '<fixture>'],
-            [root, '<checkout>'],
-          ])
-            for (const spelling of [
-              path,
-              Effect.pipe(path, EffectString.replaceAll('\\', '/')),
-              Effect.pipe(path, EffectString.replaceAll('/', '\\')),
-            ])
-              value = Effect.pipe(value, EffectString.replaceAll(spelling, replacement));
-          return Effect.pipe(value, EffectString.slice(0, limit));
-        };
-        const packet = {
-          schemaVersion: 1,
-          sourceCommit:
-            Effect.pipe(process.env.GITHUB_SHA, effectOptionalString =>
-              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.slice(0, 64)),
-            ) ?? 'unavailable',
-          platform: process.platform,
-          arch: process.arch,
-          queryCase: 'mutual-exclusion',
-          command: {
-            startedAt: semanticStartedAt,
-            elapsedMs: semanticElapsedMs,
-            exitCode: 0,
-            stderr: scrub(semanticOutput?.stderr, 2_048),
-          },
-          indexOutput: scrub(rebuilt, 4_096),
-          indexProgress: EffectArray.map(
-            EffectArray.filter(
-              Effect.pipe(rebuilt, EffectString.split('\n')),
-              __effectArrayValue2 => !!(line => /^(?:Semantic vectors:|Embedding)/.test(line))(__effectArrayValue2),
-            ).slice(-3),
-            line => scrub(line, 256),
+
+      const neighbors = await runCliJson(NeighborResultSchema, [
+        'graph',
+        'neighbors',
+        '--cwd',
+        graphRepository,
+        '--node-id',
+        lockId,
+        '--direction',
+        'incoming',
+        '--depth',
+        '1',
+        '--json',
+      ]);
+      expect(neighbors.operation).toBe('neighbors');
+      expect(neighbors.nodes).toEqual(expect.arrayContaining([expect.objectContaining({id: lockId})]));
+      expect(neighbors.edges).toEqual(
+        expect.arrayContaining([expect.objectContaining({provenance: 'resolved', targetId: lockId})]),
+      );
+
+      const stableIdPath = await runCliJson(PathResultSchema, [
+        'graph',
+        'path',
+        '--cwd',
+        graphRepository,
+        '--from',
+        runApplicationId,
+        '--to',
+        lockId,
+        '--json',
+      ]);
+      expect(stableIdPath.operation).toBe('path');
+      expect(stableIdPath.edges).toEqual(
+        expect.arrayContaining([expect.objectContaining({relation: 'calls', targetId: lockId})]),
+      );
+
+      const semanticQuery = 'serialize concurrent tasks via mutual exclusion';
+      const repositoryTokens = new Set(
+        Effect.pipe(
+          EffectArray.join(
+            await Promise.all(
+              EffectArray.map(await readdir(graphRepository, {recursive: true}), async relative => {
+                if (
+                  Effect.pipe(relative, __effectPipeInput1 => {
+                    const __effectPipeStage20 = Effect.pipe(__effectPipeInput1, EffectString.replaceAll('\\', '/'));
+                    const __effectPipeStage21 = Effect.pipe(
+                      __effectPipeStage20,
+                      EffectString.match(/^\.git(?:\/|$)/),
+                      Effect.Option.getOrElse(() => null),
+                    );
+                    return __effectPipeStage21;
+                  })
+                )
+                  return '';
+                const target = join(graphRepository, relative);
+                return (await stat(target)).isFile() ? await readFile(target, 'utf8') : '';
+              }),
+            ),
+            '\n',
           ),
-          query: {
-            operation: 'query',
-            freshness: scrub(semantic.freshness, 128),
-            snapshot: {
-              id: scrub(semantic.snapshot?.id, 128),
-              worktreeId: scrub(semantic.snapshot?.worktreeId, 128),
-              commit: scrub(semantic.snapshot?.commit, 128),
-            },
-            warningCount: semantic.warnings?.length ?? 0,
-            omittedWarnings: Math.max(0, (semantic.warnings?.length ?? 0) - 8),
-            warnings: EffectArray.map((semantic.warnings ?? []).slice(0, 8), warning => scrub(warning, 256)),
-            nodeCount: semantic.nodes?.length ?? 0,
-            omittedNodes: Math.max(0, (semantic.nodes?.length ?? 0) - 12),
-            nodes: EffectArray.map((semantic.nodes ?? []).slice(0, 12), node => ({
-              id: scrub(node.id, 128),
-              path: scrub(node.path, 256),
-              kind: scrub(node.kind, 64),
-              score: Number.isFinite(node.score) ? node.score : null,
-            })),
+          __effectPipeInput => {
+            const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.toLowerCase);
+            const __effectPipeStage1 = Effect.pipe(
+              __effectPipeStage0,
+              EffectString.match(/[a-z0-9_]+/g),
+              Effect.Option.getOrElse(() => null),
+            );
+            return __effectPipeStage1;
           },
-          model: {
-            metadataUnavailable: coreEmbeddingManifest ? undefined : 'manifest-absent',
-            id: coreEmbeddingManifest?.id,
-            sha256: coreEmbeddingManifest?.sha256,
-            dimensions: coreEmbeddingManifest?.dimensions,
+        ) ?? [],
+      );
+      expect(
+        EffectArray.every(Effect.pipe(semanticQuery, EffectString.split(' ')), term => !repositoryTokens.has(term)),
+      ).toBe(true);
+      const semanticStartedAt = new Date().toISOString();
+      const semanticStart = performance.now();
+      let semanticOutput: {readonly stderr: string; readonly stdout: string} | undefined;
+      const semantic = await runCliJson(
+        SemanticResultSchema,
+        ['graph', 'query', '--cwd', graphRepository, '--query', semanticQuery, '--json'],
+        {},
+        output => {
+          semanticOutput = output;
+        },
+      );
+      const semanticElapsedMs = performance.now() - semanticStart;
+      try {
+        expect(semantic).toMatchObject({
+          freshness: 'current',
+          operation: 'query',
+          snapshot: {
+            commit: Effect.pipe(await runGit(['rev-parse', 'HEAD'], graphRepository), EffectString.trim),
+            dirty: false,
+            id: expect.stringMatching(/^cgsn_[a-f0-9]{40}-lx2$/),
+            worktreeId: expect.stringMatching(/^[a-f0-9]{64}$/),
           },
-          // This is a post-failure observation, not evidence of query-time readiness.
-          readonlyFixture: scrub(await graphIndexFailureEvidence(home, semantic.snapshot), 4_096),
-          truncated: false,
-        };
-        let text = JSON.stringify(packet);
-        if (new TextEncoder().encode(text).byteLength > 16_320) {
-          packet.indexOutput = 'omitted: packet-size-limit';
-          packet.readonlyFixture = 'omitted: packet-size-limit';
-          packet.query.nodes = packet.query.nodes.slice(0, 2);
-          packet.query.warnings = packet.query.warnings.slice(0, 2);
-          packet.query.omittedNodes = packet.query.nodeCount - packet.query.nodes.length;
-          packet.query.omittedWarnings = packet.query.warningCount - packet.query.warnings.length;
-          packet.truncated = true;
-          text = JSON.stringify(packet);
+        });
+        const budgetWarning =
+          'Semantic graph search reached its elapsed-time budget; lexical graph results were returned.';
+        if (semantic.warnings?.includes(budgetWarning)) {
+          expect(semantic.warnings).toEqual([budgetWarning]);
+          expect(semantic.nodes).toEqual([]);
+          expect(semantic.edges).toEqual([]);
+        } else {
+          expect(semantic.warnings).toEqual([]);
+          expect(semantic.nodes).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({path: 'docs/architecture.md', score: expect.any(Number)}),
+            ]),
+          );
         }
-        if (new TextEncoder().encode(text).byteLength > 16_320)
-          text = JSON.stringify({
+      } catch (cause) {
+        try {
+          const scrub = (text: string | undefined, limit: number) => {
+            let value = text ?? '';
+            for (const [path, replacement] of [
+              [home, '<fixture-home>'],
+              [userHome, '<fixture-user>'],
+              [temporaryRoot, '<fixture>'],
+              [root, '<checkout>'],
+            ])
+              for (const spelling of [
+                path,
+                Effect.pipe(path, EffectString.replaceAll('\\', '/')),
+                Effect.pipe(path, EffectString.replaceAll('/', '\\')),
+              ])
+                value = Effect.pipe(value, EffectString.replaceAll(spelling, replacement));
+            return Effect.pipe(value, EffectString.slice(0, limit));
+          };
+          const packet = {
             schemaVersion: 1,
+            sourceCommit:
+              Effect.pipe(process.env.GITHUB_SHA, effectOptionalString =>
+                effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.slice(0, 64)),
+              ) ?? 'unavailable',
+            platform: process.platform,
+            arch: process.arch,
             queryCase: 'mutual-exclusion',
-            metadataUnavailable: 'packet-size-limit',
-          });
-        process.stderr.write(`Packaged semantic fixture: ${text}\n`);
-      } catch {
-        // Diagnostics are best effort; retain the original assertion and stack.
+            command: {
+              startedAt: semanticStartedAt,
+              elapsedMs: semanticElapsedMs,
+              exitCode: 0,
+              stderr: scrub(semanticOutput?.stderr, 2_048),
+            },
+            indexOutput: scrub(rebuilt, 4_096),
+            indexProgress: EffectArray.map(
+              EffectArray.filter(
+                Effect.pipe(rebuilt, EffectString.split('\n')),
+                __effectArrayValue2 => !!(line => /^(?:Semantic vectors:|Embedding)/.test(line))(__effectArrayValue2),
+              ).slice(-3),
+              line => scrub(line, 256),
+            ),
+            query: {
+              operation: 'query',
+              freshness: scrub(semantic.freshness, 128),
+              snapshot: {
+                id: scrub(semantic.snapshot?.id, 128),
+                worktreeId: scrub(semantic.snapshot?.worktreeId, 128),
+                commit: scrub(semantic.snapshot?.commit, 128),
+              },
+              warningCount: semantic.warnings?.length ?? 0,
+              omittedWarnings: Math.max(0, (semantic.warnings?.length ?? 0) - 8),
+              warnings: EffectArray.map((semantic.warnings ?? []).slice(0, 8), warning => scrub(warning, 256)),
+              nodeCount: semantic.nodes?.length ?? 0,
+              omittedNodes: Math.max(0, (semantic.nodes?.length ?? 0) - 12),
+              nodes: EffectArray.map((semantic.nodes ?? []).slice(0, 12), node => ({
+                id: scrub(node.id, 128),
+                path: scrub(node.path, 256),
+                kind: scrub(node.kind, 64),
+                score: Number.isFinite(node.score) ? node.score : null,
+              })),
+            },
+            model: {
+              metadataUnavailable: coreEmbeddingManifest ? undefined : 'manifest-absent',
+              id: coreEmbeddingManifest?.id,
+              sha256: coreEmbeddingManifest?.sha256,
+              dimensions: coreEmbeddingManifest?.dimensions,
+            },
+            // This is a post-failure observation, not evidence of query-time readiness.
+            readonlyFixture: scrub(await graphIndexFailureEvidence(home, semantic.snapshot), 4_096),
+            truncated: false,
+          };
+          let text = JSON.stringify(packet);
+          if (new TextEncoder().encode(text).byteLength > 16_320) {
+            packet.indexOutput = 'omitted: packet-size-limit';
+            packet.readonlyFixture = 'omitted: packet-size-limit';
+            packet.query.nodes = packet.query.nodes.slice(0, 2);
+            packet.query.warnings = packet.query.warnings.slice(0, 2);
+            packet.query.omittedNodes = packet.query.nodeCount - packet.query.nodes.length;
+            packet.query.omittedWarnings = packet.query.warningCount - packet.query.warnings.length;
+            packet.truncated = true;
+            text = JSON.stringify(packet);
+          }
+          if (new TextEncoder().encode(text).byteLength > 16_320)
+            text = JSON.stringify({
+              schemaVersion: 1,
+              queryCase: 'mutual-exclusion',
+              metadataUnavailable: 'packet-size-limit',
+            });
+          process.stderr.write(`Packaged semantic fixture: ${text}\n`);
+        } catch {
+          // Diagnostics are best effort; retain the original assertion and stack.
+        }
+        throw cause;
       }
-      throw cause;
-    }
 
-    const missing = await runCliJson(MissingGraphResultSchema, [
-      'graph',
-      'query',
-      '--cwd',
-      graphRepository,
-      '--query',
-      'payment settlement gateway',
-      '--json',
-    ]);
-    expect(missing.nodes).toEqual([]);
+      const missing = await runCliJson(MissingGraphResultSchema, [
+        'graph',
+        'query',
+        '--cwd',
+        graphRepository,
+        '--query',
+        'payment settlement gateway',
+        '--json',
+      ]);
+      expect(missing.nodes).toEqual([]);
 
-    const injectedGitOutput = join(temporaryRoot, 'git-option-injection-output');
-    await expect(
-      runCli(['graph', 'impact', '--cwd', graphRepository, '--base', `--output=${injectedGitOutput}`, '--json']),
-    ).rejects.toThrow();
-    await expect(stat(injectedGitOutput)).rejects.toMatchObject({code: 'ENOENT'});
+      const injectedGitOutput = join(temporaryRoot, 'git-option-injection-output');
+      await expect(
+        runCli(['graph', 'impact', '--cwd', graphRepository, '--base', `--output=${injectedGitOutput}`, '--json']),
+      ).rejects.toThrow();
+      await expect(stat(injectedGitOutput)).rejects.toMatchObject({code: 'ENOENT'});
 
-    const repositoryIndexes = join(home, 'indexes', 'code-graph', 'repositories');
-    const repositories = await readdir(repositoryIndexes);
-    expect(repositories).toHaveLength(1);
-    const files = await readdir(join(repositoryIndexes, repositories[0]), {recursive: true});
-    expect(files).toContain('graph-v3.sqlite');
-    expect(files).toEqual(expect.arrayContaining([expect.stringMatching(/vectors-v2\.sqlite$/)]));
-    expect(files).not.toEqual(expect.arrayContaining([expect.stringMatching(/vectors\.bin$/)]));
+      const repositoryIndexes = join(home, 'indexes', 'code-graph', 'repositories');
+      const repositories = await readdir(repositoryIndexes);
+      expect(repositories).toHaveLength(1);
+      const files = await readdir(join(repositoryIndexes, repositories[0]), {recursive: true});
+      expect(files).toContain('graph-v3.sqlite');
+      expect(files).toEqual(expect.arrayContaining([expect.stringMatching(/vectors-v2\.sqlite$/)]));
+      expect(files).not.toEqual(expect.arrayContaining([expect.stringMatching(/vectors\.bin$/)]));
 
-    const exportPath = join(temporaryRoot, 'native-code-graph.json');
-    expect(
-      await runCli(['graph', 'export', '--cwd', graphRepository, '--format', 'json', '--output', exportPath]),
-    ).toContain('Exported');
-    const exported = Schema.decodeUnknownSync(ExportedGraphSchema)(JSON.parse(await readFile(exportPath, 'utf8')));
-    expect(exported.type).toBe('threadnote-code-graph-export');
-    expect(exported.schema).toBe('threadnote.code-graph-export');
-    expect(exported.version).toBe(1);
-    expect(exported.nodes?.length).toBeGreaterThan(0);
-    expect(exported.edges?.length).toBeGreaterThan(0);
-    expect(exported.summary?.nodes?.written).toBe(exported.nodes?.length);
-    expect(exported.summary?.edges?.written).toBe(exported.edges?.length);
-    await expect(
-      runCli(['graph', 'export', '--cwd', graphRepository, '--format', 'json', '--output', exportPath]),
-    ).rejects.toThrow(/already exists/);
-  });
+      const exportPath = join(temporaryRoot, 'native-code-graph.json');
+      expect(
+        await runCli(['graph', 'export', '--cwd', graphRepository, '--format', 'json', '--output', exportPath]),
+      ).toContain('Exported');
+      const exported = Schema.decodeUnknownSync(ExportedGraphSchema)(JSON.parse(await readFile(exportPath, 'utf8')));
+      expect(exported.type).toBe('threadnote-code-graph-export');
+      expect(exported.schema).toBe('threadnote.code-graph-export');
+      expect(exported.version).toBe(1);
+      expect(exported.nodes?.length).toBeGreaterThan(0);
+      expect(exported.edges?.length).toBeGreaterThan(0);
+      expect(exported.summary?.nodes?.written).toBe(exported.nodes?.length);
+      expect(exported.summary?.edges?.written).toBe(exported.edges?.length);
+      await expect(
+        runCli(['graph', 'export', '--cwd', graphRepository, '--format', 'json', '--output', exportPath]),
+      ).rejects.toThrow(/already exists/);
+    },
+  );
 
   it('writes privacy-safe production logs across concurrent standalone processes', async () => {
     const logPath = join(home, 'logs', 'threadnote.log');
@@ -1630,7 +1643,8 @@ describe('built self-contained distribution', () => {
         operation: 'query',
         repository: {displayName: 'code-graph-repository'},
       });
-      expect(JSON.stringify(graph.structuredContent)).toContain('withExclusiveFileLock');
+      // TypeScript symbols need the native compiler, which this payload cannot run here.
+      if (!nativeTypeScriptAbsent) expect(JSON.stringify(graph.structuredContent)).toContain('withExclusiveFileLock');
       await expect
         .poll(
           async () => {
@@ -1915,7 +1929,13 @@ async function runCliJson<S extends Schema.ConstraintDecoder<unknown>>(
   );
 }
 
-async function cliFailureEvidence(targetHome: string, cause: unknown): Promise<string> {
+async function cliFailureEvidence(
+  targetHome: string,
+  cause: unknown,
+  childPid: number | undefined,
+  launchedAt: number,
+  operation: string | undefined,
+): Promise<string> {
   const detail = (key: string) => {
     const value = childProcessOutput(cause, key);
     if (typeof value === 'string') return Effect.pipe(value, EffectString.slice(0, 128));
@@ -1930,18 +1950,31 @@ async function cliFailureEvidence(targetHome: string, cause: unknown): Promise<s
     platform: process.platform,
     architecture: process.arch,
   };
-  // Test homes contain synthetic data. Read a bounded tail and expose only diagnostic categories.
+  // Test homes contain synthetic data. Correlate bounded records internally; never emit the PID or invocation ID.
   const phases = await (async () => {
+    if (childPid === undefined || operation === undefined)
+      return {diagnostics: 'inconclusive', reason: 'child-identity-or-operation-unavailable'};
     const file = await open(join(targetHome, 'logs', 'threadnote.log'), 'r');
     try {
       const size = (await file.stat()).size;
       const buffer = Buffer.alloc(Math.min(32_768, size));
       const {bytesRead} = await file.read(buffer, 0, buffer.length, Math.max(0, size - buffer.length));
       const lines = Effect.pipe(buffer.subarray(0, bytesRead).toString('utf8'), EffectString.split('\n'));
-      return EffectArray.flatMap(EffectArray.takeRight(lines, 17), line => {
+      const records = EffectArray.flatMap(EffectArray.takeRight(lines, 17), line => {
         try {
           const record: unknown = JSON.parse(line);
           if (typeof record !== 'object' || record === null) return [];
+          const processId = Reflect.get(record, 'processId');
+          const recordOperation = Reflect.get(record, 'operation');
+          const timestamp = Reflect.get(record, 'timestamp');
+          if (
+            processId !== childPid ||
+            recordOperation !== operation ||
+            typeof timestamp !== 'string' ||
+            !Number.isFinite(Date.parse(timestamp)) ||
+            Date.parse(timestamp) < launchedAt
+          )
+            return [];
           const selected: Record<string, string | number | boolean> = {};
           for (const key of ['component', 'operation', 'event', 'outcome', 'errorType', 'phase']) {
             const value = Reflect.get(record, key);
@@ -1953,10 +1986,13 @@ async function cliFailureEvidence(targetHome: string, cause: unknown): Promise<s
           return [];
         }
       });
+      return records.length === 0
+        ? {diagnostics: 'inconclusive', reason: 'no-matching-correlated-phase'}
+        : {diagnostics: 'correlated', phases: records};
     } finally {
       await file.close();
     }
-  })().catch(() => []);
+  })().catch(() => ({diagnostics: 'inconclusive', reason: 'log-unavailable'}));
   return `Packaged CLI failure evidence: ${JSON.stringify({exit, phases})}`;
 }
 
@@ -1965,13 +2001,18 @@ async function runCliOutput(
   environment: NodeJS.ProcessEnv = {},
   targetHome = home,
 ): Promise<{readonly stderr: string; readonly stdout: string}> {
+  const launchedAt = Date.now();
+  let childPid: number | undefined;
+  const operation: string | undefined = args[0];
   try {
-    const result = await execute(cli, ['--home', targetHome, ...args], {
+    const pending = execute(cli, ['--home', targetHome, ...args], {
       cwd: root,
       env: cliEnvironment(environment),
       maxBuffer: cliOutputMaxBytes,
       timeout: realModelTimeoutMs,
     });
+    childPid = pending.child.pid;
+    const result = await pending;
     return {stderr: result.stderr, stdout: result.stdout};
   } catch (cause) {
     throw TestError.make({
@@ -1982,7 +2023,9 @@ async function runCliOutput(
           `${cli} --home ${targetHome} ${EffectArray.join(args, ' ')}`,
           `stdout:\n${boundedFailureOutput(childProcessOutput(cause, 'stdout'))}`,
           `stderr:\n${boundedFailureOutput(childProcessOutput(cause, 'stderr'))}`,
-          await cliFailureEvidence(targetHome, cause).catch(() => 'Packaged CLI failure evidence unavailable.'),
+          await cliFailureEvidence(targetHome, cause, childPid, launchedAt, operation).catch(
+            () => 'Packaged CLI failure evidence unavailable.',
+          ),
           ...(args[0] === 'recall' ? [`Packaged recall stages: ${await recallFailureStages('cli', targetHome)}`] : []),
           ...(args[0] === 'source' && args[1] === 'sync'
             ? [await coordinatorFailureEvidence(targetHome, environment)]

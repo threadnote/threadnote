@@ -1,7 +1,19 @@
+import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import {codeGraphLayout} from '@threadnote/graph/layout';
+import {Path} from 'effect';
+import {runCodeGraphCheckpointExport, importCodeGraphCheckpointSnapshot} from '@threadnote/graph/checkpoint/operations';
+import {
+  CodeGraphCheckpointStreamDecoderV1,
+  encodeCodeGraphCheckpointPackV1,
+  requireFullCheckpointVerification,
+} from '@threadnote/graph/checkpoint/pack';
+import {verifyCheckpointCompletionInPublishingTransaction} from '@threadnote/graph/checkpoint/authority';
+import type {CodeGraphCheckpointImportVerification} from '@threadnote/graph/store';
 import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Option} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as SqlClient from 'effect/sql/SqlClient';
 import fc from 'fast-check';
@@ -30,7 +42,7 @@ import {mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {Database} from 'bun:sqlite';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {codeGraphCommittedContentHash} from '@threadnote/graph/content_identity';
 import {
   CODE_GRAPH_CHECKPOINT_COMPRESSION_PROFILE,
@@ -51,7 +63,7 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 describe('code graph checkpoint import store', () => {
-  effectIt.effect('keeps staged records unreachable and atomically publishes an immutable receipt', () =>
+  effectIt.effect('keeps staged records unreachable and refuses metadata-only publication', () =>
     TestClock.withLive(
       withFixture(({databasePath, identity, snapshot, store}) =>
         Effect.gen(function* () {
@@ -115,79 +127,340 @@ describe('code graph checkpoint import store', () => {
           );
           expect(emptyPage._tag).toBe('Failure');
 
-          yield* store.finalizeCheckpointImport(databasePath, identity, snapshot, ownerToken, input);
-          expect(yield* store.readySnapshotById(databasePath, snapshot.id)).toMatchObject({
-            id: snapshot.id,
-            state: 'ready',
-          });
-          const receipt = yield* store.checkpointImportReceipt(databasePath, snapshot.id);
-          expect(receipt).toMatchObject({
-            artifact: input.artifact,
-            logical: input.logical,
-            snapshotId: snapshot.id,
-            trust: 'local-unverified',
-          });
-          expect(yield* store.recordCheckpointImportReceipt(databasePath, snapshot.id, input)).toMatchObject({
-            state: 'already-recorded',
-          });
           expect(
-            yield* store.readySnapshotByLogicalDigest(
-              databasePath,
-              identity.repositoryId,
-              input.logical.digest,
-              input.abi.digest,
-            ),
-          ).toMatchObject({id: snapshot.id});
-
-          const conflictingReceipt = yield* Effect.exit(
-            store.recordCheckpointImportReceipt(databasePath, snapshot.id, {
-              ...input,
-              artifact: {...input.artifact, digest: Effect2.pipe('f', EffectString.repeat(64))},
-            }),
-          );
-          expect(conflictingReceipt._tag).toBe('Failure');
-          const remaining = yield* store.withSession(
-            databasePath,
-            Effect.gen(function* () {
-              const sql = yield* SqlClient.SqlClient;
-              return yield* sql.unsafe<{
-                readonly batches: number;
-                readonly builds: number;
-                readonly workspace_root: string;
-              }>(
-                `SELECT
-                (SELECT COUNT(*) FROM checkpoint_import_builds WHERE snapshot_id = ?) AS builds,
-                (SELECT COUNT(*) FROM checkpoint_import_batches WHERE snapshot_id = ?) AS batches,
-                (SELECT root FROM workspace_scopes WHERE snapshot_id = ? AND id = 'workspace-root') AS workspace_root`,
-                [snapshot.id, snapshot.id, snapshot.id],
-              );
-            }),
-          );
-          expect(remaining).toEqual([{batches: 0, builds: 0, workspace_root: ''}]);
-          // A legacy receipt cannot authorize a scope relabel, even if every
-          // other source identity and the artifact digest still match.
+            (yield* Effect.exit(store.finalizeCheckpointImport(databasePath, identity, snapshot, ownerToken, input)))
+              ._tag,
+          ).toBe('Failure');
+          expect(yield* store.readySnapshotById(databasePath, snapshot.id)).toBeUndefined();
+          expect(yield* store.checkpointImportReceipt(databasePath, snapshot.id)).toBeUndefined();
+          // Counterfeit ready state and perfect caller metadata still cannot issue an import receipt.
           yield* store.withSession(
             databasePath,
             Effect.gen(function* () {
               const sql = yield* SqlClient.SqlClient;
-              yield* sql`UPDATE snapshots SET scope_id = ${`code-graph-scope:${Effect2.pipe('f', EffectString.repeat(64))}`} WHERE id = ${snapshot.id}`;
+              yield* sql`UPDATE snapshots SET state='ready' WHERE id=${snapshot.id}`;
             }),
           );
+          expect((yield* Effect.exit(store.recordCheckpointImportReceipt(databasePath, snapshot.id, input)))._tag).toBe(
+            'Failure',
+          );
           expect(yield* store.checkpointImportReceipt(databasePath, snapshot.id)).toBeUndefined();
-          expect(
-            yield* store.readySnapshotByLogicalDigest(
-              databasePath,
-              identity.repositoryId,
-              input.logical.digest,
-              input.abi.digest,
-            ),
-          ).toBeUndefined();
-          expect(
-            String(yield* store.recordCheckpointImportReceipt(databasePath, snapshot.id, input).pipe(Effect.flip)),
-          ).toContain('only the full repository graph');
         }),
       ).pipe(provideTestLayer(ApplicationLayer)),
     ),
+  );
+
+  effectIt.effect(
+    'publishes actual original content proof, revalidates historical rows and never trusts decoder wrappers',
+    () =>
+      withAuthenticImport(f =>
+        Effect.gen(function* () {
+          const receipt = yield* f.store.checkpointImportReceipt(f.databasePath, f.snapshot.id);
+          expect(receipt?.completionSha256).toMatch(/^[a-f0-9]{64}$/u);
+          expect(receipt?.trust).toBe('local-unverified');
+          if (!receipt) throw new Error('Missing original receipt');
+          const {completionSha256: _completion, importedAt: _time, snapshotId: _id, ...input} = receipt;
+          expect(yield* f.store.recordCheckpointImportReceipt(f.databasePath, f.snapshot.id, input)).toMatchObject({
+            state: 'already-recorded',
+          });
+          expect(
+            yield* f.store.readySnapshotByLogicalDigest(
+              f.databasePath,
+              f.identity.repositoryId,
+              receipt.logical.digest,
+              receipt.abi.digest,
+            ),
+          ).toMatchObject({id: f.snapshot.id});
+          expect(() =>
+            requireFullCheckpointVerification(structuredClone(f.verification.artifactVerification)),
+          ).toThrow();
+          const authentic = requireFullCheckpointVerification(f.verification.artifactVerification);
+          const header = authentic.header;
+          const delta = encodeCodeGraphCheckpointPackV1(
+            {
+              abi: header.abi.input,
+              coverage: header.coverage,
+              repository: header.repository,
+              source: header.source,
+              ...(header.reuse ? {reuse: header.reuse} : {}),
+            },
+            [],
+            {
+              delta: {
+                base: {commit: header.source.commit, logicalDigest: header.logical, snapshotId: f.snapshot.id},
+                deletions: [],
+                targetLogical: header.logical,
+              },
+            },
+          );
+          const deltaDecoder = new CodeGraphCheckpointStreamDecoderV1();
+          deltaDecoder.push(delta.bytes);
+          expect(() => requireFullCheckpointVerification(deltaDecoder.finish())).toThrow();
+          const result = f.verification.artifactVerification;
+          if (typeof result !== 'object' || result === null) throw new Error('Missing decoder object');
+          Reflect.set(result, 'verification', 'header-only');
+          expect(() => requireFullCheckpointVerification(result)).toThrow();
+          Reflect.set(result, 'verification', 'full');
+          Reflect.set(result, 'header', {...header, counts: {...header.counts, file: header.counts.file + 1}});
+          expect(() => requireFullCheckpointVerification(result)).toThrow();
+          Reflect.set(result, 'header', header);
+          yield* importCodeGraphCheckpointSnapshot(
+            {
+              account: 'fixture',
+              agentContextHome: join(f.root, 'receiver-home'),
+              agentId: 'fixture',
+              manifestPath: join(f.root, 'manifest.yaml'),
+              user: 'fixture',
+            },
+            {
+              cwd: f.identity.repoRoot,
+              input: join(f.root, 'original.cgcp'),
+              expectedDigest: authentic.descriptor.digest,
+              followOnIndex: false,
+            },
+          );
+          expect((yield* f.store.checkpointImportReceipt(f.databasePath, f.snapshot.id))?.trust).toBe(
+            'local-unverified',
+          );
+          const lease = yield* f.store.acquireSnapshotLease(f.databasePath, f.snapshot.id, 60000);
+          yield* Effect.gen(function* () {
+            yield* f.store.withSession(
+              f.databasePath,
+              Effect.gen(function* () {
+                const sql = yield* SqlClient.SqlClient;
+                yield* sql`UPDATE checkpoint_import_receipts SET completion_sha256=NULL WHERE snapshot_id=${f.snapshot.id}`;
+              }),
+            );
+            yield* f.store.completeVerifiedCheckpointImport(
+              f.databasePath,
+              f.identity,
+              f.snapshot.id,
+              input,
+              f.verification,
+              lease,
+            );
+            expect((yield* f.store.checkpointImportReceipt(f.databasePath, f.snapshot.id))?.completionSha256).toBe(
+              receipt.completionSha256,
+            );
+            yield* f.store.withSession(
+              f.databasePath,
+              Effect.gen(function* () {
+                const sql = yield* SqlClient.SqlClient;
+                yield* sql`UPDATE checkpoint_import_receipts SET completion_sha256=NULL WHERE snapshot_id=${f.snapshot.id}`;
+                yield* sql`UPDATE snapshot_files SET mode='100755' WHERE snapshot_id=${f.snapshot.id} AND path='value.py'`;
+              }),
+            );
+            expect(
+              (yield* Effect.exit(
+                f.store.completeVerifiedCheckpointImport(
+                  f.databasePath,
+                  f.identity,
+                  f.snapshot.id,
+                  input,
+                  f.verification,
+                  lease,
+                ),
+              ))._tag,
+            ).toBe('Failure');
+            yield* f.store.withSession(
+              f.databasePath,
+              Effect.gen(function* () {
+                const sql = yield* SqlClient.SqlClient;
+                yield* sql`UPDATE snapshot_files SET mode='100644' WHERE snapshot_id=${f.snapshot.id} AND path='value.py'`;
+                const changed = yield* sql<{readonly term_key: number}>`UPDATE lexical_compact_postings SET weight=2
+            WHERE snapshot_key=(SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id=${f.snapshot.id})
+              AND term_key IN (SELECT term_key FROM lexical_compact_terms WHERE term LIKE '~body:v1:%') RETURNING term_key`;
+                expect(changed.length).toBeGreaterThan(0);
+              }),
+            );
+            expect(
+              (yield* Effect.exit(
+                f.store.completeVerifiedCheckpointImport(
+                  f.databasePath,
+                  f.identity,
+                  f.snapshot.id,
+                  input,
+                  f.verification,
+                  lease,
+                ),
+              ))._tag,
+            ).toBe('Failure');
+            yield* f.store.withSession(
+              f.databasePath,
+              Effect.gen(function* () {
+                const sql = yield* SqlClient.SqlClient;
+                yield* sql`UPDATE lexical_compact_postings SET weight=1
+            WHERE snapshot_key=(SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id=${f.snapshot.id})
+              AND term_key IN (SELECT term_key FROM lexical_compact_terms WHERE term LIKE '~body:v1:%')`;
+              }),
+            );
+
+            yield* f.store.withSession(
+              f.databasePath,
+              Effect.gen(function* () {
+                const sql = yield* SqlClient.SqlClient;
+                yield* sql`UPDATE checkpoint_import_receipts SET completion_sha256=NULL WHERE snapshot_id=${f.snapshot.id}`;
+                yield* sql`UPDATE symbols SET documentation='counterfeit body metadata' WHERE snapshot_id=${f.snapshot.id}`;
+              }),
+            );
+            expect(
+              (yield* Effect.exit(
+                f.store.completeVerifiedCheckpointImport(
+                  f.databasePath,
+                  f.identity,
+                  f.snapshot.id,
+                  input,
+                  f.verification,
+                  lease,
+                ),
+              ))._tag,
+            ).toBe('Failure');
+            expect(
+              (yield* f.store.checkpointImportReceipt(f.databasePath, f.snapshot.id))?.completionSha256,
+            ).toBeUndefined();
+          }).pipe(Effect.ensuring(f.store.releaseSnapshotLease(f.databasePath, lease).pipe(Effect.ignore)));
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('holds the same writer through actual canonical proof and completion, including rollback', () =>
+    withAuthenticImport(f =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem,
+          path = yield* Path.Path;
+        const commands = yield* CommandExecutor;
+        const executeBytes = commands.executeBytes;
+        if (!executeBytes) throw new Error('Binary Git adapter is required');
+        for (const disposition of ['commit', 'interrupt'] as const) {
+          const home = path.join(f.root, disposition),
+            layout = codeGraphLayout(path, home, f.identity.checkoutId, f.identity.worktreeId);
+          const entered = yield* Deferred.make<{readonly id: string; readonly owner: string}>(),
+            release = yield* Deferred.make<void>();
+          let stopped = false;
+          const wrapped = {
+            ...commands,
+            executeBytes: (command: string, args: readonly string[], options: Parameters<typeof executeBytes>[2]) =>
+              Effect.gen(function* () {
+                if (
+                  !stopped &&
+                  command === 'git' &&
+                  args.includes('ls-tree') &&
+                  (yield* fs.exists(layout.databasePath).pipe(Effect.orDie))
+                ) {
+                  const building = yield* Effect.sync(() => {
+                    const db = new Database(layout.databasePath, {readonly: true, strict: true});
+                    try {
+                      return db
+                        .query<{id: string; owner: string}, []>(
+                          `SELECT snapshot.id,owner.owner_token AS owner FROM snapshots snapshot
+                JOIN snapshot_build_owners owner ON owner.snapshot_id=snapshot.id
+                JOIN checkpoint_import_builds plan ON plan.snapshot_id=snapshot.id
+                WHERE snapshot.state='building' AND plan.expected_batch_count=(SELECT COUNT(*) FROM checkpoint_import_batches batch WHERE batch.snapshot_id=snapshot.id) LIMIT 1`,
+                        )
+                        .get();
+                    } finally {
+                      db.close(false);
+                    }
+                  });
+                  if (building) {
+                    stopped = true;
+                    yield* Deferred.succeed(entered, building);
+                    yield* Deferred.await(release);
+                  }
+                }
+                return yield* executeBytes(command, args, options);
+              }),
+          };
+          const importing = yield* Effect.forkChild(
+            importCodeGraphCheckpointSnapshot(
+              {
+                account: 'fixture',
+                agentContextHome: home,
+                agentId: 'fixture',
+                manifestPath: path.join(f.root, 'manifest.yaml'),
+                user: 'fixture',
+              },
+              {
+                cwd: f.identity.repoRoot,
+                input: path.join(f.root, 'original.cgcp'),
+                followOnIndex: false,
+              },
+            ).pipe(Effect.provideService(CommandExecutor, wrapped)),
+          );
+          yield* Effect.gen(function* () {
+            const building = yield* Deferred.await(entered);
+            const attempting = yield* Deferred.make<void>(),
+              finished = yield* Deferred.make<void>();
+            const writer = yield* Effect.forkChild(
+              f.store
+                .withSession(
+                  layout.databasePath,
+                  Effect.gen(function* () {
+                    const sql = yield* SqlClient.SqlClient;
+                    yield* sql.unsafe(
+                      'CREATE TEMP TABLE IF NOT EXISTS activation_state(key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID',
+                    );
+                    for (const [key, value] of [
+                      ['mode', 'persisted-full'],
+                      ['snapshot_id', building.id],
+                      ['owner_token', building.owner],
+                    ])
+                      yield* sql.unsafe('INSERT OR REPLACE INTO activation_state(key,value) VALUES(?,?)', [key, value]);
+                    yield* Deferred.succeed(attempting, undefined);
+                    yield* f.store.stageWorkspaceCatalog(layout.databasePath, {
+                      fingerprint: 'counterfeit',
+                      diagnostics: [],
+                      projects: [],
+                      workspaces: [
+                        {
+                          buildSystem: 'node',
+                          diagnostics: [],
+                          id: 'postverify-mutation',
+                          name: 'counterfeit',
+                          provenance: 'declared',
+                          root: '',
+                        },
+                      ],
+                    });
+                  }),
+                )
+                .pipe(Effect.exit, Effect.ensuring(Deferred.succeed(finished, undefined))),
+            );
+            yield* Deferred.await(attempting);
+            yield* Effect.yieldNow;
+            expect(Option.isNone(yield* Deferred.poll(finished))).toBe(true);
+            if (disposition === 'commit') {
+              yield* Deferred.succeed(release, undefined);
+              const imported = yield* Fiber.join(importing);
+              expect(
+                (yield* f.store.checkpointImportReceipt(layout.databasePath, imported.snapshot.id))?.completionSha256,
+              ).toMatch(/^[a-f0-9]{64}$/u);
+            } else {
+              yield* Fiber.interrupt(importing);
+              expect(yield* f.store.readySnapshotById(layout.databasePath, building.id)).toBeUndefined();
+              expect(yield* f.store.checkpointImportReceipt(layout.databasePath, building.id)).toBeUndefined();
+            }
+            expect((yield* Fiber.join(writer))._tag).toBe(disposition === 'commit' ? 'Failure' : 'Success');
+            if (disposition === 'commit') {
+              const remaining = yield* f.store.withSession(
+                layout.databasePath,
+                Effect.gen(function* () {
+                  const sql = yield* SqlClient.SqlClient;
+                  return yield* sql<{
+                    readonly count: number;
+                  }>`SELECT COUNT(*) AS count FROM workspace_scopes WHERE snapshot_id=${building.id} AND id='postverify-mutation'`;
+                }),
+              );
+              expect(remaining).toEqual([{count: 0}]);
+            } else {
+              // Rollback releases the writer; subsequent private staging never publishes completion.
+              expect(yield* f.store.readySnapshotById(layout.databasePath, building.id)).toBeUndefined();
+              expect(yield* f.store.checkpointImportReceipt(layout.databasePath, building.id)).toBeUndefined();
+            }
+          }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+        }
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
   fcEffectProp(
@@ -847,4 +1120,78 @@ function reusableHeader(
       graphContentId: `cgc_${Effect2.pipe('3', EffectString.repeat(40))}`,
     },
   };
+}
+
+function withAuthenticImport<A, E, R>(
+  use: (fixture: {
+    readonly root: string;
+    readonly databasePath: string;
+    readonly identity: RepositoryIdentity;
+    readonly snapshot: CodeGraphSnapshot;
+    readonly store: CodeGraphStoreShape;
+    readonly verification: CodeGraphCheckpointImportVerification;
+  }) => Effect.Effect<A, E, R>,
+) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => mkdtempSync(join(tmpdir(), 'threadnote-actual-checkpoint-'))),
+    root =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem,
+          path = yield* Path.Path;
+        const repository = path.join(root, 'repository');
+        yield* fs.makeDirectory(repository);
+        yield* fs.writeFileString(path.join(repository, 'package.json'), '{"name":"original-proof","private":true}');
+        yield* fs.writeFileString(
+          path.join(repository, 'value.py'),
+          'def originalValue():\n    privateToken = "secretword"\n    return privateToken\n',
+        );
+        for (const args of [
+          ['init', '-q', repository],
+          ['-C', repository, 'remote', 'add', 'origin', 'https://github.com/acme/original-proof.git'],
+          ['-C', repository, 'config', 'user.email', 'fixture@example.invalid'],
+          ['-C', repository, 'config', 'user.name', 'Fixture'],
+          ['-C', repository, 'add', '.'],
+          ['-C', repository, 'commit', '-qm', 'original'],
+        ])
+          yield* runCommandEffect('git', args);
+        const sourceHome = path.join(root, 'source-home'),
+          receiverHome = path.join(root, 'receiver-home');
+        const config = (home: string) => ({
+          account: 'fixture',
+          agentContextHome: home,
+          agentId: 'fixture',
+          manifestPath: path.join(root, 'manifest.yaml'),
+          user: 'fixture',
+        });
+        yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: sourceHome});
+        const artifact = path.join(root, 'original.cgcp');
+        yield* runCodeGraphCheckpointExport(config(sourceHome), {cwd: repository, output: artifact});
+        const decoder = new CodeGraphCheckpointStreamDecoderV1();
+        decoder.push(yield* fs.readFile(artifact));
+        const artifactVerification = decoder.finish();
+        const verification: CodeGraphCheckpointImportVerification = {
+          artifactVerification,
+          context:
+            yield* Effect.context<
+              Effect.Services<ReturnType<typeof verifyCheckpointCompletionInPublishingTransaction>>
+            >(),
+        };
+        const imported = yield* importCodeGraphCheckpointSnapshot(config(receiverHome), {
+          cwd: repository,
+          input: artifact,
+          followOnIndex: false,
+        });
+        const identity = yield* resolveRepositoryIdentity(repository);
+        const layout = codeGraphLayout(path, receiverHome, identity.checkoutId, identity.worktreeId);
+        return yield* use({
+          root,
+          databasePath: layout.databasePath,
+          identity,
+          snapshot: imported.snapshot,
+          store: yield* CodeGraphStore,
+          verification,
+        });
+      }),
+    root => Effect.sync(() => rmSync(root, {recursive: true, force: true})),
+  );
 }

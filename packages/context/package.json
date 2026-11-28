@@ -23,9 +23,20 @@
     "./health_semantic": "./src/health_semantic.ts",
     "./health_schedule": "./src/health_schedule.ts",
     "./health_maintenance": "./src/health_maintenance.ts",
-    "./memory_maintenance": "./src/memory_maintenance.ts"
+    "./memory_maintenance": "./src/memory_maintenance.ts",
+    "./navigation/model": "./src/navigation/model.ts",
+    "./navigation/assemble": "./src/navigation/assemble.ts",
+    "./navigation/structural": "./src/navigation/structural.ts",
+    "./navigation/project": "./src/navigation/project.ts",
+    "./navigation/discovery": "./src/navigation/discovery.ts",
+    "./navigation/continuation": "./src/navigation/continuation.ts",
+    "./navigation/semantic": "./src/navigation/semantic.ts",
+    "./navigation/request": "./src/navigation/request.ts",
+    "./navigation/read": "./src/navigation/read.ts",
+    "./navigation/lane": "./src/navigation/lane.ts"
   },
   "dependencies": {
+    "@threadnote/semantic": "workspace:*",
     "@threadnote/platform": "workspace:*",
     "@threadnote/store": "workspace:*",
     "@threadnote/memory": "workspace:*",

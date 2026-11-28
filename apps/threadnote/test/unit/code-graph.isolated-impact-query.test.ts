@@ -133,6 +133,7 @@ describe('isolated code graph impact query', () => {
         HOME: '/bootstrap-home',
         PATH: '/bootstrap-bin',
         THREADNOTE_PRIVATE_SELECTOR: input.query,
+        THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR: '/prepared/typescript',
       },
       input.threadnoteHome,
     );
@@ -165,6 +166,7 @@ describe('isolated code graph impact query', () => {
       PATH: '/bootstrap-bin',
       THREADNOTE_CODE_GRAPH_IMPACT_QUERY_WORKER: '1',
       THREADNOTE_HOME: input.threadnoteHome,
+      THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR: '/prepared/typescript',
     });
   });
 

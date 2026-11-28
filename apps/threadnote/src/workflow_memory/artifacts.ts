@@ -34,7 +34,7 @@ import {
   CurrentNativeJobReadyPromotion,
   CurrentNativeJobSourceView,
 } from '../workflow_automation/native_jobs.js';
-import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
+import {MemoryCodeCitationCaptureError, withLocalMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {readWorkflowSharedRoots} from './scopes.js';
 import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence, withWorkflowEvidenceAdmission} from './evidence.js';
@@ -300,7 +300,6 @@ const strictRead = Effect.fn('workflowMemory.strictRead')(function* (
     return yield* workflowError('identity-conflict', 'The owned artifact changed memory identity.');
   return {live, record, owned};
 });
-
 export const readWorkflowArtifact = Effect.fn('workflowMemory.readArtifact')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
@@ -340,11 +339,104 @@ export const readWorkflowArtifact = Effect.fn('workflowMemory.readArtifact')(fun
     verifiedReadback: true,
   } satisfies WorkflowReadResult;
 });
-
-export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperation')(function* (
+export const prepareWorkflowOperation = (config: RuntimeConfig, state: WorkflowJournal, request: WorkflowRequest) =>
+  prepareWorkflowOperationWithCapture(config, state, request, () =>
+    Effect.gen(function* () {
+      return yield* captureMemoryCodeCitationsForMcp(
+        config,
+        {
+          callerCwd: state.binding.repo,
+          project: yield* workflowGraphProjectHint(config, state.binding),
+          ...(state.binding.graphProject === undefined
+            ? {}
+            : {
+                expectedProjectScope: {kind: 'selected-project' as const, project: state.binding.graphProject},
+              }),
+          refs: request.codeRefs ?? [],
+          ...((yield* standardProfileBinding(config, state.binding.workflowRunId))
+            ? {allowStaleGraph: true, omitUnresolved: true}
+            : {}),
+        },
+        'workflow-memory',
+      );
+    }),
+  );
+const workflowCitationCaptureError = (failure: unknown) =>
+  Schema.is(MemoryCodeCitationCaptureError)(failure) && failure.retryable
+    ? workflowError(
+        'evidence-busy',
+        failure.recovery?.code === 'graph-writer-busy'
+          ? 'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.'
+          : 'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
+      )
+    : failure;
+type ProjectionPreparation = (
+  state: WorkflowJournal,
+  request: WorkflowRequest,
+) => ReturnType<typeof prepareWorkflowOperation>;
+/** Only the pure byte projection may share one local source fence. */
+export function withWorkflowProjectionCitations<A, E, R>(
+  config: RuntimeConfig,
+  binding: WorkflowJournal['binding'],
+  refs: readonly string[],
+  use: (prepare: ProjectionPreparation) => Effect.Effect<A, E, R>,
+) {
+  const ordinary: ProjectionPreparation = (state, request) => prepareWorkflowOperation(config, state, request);
+  if (!refs.length || EffectArray.some(refs, ref => EffectString.startsWith('cgr_')(EffectString.trim(ref))))
+    return use(ordinary);
+  return Effect.gen(function* () {
+    let active = true;
+    return yield* withLocalMemoryCodeCitations(
+      config,
+      {
+        callerCwd: binding.repo,
+        project: yield* workflowGraphProjectHint(config, binding),
+        refs,
+        ...(binding.graphProject === undefined
+          ? {}
+          : {
+              expectedProjectScope: {kind: 'selected-project' as const, project: binding.graphProject},
+            }),
+        ...((yield* standardProfileBinding(config, binding.workflowRunId)) ? {allowStaleGraph: true} : {}),
+      },
+      citations =>
+        Effect.gen(function* () {
+          const owner = yield* Effect.fiberId;
+          return yield* use((state, request) =>
+            Effect.gen(function* () {
+              if (!active || (yield* Effect.fiberId) !== owner)
+                return yield* workflowError('invalid-request', 'Projection preparation is outside its source fence.');
+              if (
+                stableJson(state.binding) !== stableJson(binding) ||
+                stableJson(request.codeRefs ?? []) !== stableJson(refs) ||
+                request.citationPolicy === 'defer'
+              )
+                return yield* ordinary(state, request);
+              return yield* prepareWorkflowOperationWithCapture(config, state, request, () =>
+                Effect.succeed({ok: true as const, citations}),
+              );
+            }),
+          );
+        }),
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          active = false;
+        }),
+      ),
+      Effect.mapError(workflowCitationCaptureError),
+    );
+  });
+}
+const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOperation')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
   request: WorkflowRequest,
+  capture: () => Effect.Effect<
+    Effect.Success<ReturnType<typeof captureMemoryCodeCitationsForMcp>>,
+    ReturnType<typeof workflowError>,
+    Effect.Services<ReturnType<typeof captureMemoryCodeCitationsForMcp>>
+  >,
 ) {
   const resourceIds = makeResourceIdScopeChecker();
   const action = request.action === 'preflight' ? request.mutation : request.action;
@@ -411,7 +503,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     const body = request.body;
     if (
       body === undefined ||
-      new TextEncoder().encode(body).byteLength > 60_000 ||
+      new TextEncoder().encode(body).byteLength > 60000 ||
       !Effect2.pipe(body, EffectString.trim)
     )
       return yield* workflowError(
@@ -536,19 +628,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
         ? {ok: true as const, citations: admitted.citations}
         : foregroundReusable
           ? {ok: true as const, citations: foregroundAdmitted.citations}
-          : yield* captureMemoryCodeCitationsForMcp(
-              config,
-              {
-                callerCwd: state.binding.repo,
-                project: yield* workflowGraphProjectHint(config, state.binding),
-                ...(state.binding.graphProject === undefined
-                  ? {}
-                  : {expectedProjectScope: {kind: 'selected-project' as const, project: state.binding.graphProject}}),
-                refs: request.codeRefs ?? [],
-                ...(standardRun ? {allowStaleGraph: true, omitUnresolved: true} : {}),
-              },
-              'workflow-memory',
-            );
+          : yield* capture();
     if (captured.ok && foregroundCollector && role === 'authoring-validation') {
       foregroundCollector.witness = {
         bindingId: state.binding.bindingId,
@@ -559,12 +639,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     }
     if (!captured.ok) {
       if (Schema.is(MemoryCodeCitationCaptureError)(captured.failure) && captured.failure.retryable)
-        return yield* workflowError(
-          'evidence-busy',
-          captured.failure.recovery?.code === 'graph-writer-busy'
-            ? 'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.'
-            : 'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
-        );
+        return yield* Effect.fail(workflowCitationCaptureError(captured.failure));
       if (
         state.binding.graphProject !== undefined ||
         (request.citationPolicy !== 'defer' && !standardRun) ||
@@ -640,7 +715,6 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     },
   } satisfies WorkflowOperation;
 });
-
 export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperation')(function* (
   config: RuntimeConfig,
   initial: WorkflowJournal,

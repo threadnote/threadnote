@@ -1,3 +1,4 @@
+import {CODE_GRAPH_SNAPSHOT_ID_PATTERN} from '../store/lexical_projection.js';
 import {SecureRandom} from 'effect/crypto';
 import {isOneOf} from '@threadnote/platform/validation';
 import {Array as EffectArray} from 'effect';
@@ -44,6 +45,7 @@ import {
 import {codeGraphScopeAdmitsPath} from '../scope/applicability.js';
 import {observeCodeGraphBackgroundDemand, type CodeGraphRefreshDemandIdentity} from '../refresh/demand.js';
 import {resolveRepositoryIdentity} from '../repository.js';
+import {NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV} from '../typescript_native_asset_pins.js';
 import {
   CodeGraphSnapshotUnavailable,
   type CodeGraphQueryResult,
@@ -65,7 +67,6 @@ const DIAGRAM_SPOOL_DIRECTORY_PREFIX = 'threadnote-graph-diagram-';
 const DIAGRAM_SPOOL_ENV = 'THREADNOTE_GRAPH_DIAGRAM_SPOOL';
 const DIAGRAM_SPOOL_FILE = 'diagram.json';
 const GIT_OBJECT_ID_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
-const CODE_GRAPH_SNAPSHOT_ID_PATTERN = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u;
 export const CODE_GRAPH_IMPACT_QUERY_TIMEOUT_MILLISECONDS = 20_000;
 export const CODE_GRAPH_ISOLATED_QUERY_TIMEOUT_MILLISECONDS = 50_000;
 export const CODE_GRAPH_DIAGRAM_INLINE_BYTES = 24 * 1_024;
@@ -659,6 +660,7 @@ const serveCodeGraphDiagram = Effect.fn('codeGraph.serveDiscoveryDiagram')(funct
   return yield* serveCodeGraphDiscoveryReadWith(request, options, attached =>
     readCodeGraphDiagramForStatus(store, attached, {
       question: request.query,
+      threadnoteHome: request.threadnoteHome,
       ...(diagram.type === undefined ? {} : {diagramType: diagram.type}),
       timeoutMilliseconds: diagram.timeoutMilliseconds,
     }).pipe(
@@ -1412,7 +1414,11 @@ function validImpactQueryResult(value: unknown): value is CodeGraphQueryResult {
   );
 }
 
-/** @internal Preserve only bootstrap variables required by the exact-runtime worker. */
+/**
+ * @internal Preserve only bootstrap variables required by the exact-runtime worker. A source-mode runtime also keeps
+ * its host-prepared native TypeScript asset, so the worker's parser pool can admit the same verified asset; a compiled
+ * runtime ignores it and uses the asset beside its executable.
+ */
 export function impactQueryWorkerEnvironment(source: NodeJS.ProcessEnv, threadnoteHome: string): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
     THREADNOTE_CODE_GRAPH_IMPACT_QUERY_WORKER: '1',
@@ -1433,6 +1439,7 @@ export function impactQueryWorkerEnvironment(source: NodeJS.ProcessEnv, threadno
     'SystemRoot',
     'SYSTEMROOT',
     'WINDIR',
+    NATIVE_TYPESCRIPT_PREPARED_ASSET_ENV,
   ] as const) {
     const value = source[key];
     if (value !== undefined) environment[key] = value;

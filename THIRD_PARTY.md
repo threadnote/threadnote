@@ -7,7 +7,7 @@ Python, OpenViking, or a separate memory server.
 
 Direct runtime software and packages bundled into the published JavaScript retain their own licenses:
 
-- `node-llama-cpp` (MIT), used in a supervised local worker with prebuilt `llama.cpp` binaries for GGUF inference
+- `node-llama-cpp` (MIT), used in a supervised local worker for GGUF inference: locked prebuilt `llama.cpp` binaries on macOS and Windows x64, and CPU binaries built from the bundled `ggml-org/llama.cpp` v0.7.0 source on glibc and musl Linux and Windows ARM64. Every payload retains the node-llama-cpp MIT notice in `runtime/NATIVE-LICENSE`; source-built payloads also retain the cloned `llama.cpp` MIT notice in `runtime/LLAMA-CPP-LICENSE`. `native-inference.json` records the package version, the pinned `llama.cpp` commit, a digest of the pinned source inputs, the build origin and toolchain, and the SHA-256 and size of every payload file, including these notices
 - Bun (MIT), embedded into each compiled executable
 - Native vector reader: `napi`/`napi-derive` (MIT), `rusqlite` (MIT), and bundled SQLite 3.54.1 (public domain); built from pinned Cargo dependencies with Rust 1.89.0. SQLite is privately linked into the required addon and does not replace Bun SQLite. The crate also uses `sha2` 0.11.1 (MIT OR Apache-2.0) for private prepared-request validation. The Bun/WebKit legacy numeric ordering attribution and upstream notice are shipped at `runtime/vector-reader/NOTICE`.
 - `effect`, `@effect/platform-bun`, `@effect/ai-openai-compat`, `@effect/sql-sqlite-bun`, and `@effect/vitest` (MIT)
@@ -21,7 +21,12 @@ Direct runtime software and packages bundled into the published JavaScript retai
 - `three` (MIT), used for GPU-accelerated manager graph rendering
 - `js-yaml` (MIT)
 - `yaml` 2.9.1 (ISC), used for comment-preserving Manager Workset manifest updates
-- TypeScript compiler 5.9 (`typescript-compiler`, Apache-2.0), bundled for native TypeScript/JavaScript graph extraction
+- Microsoft TypeScript 7.1.0-beta (Apache-2.0), used for TypeScript/JavaScript graph extraction and the semantic
+  TypeScript provider: a private source-overlay `tsc` built from the pinned upstream commit with the Go toolchain
+  runtime (BSD-3-Clause) linked in, plus the published `typescript` 7.1.0-beta API/AST frontend with a reviewed patch.
+  It is not the official npm binary. Staged assets retain `TYPESCRIPT_LICENSE.txt`, `TSC_LICENSE.txt`,
+  `TYPESCRIPT_NOTICE.txt`, `BUNDLED_NOTICE.txt` and `GO_LICENSE.txt` under `runtime/typescript/`; the complete
+  static-link module notice closure remains a release gate (`typescriptNativeBuildRecipe.attribution`)
 - `fflate` 0.8.3 (MIT), used for bounded local text extraction from tracked OpenXML, OpenDocument, and EPUB archives
 - `unpdf` 1.9.1 (MIT) and its bundled PDF.js engine (Apache-2.0), used for local tracked-PDF text and link extraction
 - `web-tree-sitter` 0.27.1 (MIT), bundled as the portable structural parser runtime

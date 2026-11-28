@@ -2,10 +2,12 @@ import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {Option} from 'effect';
 import fc from 'fast-check';
-import {describe, expect, it} from 'vitest';
+import {afterAll, describe, expect, it} from 'vitest';
+import type {NativeTypeScriptSession} from '@threadnote/graph/typescript_runtime';
 import {
   createResolutionAttributor,
   extractFileFacts,
+  extractNativeFileFacts,
   TYPESCRIPT_DYNAMIC_RELATIONSHIP_LIMIT,
 } from '@threadnote/graph/extractor';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
@@ -17,6 +19,20 @@ import {runEffect} from '../helpers/effect-runtime.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
+import {
+  createNativeTypeScriptTestSession,
+  native,
+  skipWithoutNativeTypeScript,
+} from '@threadnote/graph/test/helpers/native-typescript-session';
+
+// One native session serves this file; each operation has its own budget.
+let session: Promise<NativeTypeScriptSession> | undefined;
+afterAll(async () => {
+  await (await session)?.close();
+});
+async function nativeFacts(file: CodeGraphInventoryFile) {
+  return extractNativeFileFacts(file, await (session ??= createNativeTypeScriptTestSession()));
+}
 
 describe('code graph per-file extraction budgets', () => {
   it('bounds generic structured declarations deterministically across object widths', () => {
@@ -58,7 +74,8 @@ describe('code graph per-file extraction budgets', () => {
     ).toEqual(expect.arrayContaining(['global:path:data%2Fobject.json']));
   });
 
-  it('bounds pathological TypeScript calls while preserving imports, reexports, and later declarations', () => {
+  it('bounds pathological TypeScript calls while preserving imports, reexports, and later declarations', async context => {
+    skipWithoutNativeTypeScript(context);
     const calls = Array.from({length: TYPESCRIPT_DYNAMIC_RELATIONSHIP_LIMIT + 2_000}, () => 'dependency();');
     const content = EffectArray.join(
       [
@@ -72,7 +89,7 @@ describe('code graph per-file extraction budgets', () => {
       '\n',
     );
     const startedAt = performance.now();
-    const facts = extractFileFacts(sourceFile('src/generated.ts', 'typescript', content));
+    const facts = await nativeFacts(sourceFile('src/generated.ts', 'typescript', content));
     const duration = performance.now() - startedAt;
 
     expect(EffectArray.filter(facts.edges, edge => edge.relation === 'calls')).toHaveLength(1);
@@ -92,11 +109,11 @@ describe('code graph per-file extraction budgets', () => {
     ).toBe(true);
     expect(EffectArray.some(facts.symbols, symbol => symbol.name === 'PreservedAfterBudget')).toBe(true);
     expect(EffectArray.join(facts.diagnostics, '\n')).toContain('call and construct relationships were bounded');
-    expect(extractFileFacts(sourceFile('src/generated.ts', 'typescript', content))).toEqual(facts);
+    expect(await nativeFacts(sourceFile('src/generated.ts', 'typescript', content))).toEqual(facts);
     expect(duration).toBeLessThan(5_000);
   });
 
-  it('uses declaration-surface extraction for multi-megabyte generated TypeScript', () => {
+  native(it)('uses declaration-surface extraction for multi-megabyte generated TypeScript', async () => {
     const content = EffectArray.join(
       [
         `/* ${Effect.pipe('generated ', EffectString.repeat(240_000))} */`,
@@ -106,7 +123,7 @@ describe('code graph per-file extraction budgets', () => {
       ],
       '\n',
     );
-    const facts = extractFileFacts(sourceFile('src/huge-generated.ts', 'typescript', content));
+    const facts = await nativeFacts(sourceFile('src/huge-generated.ts', 'typescript', content));
 
     expect(EffectArray.some(facts.symbols, symbol => symbol.name === 'preserved')).toBe(true);
     expect(EffectArray.some(facts.edges, edge => edge.relation === 'imports')).toBe(true);

@@ -11,6 +11,7 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixture-temp-directory';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 type Cleanup = {readonly mode: string; readonly retained: readonly string[]; readonly scopeId?: string};
 type Event =
@@ -48,47 +49,49 @@ describe('application indexer reclamation policy', () => {
     );
   }
 
-  effectIt.effect('drains before clean alias, clean incremental, forced full, and dirty direct publication', () =>
-    withFixture(fixture =>
-      Effect.gen(function* () {
-        yield* fixture.indexer.index(fixture.options);
-        fixture.events.length = 0;
-        yield* fixture.git(['commit', '--allow-empty', '-qm', 'graph-equivalent commit']);
-        const alias = yield* fixture.indexer.index(fixture.options);
-        expect(alias.materialization?.mode).toBe('reused-snapshot');
-        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'alias']);
-        expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required'}});
+  native(effectIt.effect)(
+    'drains before clean alias, clean incremental, forced full, and dirty direct publication',
+    () =>
+      withFixture(fixture =>
+        Effect.gen(function* () {
+          yield* fixture.indexer.index(fixture.options);
+          fixture.events.length = 0;
+          yield* fixture.git(['commit', '--allow-empty', '-qm', 'graph-equivalent commit']);
+          const alias = yield* fixture.indexer.index(fixture.options);
+          expect(alias.materialization?.mode).toBe('reused-snapshot');
+          expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'alias']);
+          expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required'}});
 
-        fixture.events.length = 0;
-        yield* fixture.changeSource('committedChange');
-        yield* fixture.git(['commit', '-am', 'change one source', '-q']);
-        const incremental = yield* fixture.indexer.index(fixture.options);
-        expect(incremental.materialization?.mode).toBe('incremental-clean');
-        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'incremental']);
-        expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required'}});
+          fixture.events.length = 0;
+          yield* fixture.changeSource('committedChange');
+          yield* fixture.git(['commit', '-am', 'change one source', '-q']);
+          const incremental = yield* fixture.indexer.index(fixture.options);
+          expect(incremental.materialization?.mode).toBe('incremental-clean');
+          expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'incremental']);
+          expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required'}});
 
-        fixture.events.length = 0;
-        const forced = yield* fixture.indexer.index({...fixture.options, force: true});
-        expect(forced.materialization?.mode).toBe('full');
-        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'claim']);
-        expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required', retained: [forced.snapshot.id]}});
+          fixture.events.length = 0;
+          const forced = yield* fixture.indexer.index({...fixture.options, force: true});
+          expect(forced.materialization?.mode).toBe('full');
+          expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'claim']);
+          expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required', retained: [forced.snapshot.id]}});
 
-        fixture.events.length = 0;
-        yield* fixture.changeSource('dirtyChange');
-        const dirty = yield* fixture.indexer.index({...fixture.options, incrementalOverlay: false});
-        expect(dirty.materialization?.mode).toBe('full');
-        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'claim']);
-        expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required', retained: [dirty.snapshot.id]}});
+          fixture.events.length = 0;
+          yield* fixture.changeSource('dirtyChange');
+          const dirty = yield* fixture.indexer.index({...fixture.options, incrementalOverlay: false});
+          expect(dirty.materialization?.mode).toBe('full');
+          expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'claim']);
+          expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required', retained: [dirty.snapshot.id]}});
 
-        fixture.events.length = 0;
-        yield* fixture.git(['commit', '-am', 'commit exact dirty graph', '-q']);
-        const committedDirty = yield* fixture.indexer.index(fixture.options);
-        expect(committedDirty.materialization?.mode).toBe('reused-snapshot');
-        expect(committedDirty.snapshot.baseSnapshotId).toBe(dirty.snapshot.id);
-        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'alias']);
-        expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required'}});
-      }),
-    ),
+          fixture.events.length = 0;
+          yield* fixture.git(['commit', '-am', 'commit exact dirty graph', '-q']);
+          const committedDirty = yield* fixture.indexer.index(fixture.options);
+          expect(committedDirty.materialization?.mode).toBe('reused-snapshot');
+          expect(committedDirty.snapshot.baseSnapshotId).toBe(dirty.snapshot.id);
+          expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'alias']);
+          expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required'}});
+        }),
+      ),
   );
 
   effectIt.effect('makes bounded cleanup progress when a concurrent builder already completed the target', () =>

@@ -1,0 +1,14 @@
+{
+  "name": "threadnote-semantic-feasibility",
+  "displayName": "Threadnote semantic feasibility probe",
+  "version": "0.0.0",
+  "private": true,
+  "publisher": "threadnote",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "main": "./extension.cjs",
+  "activationEvents": [
+    "onStartupFinished"
+  ]
+}

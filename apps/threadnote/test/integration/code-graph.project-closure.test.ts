@@ -29,9 +29,10 @@ import type {CodeGraphQueryResult} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native, nativeProperty} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 describe('project-closure incremental indexing', () => {
-  it.effect('publishes current workspace dependencies when a manifest and source change together', () =>
+  native(it.effect)('publishes current workspace dependencies when a manifest and source change together', () =>
     Effect.acquireUseRelease(
       Effect.sync(createProjectClosureRepository),
       root =>
@@ -75,7 +76,7 @@ describe('project-closure incremental indexing', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect('reattributes the exact reverse-dependent project closure when a barrel redirects', () =>
+  native(it.effect)('reattributes the exact reverse-dependent project closure when a barrel redirects', () =>
     Effect.acquireUseRelease(
       Effect.sync(createProjectClosureRepository),
       root =>
@@ -212,7 +213,7 @@ describe('project-closure incremental indexing', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect('uses the same project closure from a nearby persisted clean base', () =>
+  native(it.effect)('uses the same project closure from a nearby persisted clean base', () =>
     Effect.acquireUseRelease(
       Effect.sync(createProjectClosureRepository),
       root =>
@@ -264,7 +265,7 @@ describe('project-closure incremental indexing', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect('ignores overlapping TypeScript config ownership outside the package resolver closure', () =>
+  native(it.effect)('ignores overlapping TypeScript config ownership outside the package resolver closure', () =>
     Effect.acquireUseRelease(
       Effect.sync(() => createProjectClosureRepository({overlappingTypeScriptConfigs: true})),
       root =>
@@ -302,74 +303,76 @@ describe('project-closure incremental indexing', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect('keeps unchanged static re-export resolution local despite an unrelated incomplete project model', () =>
-    Effect.forEach(
-      ['dirty', 'clean'] as const,
-      mode =>
-        Effect.acquireUseRelease(
-          Effect.sync(() => createProjectClosureRepository({orphanProjectBoundary: true})),
-          root =>
-            Effect.gen(function* () {
-              const indexer = yield* CodeGraphIndexer;
-              const path = yield* Path.Path;
-              const store = yield* CodeGraphStore;
-              const incrementalHome = join(root, `.threadnote-span-${mode}-incremental`);
-              const fullHome = join(root, `.threadnote-span-${mode}-full`);
-              yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
-              yield* Effect.sync(() => {
-                writeFile(
-                  root,
-                  'packages/barrel/index.ts',
-                  EffectArray.join(
-                    [
-                      '// presentation-only edit',
-                      '// shifts the evidence span without changing resolver input',
-                      'export {real as foo} from "../core/index.js";',
-                      '',
-                    ],
-                    '\n',
-                  ),
+  native(it.effect)(
+    'keeps unchanged static re-export resolution local despite an unrelated incomplete project model',
+    () =>
+      Effect.forEach(
+        ['dirty', 'clean'] as const,
+        mode =>
+          Effect.acquireUseRelease(
+            Effect.sync(() => createProjectClosureRepository({orphanProjectBoundary: true})),
+            root =>
+              Effect.gen(function* () {
+                const indexer = yield* CodeGraphIndexer;
+                const path = yield* Path.Path;
+                const store = yield* CodeGraphStore;
+                const incrementalHome = join(root, `.threadnote-span-${mode}-incremental`);
+                const fullHome = join(root, `.threadnote-span-${mode}-full`);
+                yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+                yield* Effect.sync(() => {
+                  writeFile(
+                    root,
+                    'packages/barrel/index.ts',
+                    EffectArray.join(
+                      [
+                        '// presentation-only edit',
+                        '// shifts the evidence span without changing resolver input',
+                        'export {real as foo} from "../core/index.js";',
+                        '',
+                      ],
+                      '\n',
+                    ),
+                  );
+                  if (mode === 'clean') {
+                    git(root, ['add', 'packages/barrel/index.ts']);
+                    git(root, ['commit', '-qm', 'move reexport span']);
+                  }
+                });
+
+                const incremental = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+                const full = yield* indexer.index({
+                  cwd: root,
+                  incrementalOverlay: false,
+                  threadnoteHome: fullHome,
+                });
+                const incrementalLayout = codeGraphLayout(
+                  path,
+                  incrementalHome,
+                  incremental.identity.checkoutId,
+                  incremental.identity.worktreeId,
                 );
-                if (mode === 'clean') {
-                  git(root, ['add', 'packages/barrel/index.ts']);
-                  git(root, ['commit', '-qm', 'move reexport span']);
-                }
-              });
+                const fullLayout = codeGraphLayout(path, fullHome, full.identity.checkoutId, full.identity.worktreeId);
 
-              const incremental = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
-              const full = yield* indexer.index({
-                cwd: root,
-                incrementalOverlay: false,
-                threadnoteHome: fullHome,
-              });
-              const incrementalLayout = codeGraphLayout(
-                path,
-                incrementalHome,
-                incremental.identity.checkoutId,
-                incremental.identity.worktreeId,
-              );
-              const fullLayout = codeGraphLayout(path, fullHome, full.identity.checkoutId, full.identity.worktreeId);
-
-              expect(incremental.materialization).toMatchObject({
-                mode: mode === 'dirty' ? 'incremental-overlay' : 'incremental-clean',
-                stagedFiles: 1,
-              });
-              expect(incremental.materialization?.fallbackReason).toBeUndefined();
-              expect(incremental.materialization?.totalFiles).toBeGreaterThan(1);
-              expect(deltaPaths(incrementalLayout.databasePath, incremental.snapshot.id)).toEqual([
-                'packages/barrel/index.ts',
-              ]);
-              expect(
-                normalizeGraph(yield* store.loadGraph(incrementalLayout.databasePath, incremental.snapshot.id)),
-              ).toEqual(normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, full.snapshot.id)));
-            }),
-          root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
-        ),
-      {concurrency: 1},
-    ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+                expect(incremental.materialization).toMatchObject({
+                  mode: mode === 'dirty' ? 'incremental-overlay' : 'incremental-clean',
+                  stagedFiles: 1,
+                });
+                expect(incremental.materialization?.fallbackReason).toBeUndefined();
+                expect(incremental.materialization?.totalFiles).toBeGreaterThan(1);
+                expect(deltaPaths(incrementalLayout.databasePath, incremental.snapshot.id)).toEqual([
+                  'packages/barrel/index.ts',
+                ]);
+                expect(
+                  normalizeGraph(yield* store.loadGraph(incrementalLayout.databasePath, incremental.snapshot.id)),
+                ).toEqual(normalizeGraph(yield* store.loadGraph(fullLayout.databasePath, full.snapshot.id)));
+              }),
+            root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
+          ),
+        {concurrency: 1},
+      ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect('uses bounded project closure when a declared TypeScript project adds an export', () =>
+  native(it.effect)('uses bounded project closure when a declared TypeScript project adds an export', () =>
     Effect.acquireUseRelease(
       Effect.sync(createProjectClosureRepository),
       root =>
@@ -438,7 +441,7 @@ describe('project-closure incremental indexing', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect('reparses and replaces a valid cache tuple whose payload names another path', () =>
+  native(it.effect)('reparses and replaces a valid cache tuple whose payload names another path', () =>
     Effect.acquireUseRelease(
       Effect.sync(createProjectClosureRepository),
       root =>
@@ -469,7 +472,7 @@ describe('project-closure incremental indexing', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect('materializes an exact project closure beyond the former aggregate fact ceiling', () =>
+  native(it.effect)('materializes an exact project closure beyond the former aggregate fact ceiling', () =>
     Effect.acquireUseRelease(
       Effect.sync(createProjectClosureRepository),
       root =>
@@ -513,152 +516,161 @@ describe('project-closure incremental indexing', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect('falls back through bounded full materialization for cache and receipt loss or oversized facts', () =>
-    Effect.forEach(
-      [
-        {reason: 'cache-incomplete' as const, scenario: 'missing' as const},
-        {reason: 'project-closure-unbounded' as const, scenario: 'oversized' as const},
-        {reason: 'staging-unavailable' as const, scenario: 'receipt' as const},
-      ],
-      ({reason, scenario}) =>
-        Effect.acquireUseRelease(
-          Effect.sync(createProjectClosureRepository),
-          root =>
-            Effect.gen(function* () {
-              const indexer = yield* CodeGraphIndexer;
-              const path = yield* Path.Path;
-              const home = join(root, `.threadnote-${scenario}-cache`);
-              const base = yield* indexer.index({cwd: root, threadnoteHome: home});
-              const layout = codeGraphLayout(path, home, base.identity.checkoutId, base.identity.worktreeId);
-              const baseBarrelHash = snapshotFileContentHash(
-                layout.databasePath,
-                base.snapshot.id,
-                'packages/barrel/index.ts',
-              );
-              let removedAfterPersistence = false;
-              yield* Effect.sync(() => {
-                mutateBarrelCache(layout.databasePath, scenario);
-                redirectBarrel(root);
-              });
-              const indexed = yield* indexer.index({
-                cwd: root,
-                onProgress: progress =>
-                  scenario === 'missing' &&
-                  !removedAfterPersistence &&
-                  progress.phase === 'scanning' &&
-                  progress.activity?.stage === 'persisting' &&
-                  progress.activity.batchCompleted === progress.activity.batchTotal
-                    ? Effect.sync(() => {
-                        deleteCachedContentHash(layout.databasePath, baseBarrelHash);
-                        removedAfterPersistence = true;
-                      })
-                    : Effect.void,
-                threadnoteHome: home,
-              });
-
-              expect(indexed.materialization).toMatchObject({fallbackReason: reason, mode: 'full'});
-              expect(indexed.materialization?.stagedFiles).toBe(indexed.materialization?.totalFiles);
-              if (scenario === 'missing') expect(removedAfterPersistence).toBe(true);
-              if (scenario === 'oversized') {
-                expect(indexed.materialization?.fallbackBoundary).toMatchObject({
-                  changedFiles: 1,
-                  limit: 8 * 1_048_576,
-                  metric: 'cached-fact-bytes',
-                  stage: 'project-closure-selection',
+  native(it.effect)(
+    'falls back through bounded full materialization for cache and receipt loss or oversized facts',
+    () =>
+      Effect.forEach(
+        [
+          {reason: 'cache-incomplete' as const, scenario: 'missing' as const},
+          {reason: 'project-closure-unbounded' as const, scenario: 'oversized' as const},
+          {reason: 'staging-unavailable' as const, scenario: 'receipt' as const},
+        ],
+        ({reason, scenario}) =>
+          Effect.acquireUseRelease(
+            Effect.sync(createProjectClosureRepository),
+            root =>
+              Effect.gen(function* () {
+                const indexer = yield* CodeGraphIndexer;
+                const path = yield* Path.Path;
+                const home = join(root, `.threadnote-${scenario}-cache`);
+                const base = yield* indexer.index({cwd: root, threadnoteHome: home});
+                const layout = codeGraphLayout(path, home, base.identity.checkoutId, base.identity.worktreeId);
+                const baseBarrelHash = snapshotFileContentHash(
+                  layout.databasePath,
+                  base.snapshot.id,
+                  'packages/barrel/index.ts',
+                );
+                let removedAfterPersistence = false;
+                yield* Effect.sync(() => {
+                  mutateBarrelCache(layout.databasePath, scenario);
+                  redirectBarrel(root);
                 });
-                expect(indexed.materialization?.fallbackBoundary?.observedAtDecision).toBeGreaterThan(8 * 1_048_576);
-              }
-            }),
-          root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
-        ),
-      {concurrency: 1},
-    ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+                const indexed = yield* indexer.index({
+                  cwd: root,
+                  onProgress: progress =>
+                    scenario === 'missing' &&
+                    !removedAfterPersistence &&
+                    progress.phase === 'scanning' &&
+                    progress.activity?.stage === 'persisting' &&
+                    progress.activity.batchCompleted === progress.activity.batchTotal
+                      ? Effect.sync(() => {
+                          deleteCachedContentHash(layout.databasePath, baseBarrelHash);
+                          removedAfterPersistence = true;
+                        })
+                      : Effect.void,
+                  threadnoteHome: home,
+                });
+
+                expect(indexed.materialization).toMatchObject({fallbackReason: reason, mode: 'full'});
+                expect(indexed.materialization?.stagedFiles).toBe(indexed.materialization?.totalFiles);
+                if (scenario === 'missing') expect(removedAfterPersistence).toBe(true);
+                if (scenario === 'oversized') {
+                  expect(indexed.materialization?.fallbackBoundary).toMatchObject({
+                    changedFiles: 1,
+                    limit: 8 * 1_048_576,
+                    metric: 'cached-fact-bytes',
+                    stage: 'project-closure-selection',
+                  });
+                  expect(indexed.materialization?.fallbackBoundary?.observedAtDecision).toBeGreaterThan(8 * 1_048_576);
+                }
+              }),
+            root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
+          ),
+        {concurrency: 1},
+      ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect('incrementally materializes bounded project closures for add, delete, and rename file-set changes', () =>
-    Effect.forEach(
-      [
-        {
-          deltaPaths: [
-            'packages/app/index.ts',
-            'packages/app/package.json',
-            'packages/barrel/extra.ts',
-            'packages/barrel/index.ts',
-            'packages/barrel/package.json',
-          ],
-          mutate: (root: string) => writeFile(root, 'packages/barrel/extra.ts', 'export const extra = true;\n'),
-          stagedFiles: 5,
-          totalFiles: 12,
-        },
-        {
-          deltaPaths: ['packages/app/index.ts', 'packages/app/package.json', 'packages/barrel/package.json'],
-          mutate: (root: string) => rmSync(join(root, 'packages/barrel/index.ts')),
-          stagedFiles: 3,
-          totalFiles: 10,
-        },
-        {
-          deltaPaths: [
-            'packages/app/index.ts',
-            'packages/app/package.json',
-            'packages/barrel/package.json',
-            'packages/barrel/renamed.ts',
-          ],
-          mutate: (root: string) =>
-            renameSync(join(root, 'packages/barrel/index.ts'), join(root, 'packages/barrel/renamed.ts')),
-          stagedFiles: 4,
-          totalFiles: 11,
-        },
-      ],
-      scenario =>
-        Effect.acquireUseRelease(
-          Effect.sync(createProjectClosureRepository),
-          root =>
-            Effect.gen(function* () {
-              const indexer = yield* CodeGraphIndexer;
-              const path = yield* Path.Path;
-              const store = yield* CodeGraphStore;
-              const incrementalHome = join(root, '.threadnote-file-set-incremental');
-              const fullHome = join(root, '.threadnote-file-set-full');
-              yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
-              yield* Effect.sync(() => scenario.mutate(root));
-              const incremental = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
-              const full = yield* indexer.index({
-                cwd: root,
-                incrementalOverlay: false,
-                threadnoteHome: fullHome,
-              });
-              const incrementalLayout = codeGraphLayout(
-                path,
-                incrementalHome,
-                incremental.identity.checkoutId,
-                incremental.identity.worktreeId,
-              );
-              const fullLayout = codeGraphLayout(path, fullHome, full.identity.checkoutId, full.identity.worktreeId);
-              const incrementalGraph = yield* store.loadGraph(incrementalLayout.databasePath, incremental.snapshot.id);
-              const fullGraph = yield* store.loadGraph(fullLayout.databasePath, full.snapshot.id);
+  native(it.effect)(
+    'incrementally materializes bounded project closures for add, delete, and rename file-set changes',
+    () =>
+      Effect.forEach(
+        [
+          {
+            deltaPaths: [
+              'packages/app/index.ts',
+              'packages/app/package.json',
+              'packages/barrel/extra.ts',
+              'packages/barrel/index.ts',
+              'packages/barrel/package.json',
+            ],
+            mutate: (root: string) => writeFile(root, 'packages/barrel/extra.ts', 'export const extra = true;\n'),
+            stagedFiles: 5,
+            totalFiles: 12,
+          },
+          {
+            deltaPaths: ['packages/app/index.ts', 'packages/app/package.json', 'packages/barrel/package.json'],
+            mutate: (root: string) => rmSync(join(root, 'packages/barrel/index.ts')),
+            stagedFiles: 3,
+            totalFiles: 10,
+          },
+          {
+            deltaPaths: [
+              'packages/app/index.ts',
+              'packages/app/package.json',
+              'packages/barrel/package.json',
+              'packages/barrel/renamed.ts',
+            ],
+            mutate: (root: string) =>
+              renameSync(join(root, 'packages/barrel/index.ts'), join(root, 'packages/barrel/renamed.ts')),
+            stagedFiles: 4,
+            totalFiles: 11,
+          },
+        ],
+        scenario =>
+          Effect.acquireUseRelease(
+            Effect.sync(createProjectClosureRepository),
+            root =>
+              Effect.gen(function* () {
+                const indexer = yield* CodeGraphIndexer;
+                const path = yield* Path.Path;
+                const store = yield* CodeGraphStore;
+                const incrementalHome = join(root, '.threadnote-file-set-incremental');
+                const fullHome = join(root, '.threadnote-file-set-full');
+                yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+                yield* Effect.sync(() => scenario.mutate(root));
+                const incremental = yield* indexer.index({cwd: root, threadnoteHome: incrementalHome});
+                const full = yield* indexer.index({
+                  cwd: root,
+                  incrementalOverlay: false,
+                  threadnoteHome: fullHome,
+                });
+                const incrementalLayout = codeGraphLayout(
+                  path,
+                  incrementalHome,
+                  incremental.identity.checkoutId,
+                  incremental.identity.worktreeId,
+                );
+                const fullLayout = codeGraphLayout(path, fullHome, full.identity.checkoutId, full.identity.worktreeId);
+                const incrementalGraph = yield* store.loadGraph(
+                  incrementalLayout.databasePath,
+                  incremental.snapshot.id,
+                );
+                const fullGraph = yield* store.loadGraph(fullLayout.databasePath, full.snapshot.id);
 
-              expect(incremental.materialization).toEqual({
-                closureProjects: 2,
-                mode: 'incremental-overlay',
-                resolutionClosure: 'project',
-                stagedFiles: scenario.stagedFiles,
-                totalFiles: scenario.totalFiles,
-              });
-              expect(incremental.snapshot.graphContentId).toBe(full.snapshot.graphContentId);
-              expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
-              expect(normalizeCatalog(yield* store.loadVisualizationCatalog(incrementalLayout.databasePath))).toEqual(
-                normalizeCatalog(yield* store.loadVisualizationCatalog(fullLayout.databasePath)),
-              );
-              expect(yield* store.diagnose(incrementalLayout.databasePath)).toMatchObject({
-                foreignKeyViolations: 0,
-                integrity: 'ok',
-              });
-              expect(deltaPaths(incrementalLayout.databasePath, incremental.snapshot.id)).toEqual(scenario.deltaPaths);
-            }),
-          root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
-        ),
-      {concurrency: 1},
-    ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+                expect(incremental.materialization).toEqual({
+                  closureProjects: 2,
+                  mode: 'incremental-overlay',
+                  resolutionClosure: 'project',
+                  stagedFiles: scenario.stagedFiles,
+                  totalFiles: scenario.totalFiles,
+                });
+                expect(incremental.snapshot.graphContentId).toBe(full.snapshot.graphContentId);
+                expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
+                expect(normalizeCatalog(yield* store.loadVisualizationCatalog(incrementalLayout.databasePath))).toEqual(
+                  normalizeCatalog(yield* store.loadVisualizationCatalog(fullLayout.databasePath)),
+                );
+                expect(yield* store.diagnose(incrementalLayout.databasePath)).toMatchObject({
+                  foreignKeyViolations: 0,
+                  integrity: 'ok',
+                });
+                expect(deltaPaths(incrementalLayout.databasePath, incremental.snapshot.id)).toEqual(
+                  scenario.deltaPaths,
+                );
+              }),
+            root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
+          ),
+        {concurrency: 1},
+      ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
   it.effect('uses bounded project closures after committed add, delete, and rename file-set changes', () =>
@@ -727,7 +739,7 @@ describe('project-closure incremental indexing', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect('fails closed for unreconciled workspace changes', () =>
+  native(it.effect)('fails closed for unreconciled workspace changes', () =>
     Effect.forEach(
       [
         {
@@ -756,7 +768,7 @@ describe('project-closure incremental indexing', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect(
+  native(it.effect)(
     'candidate-scans existing Markdown heading additions, removals, renames, and ambiguity transitions',
     () =>
       Effect.acquireUseRelease(
@@ -950,7 +962,7 @@ describe('project-closure incremental indexing', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  it.effect(
+  native(it.effect)(
     'uses a bounded candidate scan for an owned addition beside stable documentation in a large project',
     () =>
       Effect.acquireUseRelease(
@@ -1139,7 +1151,7 @@ describe('project-closure incremental indexing', () => {
     {timeout: 120_000},
   );
 
-  it.effect(
+  native(it.effect)(
     'reports an exact typed fallback when outside-closure base provenance exceeds 10,000 rows',
     () =>
       Effect.acquireUseRelease(
@@ -1168,7 +1180,7 @@ describe('project-closure incremental indexing', () => {
     {timeout: 120_000},
   );
 
-  it.effect(
+  native(it.effect)(
     'selects resolved and unresolved consumers through transitive aliases when an export is renamed',
     () =>
       Effect.acquireUseRelease(
@@ -1299,7 +1311,7 @@ describe('project-closure incremental indexing', () => {
     {timeout: 120_000},
   );
 
-  it.effect(
+  native(it.effect)(
     'records no evidence while a base file is served degraded, so its consumer is selected once it parses',
     () =>
       Effect.acquireUseRelease(
@@ -1358,7 +1370,7 @@ describe('project-closure incremental indexing', () => {
   );
 
   fcEffectProp(
-    it,
+    nativeProperty(it),
     'matches forced-full graph, query, catalog, health, counts, and delta paths across randomized project chains',
     {
       projectCount: FC.integer({max: 8, min: 5}),

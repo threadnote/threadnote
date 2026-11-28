@@ -1,9 +1,15 @@
 import {Array as Arr, Clock, Effect, Option, Schema, String as Str} from 'effect';
+import {fromPromise} from '@threadnote/platform/errors';
 import {codeGraphCitationSourceKey, readCodeGraphCitationSources} from '../citation/source.js';
 import {compareCodeUnits} from '../ordering.js';
 import {withCodeGraphReadTransaction} from '../store/session.js';
 import type {CodeGraphStoreShape} from '../store.js';
-import {TYPESCRIPT_FULL_TRAVERSAL_UTF8_BYTE_LIMIT} from '../typescript_runtime.js';
+import {CodeGraphParserPool} from '../parser_worker.js';
+import {
+  boundedNativeTypeScriptSession,
+  NativeTypeScriptSessionService,
+  TYPESCRIPT_FULL_TRAVERSAL_UTF8_BYTE_LIMIT,
+} from '../typescript_runtime.js';
 import type {
   CodeGraphEdge,
   CodeGraphInventoryFile,
@@ -38,6 +44,12 @@ import {
   type CodeGraphDiagramQuestion,
 } from './diagram.js';
 import {CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH} from './diagram_contract.js';
+import {
+  codeGraphSourceSequenceRequest,
+  projectCodeGraphSourceSequence,
+  type CodeGraphSourceSequenceOutcome,
+  type CodeGraphSourceSequenceRequest,
+} from './diagram_sequence.js';
 import type {
   CodeGraphDiagramCoverage,
   CodeGraphDiagramFreshness,
@@ -52,6 +64,8 @@ export interface CodeGraphDiagramRequest {
   readonly diagramType?: CodeGraphDiagramType;
   readonly packageName?: string;
   readonly timeoutMilliseconds?: number;
+  /** Selects the shared parser pool's workers when this process has no borrowed native TypeScript session. */
+  readonly threadnoteHome?: string;
 }
 
 interface DiagramSnapshotRequest extends CodeGraphDiagramRequest {
@@ -322,6 +336,39 @@ const readVerifiedSequenceSource = Effect.fn('codeGraph.readVerifiedSequenceSour
   });
   const bytes = verified.get(codeGraphCitationSourceKey(request));
   return bytes === undefined ? undefined : new Map([[file.path, bytes]]);
+});
+
+const sourceOrderUnavailable: CodeGraphSourceSequenceOutcome = {status: 'unavailable'};
+
+/**
+ * Source order needs native TypeScript parsing within the diagram budget: a native session already provided to this
+ * process, else a worker of the shared parser pool that borrows one. A missing session, a refusal or the deadline is
+ * `unavailable`, which the diagram reports as a gap instead of guessing the order.
+ */
+const readSourceOrder = Effect.fn('codeGraph.readDiagramSourceOrder')(function* (
+  request: CodeGraphSourceSequenceRequest,
+  threadnoteHome: string | undefined,
+  remainingMilliseconds: number,
+) {
+  const deadline = (yield* Clock.currentTimeMillis) + remainingMilliseconds;
+  const borrowed = yield* Effect.serviceOption(NativeTypeScriptSessionService);
+  const pool = yield* Effect.serviceOption(CodeGraphParserPool);
+  const projected: Effect.Effect<CodeGraphSourceSequenceOutcome> = Option.isSome(borrowed)
+    ? fromPromise('project diagram source order', () =>
+        projectCodeGraphSourceSequence(request, boundedNativeTypeScriptSession(borrowed.value, deadline)),
+      ).pipe(
+        Effect.map((sequence): CodeGraphSourceSequenceOutcome =>
+          sequence === undefined ? {status: 'projected'} : {status: 'projected', sequence},
+        ),
+        Effect.orElseSucceed(() => sourceOrderUnavailable),
+      )
+    : Option.isSome(pool) && threadnoteHome !== undefined
+      ? pool.value.projectSourceSequence(request, threadnoteHome, deadline)
+      : Effect.succeed(sourceOrderUnavailable);
+  return Option.getOrElse(
+    yield* projected.pipe(Effect.timeoutOption(remainingMilliseconds)),
+    () => sourceOrderUnavailable,
+  );
 });
 
 /** Read authorized graph facts in one transaction. The caller owns the lease through source reads. */
@@ -860,7 +907,20 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     }
   }
   const complete = coverage(gaps.size ? 'incomplete' : 'complete', boundaries, gaps, subject);
-  const hasSourceTime = sequenceSources !== undefined && (yield* Clock.currentTimeMillis) < deadline;
+  const sourceTime = deadline - (yield* Clock.currentTimeMillis);
+  const subjectNode = subject === undefined ? undefined : nodes.get(subject.id);
+  const sourceRequest =
+    sequenceSources !== undefined && sourceTime > 0 && subjectNode !== undefined
+      ? codeGraphSourceSequenceRequest({
+          subject: subjectNode,
+          facts: selected,
+          nodes,
+          sources: sequenceSources,
+          gaps: complete.gaps,
+        })
+      : undefined;
+  const sourceOrder =
+    sourceRequest === undefined ? undefined : yield* readSourceOrder(sourceRequest, input.threadnoteHome, sourceTime);
   return renderCompleteCodeGraphDiagram({
     question,
     scope,
@@ -870,7 +930,7 @@ export const readCodeGraphDiagram = Effect.fn('codeGraph.readDiagram')(function*
     boundaryIds,
     facts: selected,
     unresolvedCalls: [...unresolvedCalls.values()].sort((left, right) => compareCodeUnits(left.id, right.id)),
-    ...(hasSourceTime ? {sequenceSources} : {}),
+    ...(sourceOrder === undefined ? {} : {sourceOrder}),
     ...(architectureAnchor === undefined ? {} : {architectureAnchor}),
     ...(pathTarget === undefined ? {} : {pathTarget}),
   });

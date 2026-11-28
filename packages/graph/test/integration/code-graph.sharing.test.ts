@@ -6,6 +6,7 @@ import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
+import {skipWithoutNativeTypeScript} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const WorkflowShareOutputSchema = Schema.Struct({
   profileDigest: Schema.String,
@@ -95,7 +96,8 @@ function decodeJson<S extends Schema.ConstraintDecoder<unknown>>(schema: S, valu
 const execFilePromise = promisify(execFile);
 
 describe('code graph sharing Phases 0–2', () => {
-  it('imports a verified shared checkpoint on a second home and keeps local graphs without enrollment', async () => {
+  it('imports a verified shared checkpoint on a second home and keeps local graphs without enrollment', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = await mkdtemp(join(tmpdir(), 'threadnote-graph-share-'));
     const repository = join(root, 'repository');
     const cas = join(root, 'cas');
@@ -362,7 +364,8 @@ describe('code graph sharing Phases 0–2', () => {
     }
   }, 180_000);
 
-  it('keeps a queryable local graph when the coordinator is unavailable', async () => {
+  it('keeps a queryable local graph when the coordinator is unavailable', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = await mkdtemp(join(tmpdir(), 'threadnote-graph-share-unavailable-'));
     const repository = join(root, 'repository');
     const cas = join(root, 'cas');

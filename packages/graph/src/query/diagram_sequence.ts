@@ -1,14 +1,16 @@
-import {Array as Arr, String as Str} from 'effect';
-import type ts from 'typescript-compiler';
+import {Array as Arr, Schema, String as Str} from 'effect';
+import type * as ts from 'typescript/ast';
 import {collectLocalBindings, relationshipExpressionName, spanFor} from '../extractor_syntax.js';
 import {
-  loadTypeScriptExtractionRuntime,
+  NativeTypeScriptUnavailable,
   TYPESCRIPT_FULL_TRAVERSAL_CHARACTER_LIMIT,
-  typeScriptKindForPath,
+  withNativeTypeScriptExtractionSource,
+  type NativeTypeScriptAst,
+  type NativeTypeScriptExtractionSession,
 } from '../typescript_runtime.js';
 import type {CodeGraphQueryNode, CodeGraphSpan} from '../types.js';
 import type {CodeGraphDiagramFact} from './diagram.js';
-import type {CodeGraphDiagramCoverage} from './diagram_contract.js';
+import {CodeGraphDiagramGapSchema, type CodeGraphDiagramCoverage} from './diagram_contract.js';
 
 interface SequenceInput {
   readonly subject: CodeGraphQueryNode;
@@ -18,18 +20,60 @@ interface SequenceInput {
   readonly gaps: CodeGraphDiagramCoverage['gaps'];
 }
 
-type Compiler = typeof ts;
+type Compiler = NativeTypeScriptAst;
 type Execution = 'invoked' | 'awaited' | 'yielded';
 type SequenceGap = CodeGraphDiagramCoverage['gaps'][number];
+/** TypeScript 7 has no OptionalChain alias; these are the node kinds that carry the optional-chain flag. */
+type OptionalChain =
+  ts.PropertyAccessExpression | ts.ElementAccessExpression | ts.CallExpression | ts.NonNullExpression;
 
-interface SourceSequence {
-  readonly source: string;
-  readonly orderedCalls: number;
-  readonly unorderedCalls: number;
-  readonly discoveredGaps: CodeGraphDiagramCoverage['gaps'];
-  readonly lifelines: readonly {readonly diagramId: string; readonly path: string; readonly label: string}[];
-  readonly hasControls: boolean;
-}
+const Span = Schema.Struct({line: Schema.Int, column: Schema.Int, endLine: Schema.Int, endColumn: Schema.Int});
+const Count = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
+
+/**
+ * The verified subject source and only the evidence the projection reads. It is plain JSON, so a parser worker that
+ * borrows the shared native session can project it outside the caller process.
+ */
+export const CodeGraphSourceSequenceRequestSchema = Schema.Struct({
+  subject: Schema.Struct({path: Schema.String, span: Span, qualifiedName: Schema.String}),
+  text: Schema.String,
+  calls: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      relation: Schema.Literals(['calls', 'constructs']),
+      sourceId: Schema.String,
+      sourceName: Schema.String,
+      targetId: Schema.String,
+      targetName: Schema.String,
+      evidencePath: Schema.String,
+      evidenceSpan: Span,
+    }),
+  ),
+  nodes: Schema.Array(Schema.Struct({id: Schema.String, path: Schema.String, qualifiedName: Schema.String})),
+  gaps: Schema.Array(CodeGraphDiagramGapSchema),
+});
+export type CodeGraphSourceSequenceRequest = typeof CodeGraphSourceSequenceRequestSchema.Type;
+
+export const CodeGraphSourceSequenceSchema = Schema.Struct({
+  source: Schema.String,
+  orderedCalls: Count,
+  unorderedCalls: Count,
+  discoveredGaps: Schema.Array(CodeGraphDiagramGapSchema),
+  lifelines: Schema.Array(Schema.Struct({diagramId: Schema.String, path: Schema.String, label: Schema.String})),
+  hasControls: Schema.Boolean,
+});
+type SourceSequence = typeof CodeGraphSourceSequenceSchema.Type;
+export type CodeGraphSourceSequence = SourceSequence;
+
+/**
+ * `projected` carries the projection, or none when source does not support one (the caller keeps the graph path).
+ * `unavailable` means no native TypeScript session parsed the source in time; the diagram reports that gap.
+ */
+export const CodeGraphSourceSequenceOutcomeSchema = Schema.Union([
+  Schema.Struct({status: Schema.Literal('projected'), sequence: Schema.optionalKey(CodeGraphSourceSequenceSchema)}),
+  Schema.Struct({status: Schema.Literal('unavailable')}),
+]);
+export type CodeGraphSourceSequenceOutcome = typeof CodeGraphSourceSequenceOutcomeSchema.Type;
 
 function spanKey(span: CodeGraphSpan): string {
   return `${span.line}:${span.column}:${span.endLine}:${span.endColumn}`;
@@ -40,16 +84,12 @@ function label(value: string, fallback: string): string {
   return safe && !/^end$/iu.test(safe) ? safe : fallback;
 }
 
-function callFacts(facts: readonly CodeGraphDiagramFact[]): readonly CodeGraphDiagramFact[] {
-  return Arr.filter(facts, fact => fact.relation === 'calls' || fact.relation === 'constructs');
-}
-
 function effectImports(compiler: Compiler, file: ts.SourceFile): ReadonlySet<string> {
   const names = new Set<string>();
   for (const statement of file.statements) {
     if (!compiler.isImportDeclaration(statement) || !compiler.isStringLiteral(statement.moduleSpecifier)) continue;
     const bindings = statement.importClause;
-    if (!bindings || bindings.isTypeOnly || !bindings.namedBindings) continue;
+    if (!bindings || bindings.phaseModifier === compiler.SyntaxKind.TypeKeyword || !bindings.namedBindings) continue;
     if (statement.moduleSpecifier.text === 'effect' && compiler.isNamedImports(bindings.namedBindings)) {
       for (const specifier of bindings.namedBindings.elements) {
         if (!specifier.isTypeOnly && (specifier.propertyName ?? specifier.name).text === 'Effect')
@@ -62,21 +102,105 @@ function effectImports(compiler: Compiler, file: ts.SourceFile): ReadonlySet<str
   return names;
 }
 
-function sourceFrame(input: SequenceInput) {
+/** TypeScript 7 spellings of the TypeScript 5 syntax predicates this projection used. */
+function syntax(compiler: Compiler) {
+  const isOptionalChain = (node: ts.Node): node is OptionalChain =>
+    (compiler.isPropertyAccessExpression(node) ||
+      compiler.isElementAccessExpression(node) ||
+      compiler.isCallExpression(node) ||
+      compiler.isNonNullExpression(node)) &&
+    (node.flags & compiler.NodeFlags.OptionalChain) !== 0;
+  return {
+    isOptionalChain,
+    isCallChain: (node: ts.Node): node is ts.CallExpression => compiler.isCallExpression(node) && isOptionalChain(node),
+    isElementAccessChain: (node: ts.Node): node is ts.ElementAccessExpression =>
+      compiler.isElementAccessExpression(node) && isOptionalChain(node),
+    isClassLike: (node: ts.Node) => compiler.isClassDeclaration(node) || compiler.isClassExpression(node),
+    isIterationStatement: (node: ts.Node) =>
+      compiler.isForStatement(node) ||
+      compiler.isForOfStatement(node) ||
+      compiler.isForInStatement(node) ||
+      compiler.isWhileStatement(node) ||
+      compiler.isDoStatement(node),
+  };
+}
+
+/** Prepare the JSON request from verified bytes, or nothing when the subject source cannot be projected. */
+export function codeGraphSourceSequenceRequest(input: SequenceInput): CodeGraphSourceSequenceRequest | undefined {
   const bytes = input.sources.get(input.subject.path);
   if (!bytes || !/\.[cm]?[jt]sx?$/iu.test(input.subject.path)) return undefined;
-  const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
-  if (text.length > TYPESCRIPT_FULL_TRAVERSAL_CHARACTER_LIMIT) return undefined;
-  const {compiler} = loadTypeScriptExtractionRuntime();
-  const file = compiler.createSourceFile(
-    input.subject.path,
-    text,
-    compiler.ScriptTarget.Latest,
-    true,
-    typeScriptKindForPath(compiler, input.subject.path),
-  );
-  if ('parseDiagnostics' in file && Arr.isArray(file.parseDiagnostics) && file.parseDiagnostics.length)
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+  } catch {
     return undefined;
+  }
+  if (text.length > TYPESCRIPT_FULL_TRAVERSAL_CHARACTER_LIMIT) return undefined;
+  const calls = Arr.flatMap(input.facts, fact =>
+    fact.relation === 'calls' || fact.relation === 'constructs'
+      ? [
+          {
+            id: fact.id,
+            relation: fact.relation,
+            sourceId: fact.sourceId,
+            sourceName: fact.sourceName,
+            targetId: fact.targetId,
+            targetName: fact.targetName,
+            evidencePath: fact.evidencePath,
+            evidenceSpan: fact.evidenceSpan,
+          },
+        ]
+      : [],
+  );
+  const nodeIds = new Set(Arr.flatMap(calls, call => [call.sourceId, call.targetId]));
+  const nodes = Arr.flatMap([...input.nodes.values()], node =>
+    nodeIds.has(node.id) ? [{id: node.id, path: node.path, qualifiedName: node.qualifiedName}] : [],
+  );
+  return {
+    subject: {path: input.subject.path, span: input.subject.span, qualifiedName: input.subject.qualifiedName},
+    text,
+    calls,
+    nodes,
+    gaps: Arr.filter(input.gaps, gap => gap.path === input.subject.path && gap.span !== undefined),
+  };
+}
+
+/**
+ * Project source order inside verified execution scopes with a borrowed native session. The caller retains the full
+ * graph evidence. A session failure rejects with `NativeTypeScriptUnavailable`; source the projection cannot support
+ * resolves to `undefined`.
+ */
+export async function projectCodeGraphSourceSequence(
+  request: CodeGraphSourceSequenceRequest,
+  session: NativeTypeScriptExtractionSession,
+): Promise<SourceSequence | undefined> {
+  try {
+    return await withNativeTypeScriptExtractionSource(
+      {path: request.subject.path, content: request.text},
+      session,
+      (file, diagnostics) => (diagnostics.length ? undefined : projectSource(request, session.ast, file)),
+    );
+  } catch (error) {
+    if (Schema.is(NativeTypeScriptUnavailable)(error)) throw error;
+    return undefined;
+  }
+}
+
+/** In-process form for callers that already hold verified bytes and a borrowed session. */
+export function renderSourceBackedSequence(
+  input: SequenceInput,
+  session: NativeTypeScriptExtractionSession,
+): Promise<SourceSequence | undefined> {
+  const request = codeGraphSourceSequenceRequest(input);
+  return request === undefined ? Promise.resolve(undefined) : projectCodeGraphSourceSequence(request, session);
+}
+
+function projectSource(
+  input: CodeGraphSourceSequenceRequest,
+  compiler: Compiler,
+  file: ts.SourceFile,
+): SourceSequence | undefined {
+  const {isOptionalChain, isCallChain, isElementAccessChain, isClassLike, isIterationStatement} = syntax(compiler);
   const bindings = collectLocalBindings(compiler, file);
   const imports = effectImports(compiler, file);
   const span = (node: ts.Node) => spanFor(file, node.getStart(file), node.end);
@@ -95,37 +219,25 @@ function sourceFrame(input: SequenceInput) {
       ? expression.body
       : undefined;
   const subjectSpan = spanKey(input.subject.span);
-  let rootBody: ts.ConciseBody | undefined;
-  const findSubject = (node: ts.Node): void => {
-    if (rootBody) return;
+  const findSubject = (node: ts.Node): ts.ConciseBody | undefined => {
+    let body: ts.ConciseBody | undefined;
     if (spanKey(span(node)) === subjectSpan) {
-      if (compiler.isFunctionDeclaration(node) || compiler.isMethodDeclaration(node)) rootBody = node.body;
+      if (compiler.isFunctionDeclaration(node) || compiler.isMethodDeclaration(node)) body = node.body;
       if (compiler.isVariableDeclaration(node) && node.initializer) {
         const initializer = node.initializer;
-        rootBody = functionBody(initializer);
+        body = functionBody(initializer);
         if (compiler.isCallExpression(initializer) && isEffectCall(initializer.expression, 'fn')) {
-          rootBody = functionBody(initializer.arguments[0]);
+          body = functionBody(initializer.arguments[0]);
         }
       }
     }
-    if (!rootBody) compiler.forEachChild(node, findSubject);
+    return body ?? node.forEachChild(findSubject);
   };
-  findSubject(file);
-  return rootBody ? {compiler, rootBody, span, isEffectCall, functionBody} : undefined;
-}
-
-/** Project source order inside verified execution scopes. The caller retains the full graph evidence. */
-export function renderSourceBackedSequence(input: SequenceInput): SourceSequence | undefined {
-  let frame: ReturnType<typeof sourceFrame>;
-  try {
-    frame = sourceFrame(input);
-  } catch {
-    return undefined;
-  }
-  if (!frame) return undefined;
-  const {compiler, rootBody, span, isEffectCall, functionBody} = frame;
-  const calls = callFacts(input.facts);
-  const sites = new Map<string, CodeGraphDiagramFact[]>();
+  const rootBody = findSubject(file);
+  if (!rootBody) return undefined;
+  const nodeById = new Map(Arr.map(input.nodes, node => [node.id, node] as const));
+  const calls = input.calls;
+  const sites = new Map<string, CodeGraphSourceSequenceRequest['calls'][number][]>();
   for (const call of calls) {
     if (call.evidencePath !== input.subject.path) continue;
     const key = spanKey(call.evidenceSpan);
@@ -196,8 +308,8 @@ export function renderSourceBackedSequence(input: SequenceInput): SourceSequence
       const fact = facts[0];
       if (ordered.has(fact.id)) return [];
       if (fact.relation !== (compiler.isNewExpression(node) ? 'constructs' : 'calls')) return [];
-      const source = input.nodes.get(fact.sourceId);
-      const target = input.nodes.get(fact.targetId);
+      const source = nodeById.get(fact.sourceId);
+      const target = nodeById.get(fact.targetId);
       if (!source || !target) return [];
       ordered.add(fact.id);
       return [
@@ -229,15 +341,15 @@ export function renderSourceBackedSequence(input: SequenceInput): SourceSequence
   const loopExits = new WeakMap<ts.Node, boolean>();
   const scopeExits = new WeakMap<ts.Node, boolean>();
   const exits = (node: ts.Node, insideLoop = false): boolean => {
-    if (compiler.isFunctionLike(node) || compiler.isClassLike(node)) return false;
+    if (compiler.isFunctionLikeDeclaration(node) || isClassLike(node)) return false;
     if (compiler.isReturnStatement(node) || compiler.isThrowStatement(node)) return true;
     if (compiler.isBreakStatement(node) || compiler.isContinueStatement(node))
       return !insideLoop || node.label !== undefined;
     const summaries = insideLoop ? loopExits : scopeExits;
     const previous = summaries.get(node);
     if (previous !== undefined) return previous;
-    const nested = insideLoop || compiler.isIterationStatement(node, false);
-    const result = compiler.forEachChild(node, child => (exits(child, nested) ? true : undefined)) ?? false;
+    const nested = insideLoop || isIterationStatement(node);
+    const result = node.forEachChild(child => (exits(child, nested) ? true : undefined)) ?? false;
     summaries.set(node, result);
     return result;
   };
@@ -269,14 +381,14 @@ export function renderSourceBackedSequence(input: SequenceInput): SourceSequence
   };
 
   const visitOptionalChain = (
-    node: ts.OptionalChain,
+    node: OptionalChain,
     execution: Execution,
     continueChain: () => readonly string[],
   ): readonly string[] => {
     const visitStep = () => {
-      const step = compiler.isCallChain(node)
+      const step = isCallChain(node)
         ? [...Arr.flatMap(node.arguments, argument => visitExpression(argument)), ...orderCall(node, execution)]
-        : compiler.isElementAccessChain(node)
+        : isElementAccessChain(node)
           ? visitExpression(node.argumentExpression)
           : [];
       const rest = [...step, ...continueChain()];
@@ -284,13 +396,13 @@ export function renderSourceBackedSequence(input: SequenceInput): SourceSequence
         ? frameLines(`opt Optional chain continues at ${at(node)}`, rest)
         : rest;
     };
-    return compiler.isOptionalChain(node.expression)
+    return isOptionalChain(node.expression)
       ? visitOptionalChain(node.expression, 'invoked', visitStep)
       : [...visitExpression(node.expression), ...visitStep()];
   };
 
   const visitExpression = (node: ts.Expression, execution: Execution = 'invoked'): readonly string[] => {
-    if (compiler.isOptionalChain(node)) return visitOptionalChain(node, execution, () => []);
+    if (isOptionalChain(node)) return visitOptionalChain(node, execution, () => []);
     if (compiler.isParenthesizedExpression(node) || compiler.isAsExpression(node) || compiler.isNonNullExpression(node))
       return visitExpression(node.expression, execution);
     if (compiler.isAwaitExpression(node)) return visitExpression(node.expression, 'awaited');
@@ -431,8 +543,8 @@ export function renderSourceBackedSequence(input: SequenceInput): SourceSequence
   for (const fact of calls) {
     if (ordered.has(fact.id)) continue;
     const group = unordered.get(fact.evidencePath) ?? [];
-    const source = input.nodes.get(fact.sourceId)?.qualifiedName ?? fact.sourceName;
-    const target = input.nodes.get(fact.targetId)?.qualifiedName ?? fact.targetName;
+    const source = nodeById.get(fact.sourceId)?.qualifiedName ?? fact.sourceName;
+    const target = nodeById.get(fact.targetId)?.qualifiedName ?? fact.targetName;
     group.push({
       id: fact.id,
       text: `${label(source, 'Indexed source')} ${fact.relation} ${label(target, 'Indexed target')} at line ${fact.evidenceSpan.line}`,

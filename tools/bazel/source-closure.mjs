@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import ts from 'typescript-compiler';
+import * as ts from 'typescript/ast';
 import {builtinModules} from 'node:module';
 import {posix} from 'node:path';
 import * as EffectString from 'effect/String';
@@ -9,44 +9,65 @@ import {Option as EffectOption} from 'effect';
 const builtins = new Set(builtinModules);
 const sourceExtensions = /\.(?:[cm]?[jt]sx?)$/u;
 
-export function sourceImports(path, content) {
+export async function sourceImports(session, path, content) {
   if (!sourceExtensions.test(path)) return [];
-  const specifiers = EffectArray.map(ts.preProcessFile(content, true, true).importedFiles, item => item.fileName);
-  // TypeScript's preprocessor omits namespace re-exports. Read these from the
-  // syntax tree while retaining its established import/dynamic-import behavior.
-  // Keep this guard conservative: raw token scanning can miss exports after
-  // interpolated templates unless it also implements parser-directed rescanning.
-  if (content.includes('export') && content.includes('*')) {
-    const source = ts.createSourceFile(path, content, ts.ScriptTarget.Latest, false);
-    for (const statement of source.statements) {
-      if (
-        ts.isExportDeclaration(statement) &&
-        statement.moduleSpecifier &&
-        ts.isStringLiteral(statement.moduleSpecifier)
-      )
-        specifiers.push(statement.moduleSpecifier.text);
-    }
-  }
-  return [...new Set(specifiers)].sort();
+  return session.withSourceFile({fileName: path, text: content}, source => {
+    const specifiers = new Set();
+    const visit = node => {
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
+        if (ts.isStringLiteral(node.moduleSpecifier)) specifiers.add(node.moduleSpecifier.text);
+      } else if (
+        ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+      ) {
+        const argument = node.arguments[0];
+        if (argument && ts.isStringLiteralLikeNode(argument)) specifiers.add(argument.text);
+      } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+        if (ts.isStringLiteral(node.argument.literal)) specifiers.add(node.argument.literal.text);
+      } else if (
+        ts.isImportEqualsDeclaration(node) &&
+        ts.isExternalModuleReference(node.moduleReference) &&
+        node.moduleReference.expression &&
+        ts.isStringLiteral(node.moduleReference.expression)
+      ) {
+        specifiers.add(node.moduleReference.expression.text);
+      }
+      node.forEachChild(visit);
+    };
+    visit(source);
+    return [...specifiers].sort();
+  });
 }
 
 /**
  * A supplied graph is a cache for one fixed source snapshot, workspace map,
- * virtual-module set and import reader. Reuse it only within that model; create
+ * virtual/host-module declarations and import reader. Reuse it only within that model; create
  * a fresh Map when any resolver input changes.
+ * @param {import('../workspace/typescript-syntax.ts').TypeScriptSyntaxSession} session
  * @param {ReadonlyArray<string>} entries
  * @param {{
  *   read: (path: string) => string,
  *   exists: (path: string) => boolean,
  *   workspaces: ReadonlyMap<string, {path: string, manifest: {exports?: Record<string, unknown>}}>,
  *   virtualModules?: ReadonlyArray<string>,
- *   imports?: (path: string, content: string) => ReadonlyArray<string>,
+ *   hostModules?: Readonly<Record<string, ReadonlyArray<string>>>,
+ *   imports?: (path: string, content: string) => ReadonlyArray<string> | Promise<ReadonlyArray<string>>,
  *   graph?: Map<string, {files: string[], npm: string[]}>
  * }} options
  */
-export function collectSourceClosure(
+export async function collectSourceClosure(
+  session,
   entries,
-  {read, exists, workspaces, virtualModules = [], imports = sourceImports, graph},
+  {
+    read,
+    exists,
+    workspaces,
+    virtualModules = [],
+    hostModules = {},
+    imports = (path, content) => sourceImports(session, path, content),
+    graph,
+  },
 ) {
   const files = new Set();
   const npm = new Set();
@@ -90,12 +111,13 @@ export function collectSourceClosure(
       directFiles.add(resolved);
       pending.push({path: resolved, resolved: graph !== undefined});
     };
-    for (const specifier of sourceExtensions.test(path) ? imports(path, read(path)) : []) {
+    for (const specifier of sourceExtensions.test(path) ? await imports(path, read(path)) : []) {
       if (
         Effect.pipe(specifier, EffectString.startsWith('node:')) ||
         Effect.pipe(specifier, EffectString.startsWith('bun:')) ||
         builtins.has(specifier) ||
-        virtualModules.includes(specifier)
+        virtualModules.includes(specifier) ||
+        hostModules[path]?.includes(specifier)
       )
         continue;
       const clean = Effect.pipe(specifier, EffectString.split('?'))[0];

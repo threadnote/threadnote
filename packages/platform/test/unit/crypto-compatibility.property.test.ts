@@ -70,7 +70,9 @@ describe('Effect crypto compatibility', () => {
           const fs = yield* FileSystem.FileSystem;
           const file = yield* fs.makeTempFileScoped();
           yield* fs.writeFile(file, bytes);
-          expect(yield* sha256FileHex(file)).toBe(createHash('sha256').update(bytes).digest('hex'));
+          const expected = createHash('sha256').update(bytes).digest('hex');
+          expect(yield* sha256FileHex(file)).toBe(expected);
+          expect(yield* sha256FileHex(file, {chunkSize: 7})).toBe(expected);
         }),
       {fastCheck: {numRuns: 25}},
     );

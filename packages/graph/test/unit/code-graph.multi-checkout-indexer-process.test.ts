@@ -33,6 +33,7 @@ describe('multi-checkout indexer process coordination', () => {
     await Promise.all(EffectArray.map(concurrent, child => child.ready));
     await writeFile(start, '');
     try {
+      // Both children start cold with native TypeScript sessions; a loaded CI runner can need more than 30 s.
       await waitFor(
         async () =>
           EffectArray.every(
@@ -41,7 +42,7 @@ describe('multi-checkout indexer process coordination', () => {
             ),
             Boolean,
           ),
-        30_000,
+        90_000,
       );
       await Promise.all(EffectArray.map(concurrent, child => child.completed));
     } finally {

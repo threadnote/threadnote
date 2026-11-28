@@ -879,6 +879,29 @@ describe('Context Brief continuation contracts', () => {
     for (const [label, logical] of cases) expect(contextBriefResumeFocusUri(logical), label).toBeUndefined();
   });
 
+  it('keeps a budget gap first when output trimming drops coverage gaps', () => {
+    const logical = assembleContextBriefLogicalResult({
+      graph: noisyDetachedWorktreeGraph(),
+      memory: emptyMemory(),
+      observedAt: '2026-09-30T00:00:00.000Z',
+      plan: planContextBrief(request('brief', 'source', 800)),
+    });
+    const gaps = [
+      ...Array.from(
+        {length: 40},
+        (_, index) => `semantic-limitation-${index}-${Effect2.pipe('x', EffectString.repeat(40))}`,
+      ),
+      'code-anchor-read-budget-exhausted',
+    ];
+    const projected = projectContextBrief(
+      {...logical, coverage: {...logical.coverage, gaps}},
+      800,
+      'agent',
+    ).structuredContent;
+    expect(projected.coverage.omissions.coverageGaps).toBeGreaterThan(0);
+    expect(projected.coverage.gaps).toContain('code-anchor-read-budget-exhausted');
+  });
+
   it('retains non-graph gaps in an otherwise focused resume', () => {
     const logical = validatedResumeLogical();
     const result = projectContextBrief(

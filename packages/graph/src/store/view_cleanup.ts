@@ -329,7 +329,16 @@ const pruneRetiredSnapshotRowsPage = Effect.fn('codeGraph.pruneRetiredSnapshotRo
              AND EXISTS (SELECT 1 FROM snapshots WHERE id = ? AND state = 'retired')`,
           [compactTarget.snapshot_id, compactTarget.snapshot_id],
         );
-        const formatRows = yield* lastStatementChangeCount(sql);
+        let formatRows = yield* lastStatementChangeCount(sql);
+        for (const table of ['lexical_v2_formats', 'lexical_v2_views']) {
+          if (!(yield* tableExists(sql, table))) continue;
+          yield* sql.unsafe(
+            `DELETE FROM ${table} WHERE snapshot_id=?
+            AND EXISTS (SELECT 1 FROM snapshots WHERE id=? AND state='retired')`,
+            [compactTarget.snapshot_id, compactTarget.snapshot_id],
+          );
+          formatRows += yield* lastStatementChangeCount(sql);
+        }
         yield* sql.unsafe(
           `DELETE FROM lexical_compact_snapshots
            WHERE snapshot_key = ? AND snapshot_id = ?

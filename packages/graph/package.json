@@ -400,10 +400,13 @@
     "./test/helpers/code-graph-legacy-authority": "./test/helpers/code-graph-legacy-authority.ts",
     "./test/helpers/graph-registry": "./test/helpers/graph-registry.ts",
     "./test/helpers/graph-share-contribution": "./test/helpers/graph-share-contribution.ts",
+    "./test/helpers/native-typescript-kernel": "./test/helpers/native-typescript-kernel.ts",
+    "./test/helpers/native-typescript-session": "./test/helpers/native-typescript-session.ts",
     "./threadnote_ignore": "./src/threadnote_ignore.ts",
     "./tree_sitter/extractor": "./src/tree_sitter/extractor.ts",
     "./tree_sitter/runtime": "./src/tree_sitter/runtime.ts",
     "./types": "./src/types.ts",
+    "./typescript_native_asset_pins": "./src/typescript_native_asset_pins.ts",
     "./typescript_runtime": "./src/typescript_runtime.ts",
     "./vector/demand": "./src/vector/demand.ts",
     "./vector/demand_scheduler": "./src/vector/demand_scheduler.ts",
@@ -453,7 +456,11 @@
     "./workspace/diagnostics": "./src/workspace/diagnostics.ts",
     "./workspace/node": "./src/workspace/node.ts",
     "./workspace/primitives": "./src/workspace/primitives.ts",
-    "./worktree_reconciliation": "./src/worktree_reconciliation.ts"
+    "./worktree_reconciliation": "./src/worktree_reconciliation.ts",
+    "./navigation_facts": "./src/navigation_facts.ts",
+    "./query/navigation_facts": "./src/query/navigation_facts.ts",
+    "./query/task_discovery": "./src/query/task_discovery.ts",
+    "./languages/body_discovery": "./src/languages/body_discovery.ts"
   },
   "dependencies": {
     "@effect/platform-bun": "4.1.4",
@@ -466,7 +473,7 @@
     "fflate": "0.8.3",
     "jose": "6.2.17",
     "js-yaml": "^5.5.0",
-    "typescript-compiler": "npm:typescript@5.9.3",
+    "typescript": "7.1.0-beta",
     "unpdf": "1.9.1",
     "web-tree-sitter": "0.27.1"
   },

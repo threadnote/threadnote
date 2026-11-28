@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import ts from 'typescript-compiler';
+import * as ts from 'typescript/ast';
 import {posix} from 'node:path';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -81,54 +81,58 @@ const templateDirectory = node => {
 };
 
 /** Extracts repository-relative path candidates from static source literals. */
-export function sourceRepositoryPathCandidates(path, content) {
-  const source = ts.createSourceFile(path, content, ts.ScriptTarget.Latest, true);
-  const candidates = new Set();
-  const rootDeclarations = new Map();
-  const collectRootDeclarations = node => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
-      const current = rootDeclarations.get(node.name.text) ?? true;
-      rootDeclarations.set(node.name.text, current && node.initializer !== undefined && isProcessCwd(node.initializer));
-    }
-    ts.forEachChild(node, collectRootDeclarations);
-  };
-  collectRootDeclarations(source);
-  const repositoryRoots = new Set(
-    EffectArray.map(
-      EffectArray.filter([...rootDeclarations], ([, repositoryRoot]) => repositoryRoot),
-      ([name]) => name,
-    ),
-  );
-  const isRepositoryRoot = node => isProcessCwd(node) || (ts.isIdentifier(node) && repositoryRoots.has(node.text));
-  const add = (value, relativeToSource = true) => {
-    const normalized = normalizeCandidate(path, value, relativeToSource);
-    if (normalized) candidates.add(normalized);
-  };
-  const visit = node => {
-    const text = staticText(node);
-    if (text !== undefined && looksLikePath(text)) add(text);
-    if (ts.isCallExpression(node)) {
-      const name = callName(node.expression);
-      if (callPathFunctions.has(name)) {
-        const directory = templateDirectory(node.arguments[0]);
-        if (directory) add(directory);
+export function sourceRepositoryPathCandidates(session, path, content) {
+  return session.withSourceFile({fileName: path, text: content}, source => {
+    const candidates = new Set();
+    const rootDeclarations = new Map();
+    const collectRootDeclarations = node => {
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+        const current = rootDeclarations.get(node.name.text) ?? true;
+        rootDeclarations.set(
+          node.name.text,
+          current && node.initializer !== undefined && isProcessCwd(node.initializer),
+        );
       }
-      if (composePathFunctions.has(name)) {
-        const allStatic = EffectArray.every(node.arguments, argument => staticText(argument) !== undefined);
-        const rootedStatic =
-          node.arguments.length > 1 &&
-          isRepositoryRoot(node.arguments[0]) &&
-          EffectArray.every(node.arguments.slice(1), argument => staticText(argument) !== undefined);
-        if (allStatic || rootedStatic) {
-          const start = rootedStatic ? 1 : 0;
-          add(posix.join(...EffectArray.map(node.arguments.slice(start), argument => staticText(argument))), false);
+      node.forEachChild(collectRootDeclarations);
+    };
+    collectRootDeclarations(source);
+    const repositoryRoots = new Set(
+      EffectArray.map(
+        EffectArray.filter([...rootDeclarations], ([, repositoryRoot]) => repositoryRoot),
+        ([name]) => name,
+      ),
+    );
+    const isRepositoryRoot = node => isProcessCwd(node) || (ts.isIdentifier(node) && repositoryRoots.has(node.text));
+    const add = (value, relativeToSource = true) => {
+      const normalized = normalizeCandidate(path, value, relativeToSource);
+      if (normalized) candidates.add(normalized);
+    };
+    const visit = node => {
+      const text = staticText(node);
+      if (text !== undefined && looksLikePath(text)) add(text);
+      if (ts.isCallExpression(node)) {
+        const name = callName(node.expression);
+        if (callPathFunctions.has(name)) {
+          const directory = templateDirectory(node.arguments[0]);
+          if (directory) add(directory);
+        }
+        if (composePathFunctions.has(name)) {
+          const allStatic = EffectArray.every(node.arguments, argument => staticText(argument) !== undefined);
+          const rootedStatic =
+            node.arguments.length > 1 &&
+            isRepositoryRoot(node.arguments[0]) &&
+            EffectArray.every(node.arguments.slice(1), argument => staticText(argument) !== undefined);
+          if (allStatic || rootedStatic) {
+            const start = rootedStatic ? 1 : 0;
+            add(posix.join(...EffectArray.map(node.arguments.slice(start), argument => staticText(argument))), false);
+          }
         }
       }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  return [...candidates].sort();
+      node.forEachChild(visit);
+    };
+    visit(source);
+    return [...candidates].sort();
+  });
 }
 
 export function allowedRepositoryPath(path, roots) {

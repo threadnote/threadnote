@@ -7,11 +7,12 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {TestClock} from 'effect/testing';
-import {Deferred, Effect, FileSystem, Fiber, Layer, Schema} from 'effect';
+import {Clock, Deferred, Effect, FileSystem, Fiber, Layer, Schema} from 'effect';
 import {cachedCodeGraphFactBytes, CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '@threadnote/graph/fact/budget';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import {
+  CODE_GRAPH_NATIVE_PARSER_WORKERS_ENV,
   CODE_GRAPH_PARSER_RSS_BYTES_ENV,
   CODE_GRAPH_PARSER_SOURCE_BYTES_MAXIMUM,
   CODE_GRAPH_PARSER_WORKER_RESPONSE_BYTES_MAXIMUM,
@@ -20,11 +21,14 @@ import {
   ParserWorkerConfigurationError,
   budgetParserWorkerFacts,
   codeGraphParserPoolLayer,
+  nativeParserWorkerCapacity,
   parserWorkerCapacity,
   parserWorkerResourceBudget,
+  plannedGeneralParserLanes,
   parserWorkerSourceByteBudget,
   parserWorkerSuccessResponseBytes,
   warmPlannedParserCapacity,
+  type CodeGraphParserPoolShape,
   type ParserWorkerProcess,
   type ParserWorkerSpawner,
   type ParserWorkerSpawnOptions,
@@ -35,6 +39,7 @@ import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const encoder = new TextEncoder();
 
@@ -227,6 +232,20 @@ describe('code graph parser worker pool', () => {
         hardwareConcurrency: Number.NaN,
       }),
     ).toBe(1);
+    expect(EffectArray.map([1, 4, 8], capacity => nativeParserWorkerCapacity(capacity, {}))).toEqual([1, 1, 2]);
+    const nativeOverride = (value: string) =>
+      nativeParserWorkerCapacity(4, {THREADNOTE_CODE_GRAPH_NATIVE_PARSER_WORKERS: value});
+    expect(EffectArray.map(['3', '9', '0', 'x'], nativeOverride)).toEqual([3, 4, 1, 1]);
+    // General lanes finish the general work, by static units, no later than the native lanes; at least one runs.
+    const generalLanes = (nativeWorkUnits: number, generalWorkUnits: number, nativeCapacity = 1) =>
+      plannedGeneralParserLanes({nativeCapacity, generalCapacity: 3}, {nativeWorkUnits, generalWorkUnits});
+    expect([generalLanes(100, 0), generalLanes(100, 10), generalLanes(100, 150), generalLanes(100, 900)]).toEqual([
+      1, 1, 2, 3,
+    ]);
+    expect([generalLanes(0, 10), generalLanes(100, 10, 0), generalLanes(Number.NaN, 10)]).toEqual([3, 3, 3]);
+    expect(
+      plannedGeneralParserLanes({nativeCapacity: 1, generalCapacity: 0}, {nativeWorkUnits: 1, generalWorkUnits: 9}),
+    ).toBe(0);
   });
 
   it.effect('degrades oversized source before acquiring or launching a parser worker', () => {
@@ -308,11 +327,17 @@ describe('code graph parser worker pool', () => {
     {fastCheck: {numRuns: 100}},
   );
 
-  it.effect('launches the real source worker and extracts TypeScript outside the caller process', () =>
+  native(it.effect)('launches the real source worker and extracts TypeScript outside the caller process', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-real-'});
       const pool = yield* CodeGraphParserPool;
+      // Public preparation has no language evidence: warm the real Bun core
+      // with JSON before requiring the original paired TypeScript backend.
+      yield* pool.warm(home, 1);
+      const nonTypeScript = yield* pool.extract(inventoryFile('src/warmed.json', '{"warmed":true}', 'json'), home);
+      expect(nonTypeScript.degraded).toBe(false);
+      expect(nonTypeScript.facts.path).toBe('src/warmed.json');
       const result = yield* pool.extract(
         inventoryFile('src/real-worker.ts', 'export function realWorker(value: number): number { return value + 1; }'),
         home,
@@ -330,10 +355,50 @@ describe('code graph parser worker pool', () => {
       );
       expect(restarted.degraded).toBe(false);
       expect(EffectArray.some(restarted.facts.symbols, symbol => symbol.name === 'restartedWorker')).toBe(true);
-    }).pipe(provideTestLayer(parserLayer({capacity: 1})), Effect.scoped),
+    }).pipe(TestClock.withLive, provideTestLayer(parserLayer({capacity: 1})), Effect.scoped),
   );
 
-  it.effect('degrades and recycles a real worker that exceeds its RSS budget', () =>
+  native(it.effect)('projects diagram source order in a real worker that borrows its native session', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-sequence-'});
+      const pool = yield* CodeGraphParserPool;
+      const text = 'export function run() {\n  if (ready) first();\n  second();\n}\n';
+      const call = (name: string, line: number, column: number) => ({
+        id: `edge_${name}`,
+        relation: 'calls' as const,
+        sourceId: 'run',
+        sourceName: 'run',
+        targetId: name,
+        targetName: name,
+        evidencePath: 'src/run.ts',
+        evidenceSpan: {line, column, endLine: line, endColumn: column + name.length + 2},
+      });
+      const request: Parameters<CodeGraphParserPoolShape['projectSourceSequence']>[0] = {
+        subject: {path: 'src/run.ts', span: {line: 1, column: 1, endLine: 4, endColumn: 2}, qualifiedName: 'run'},
+        text,
+        calls: [call('first', 2, 14), call('second', 3, 3)],
+        nodes: [
+          {id: 'run', path: 'src/run.ts', qualifiedName: 'run'},
+          {id: 'first', path: 'src/work.ts', qualifiedName: 'first'},
+          {id: 'second', path: 'src/work.ts', qualifiedName: 'second'},
+        ],
+        gaps: [],
+      };
+      const now = yield* Clock.currentTimeMillis;
+      const projected = yield* pool.projectSourceSequence(request, home, now + 60_000);
+      expect(projected).toMatchObject({
+        status: 'projected',
+        sequence: {orderedCalls: 2, unorderedCalls: 0, hasControls: true},
+      });
+      if (projected.status !== 'projected' || projected.sequence === undefined) return;
+      expect(projected.sequence.source).toContain('opt ready condition at line 2');
+      // An expired diagram budget is unavailable before any worker request.
+      expect(yield* pool.projectSourceSequence(request, home, now - 1)).toEqual({status: 'unavailable'});
+    }).pipe(TestClock.withLive, provideTestLayer(parserLayer({capacity: 1})), Effect.scoped),
+  );
+
+  native(it.effect)('degrades and recycles a real worker that exceeds its RSS budget', () =>
     Effect.gen(function* () {
       const resourceLimitedSystem = yield* systemWith({
         environment: () => ({...process.env, [CODE_GRAPH_PARSER_RSS_BYTES_ENV]: '1'}),
@@ -463,10 +528,13 @@ describe('code graph parser worker pool', () => {
       };
       yield* Effect.gen(function* () {
         const pool = yield* CodeGraphParserPool;
+        // TypeScript fills the native slots and JSON the general slots, so every slot admits one worker.
         const requests = yield* Effect.forkScoped(
           Effect.forEach(
             Array.from({length: capacity}, (_, index) =>
-              inventoryFile(`src/${index}.ts`, `export const a${index} = 1;`),
+              index < pool.nativeCapacity
+                ? inventoryFile(`src/${index}.ts`, `export const a${index} = 1;`)
+                : inventoryFile(`src/${index}.json`, `{"a${index}":1}`, 'json'),
             ),
             file => pool.extract(file, home),
             {concurrency: 'unbounded'},
@@ -488,7 +556,7 @@ describe('code graph parser worker pool', () => {
     }).pipe(provideTestLayer(baseLayer)),
   );
 
-  it.effect.each([0, 1])('falls back from preferred global slot %i held by another pool', preferredSlot =>
+  it.effect.each([0, 1])('takes a free global slot while global slot %i is held by another pool', heldSlot =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-preferred-busy-'});
@@ -496,7 +564,7 @@ describe('code graph parser worker pool', () => {
       const owner = yield* Effect.forkScoped(
         withExclusiveFileLock(
           fs,
-          `${home}/locks/indexes/code-graph/parser-slots/${preferredSlot}.lock`,
+          `${home}/locks/indexes/code-graph/parser-slots/${heldSlot}.lock`,
           {
             onAcquired: () => Deferred.succeed(held, undefined).pipe(Effect.asVoid),
             retryIntervalMilliseconds: 1,
@@ -517,22 +585,26 @@ describe('code graph parser worker pool', () => {
       });
       const result = yield* Effect.gen(function* () {
         const pool = yield* CodeGraphParserPool;
-        if (preferredSlot === 1) {
+        if (heldSlot === 1) {
           yield* pool.extract(inventoryFile('src/first-slot.ts', 'export const first = true;'), home);
           attempts.length = 0;
         }
         return yield* pool.extract(inventoryFile('src/fallback.ts', 'export const fallback = true;'), home);
       }).pipe(
-        provideTestLayer(parserLayer({capacity: 2, spawnWorker: () => echoProcess()}, TestSystemInfoLayer, trackedFs)),
+        // Two native slots share one lock range, so the TypeScript request rotates inside it.
+        provideTestLayer(
+          parserLayer({capacity: 2, spawnWorker: () => echoProcess()}, allNativeSystemLayer(2), trackedFs),
+        ),
         Effect.scoped,
       );
 
       expect(result.degraded).toBe(false);
-      expect(EffectArray.map(attempts, path => Effect2.pipe(path, EffectString.split('/')).at(-1))).toEqual([
-        `${preferredSlot}.lock`,
-        `${1 - preferredSlot}.lock`,
-      ]);
-      expect(yield* fs.exists(`${home}/locks/indexes/code-graph/parser-slots/${preferredSlot}.lock`)).toBe(true);
+      // A held preferred lock rotates to the other lock in the range. A later request reuses idle slot 0, whose
+      // preferred lock is free, so it never tries the held lock.
+      expect(EffectArray.map(attempts, path => Effect2.pipe(path, EffectString.split('/')).at(-1))).toEqual(
+        heldSlot === 0 ? ['0.lock', '1.lock'] : ['0.lock'],
+      );
+      expect(yield* fs.exists(`${home}/locks/indexes/code-graph/parser-slots/${heldSlot}.lock`)).toBe(true);
       yield* Fiber.interrupt(owner);
     }).pipe(provideTestLayer(baseLayer)),
   );
@@ -544,12 +616,16 @@ describe('code graph parser worker pool', () => {
       return Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-capacity-'});
-        const leftFiles = Array.from({length: capacity * 2}, (_, index) =>
-          inventoryFile(`left/${index}.ts`, `export const left${index} = ${index};`),
-        );
-        const rightFiles = Array.from({length: capacity * 2}, (_, index) =>
-          inventoryFile(`right/${index}.ts`, `export const right${index} = ${index};`),
-        );
+        // TypeScript uses the native lock range and JSON the general one; together they reach `capacity`.
+        const native = nativeParserWorkerCapacity(capacity, {});
+        const sideFiles = (side: string) =>
+          Array.from({length: capacity * 2}, (_, index) =>
+            index < native * 2
+              ? inventoryFile(`${side}/${index}.ts`, `export const ${side}${index} = ${index};`)
+              : inventoryFile(`${side}/${index}.json`, `{"${side}${index}":${index}}`, 'json'),
+          );
+        const leftFiles = sideFiles('left');
+        const rightFiles = sideFiles('right');
 
         const joined = Effect.all(
           [runPool(leftFiles, home, capacity, spawn), runPool(rightFiles, home, capacity, spawn)],
@@ -789,6 +865,209 @@ describe('code graph parser worker pool', () => {
     }).pipe(provideTestLayer(parserLayer({capacity: 1, maxSourceBytes: 64, spawnWorker: spawn})), Effect.scoped);
   });
 
+  it.effect('keeps public warm compiler-free and closes its worker before a bounded TypeScript upgrade', () => {
+    const processes: ScriptedParserWorkerProcess[] = [];
+    const launches: ParserWorkerSpawnOptions[] = [];
+    const spawn: ParserWorkerSpawner = (options, signal) => {
+      if (processes.length) expect(processes[0].inputClosed).toBe(true);
+      expect(signal).toBeDefined();
+      expect(signal?.aborted).toBe(false);
+      launches.push(options);
+      const worker = echoProcess();
+      processes.push(worker);
+      return worker;
+    };
+    return Effect.gen(function* () {
+      const system = yield* SystemInfo;
+      const poisoned = Layer.succeed(
+        SystemInfo,
+        SystemInfo.of({
+          ...system,
+          environment: () => ({
+            ...system.environment(),
+            THREADNOTE_NATIVE_TYPESCRIPT_PIPE: 'unowned-pipe',
+            THREADNOTE_NATIVE_TYPESCRIPT_DIRECTORY: 'unowned-directory',
+          }),
+        }),
+      );
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-language-warm-'});
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const pool = yield* CodeGraphParserPool;
+          yield* pool.warm(home, 1);
+          const json = yield* pool.extract(inventoryFile('src/warmed.json', '{"warmed":true}', 'json'), home);
+          expect(json.degraded).toBe(false);
+          expect(processes).toHaveLength(1);
+          expect(launches[0].nativeTypeScript).toBe(false);
+          expect(processes[0].writes[0].file.path).toBe('.threadnote/parser-warmup.json');
+          expect(launches[0].environment.THREADNOTE_NATIVE_TYPESCRIPT_PIPE).toBeUndefined();
+          expect(launches[0].environment.THREADNOTE_NATIVE_TYPESCRIPT_DIRECTORY).toBeUndefined();
+          const typescript = yield* pool.extract(inventoryFile('src/upgrade.ts', 'export const upgrade = true;'), home);
+          expect(typescript.degraded).toBe(false);
+          expect(processes).toHaveLength(2);
+          expect(launches[1].nativeTypeScript).toBe(true);
+          expect(processes[0].closeInputCalls).toBe(1);
+          expect(processes[0].killed).toBe(false);
+          yield* pool.extract(inventoryFile('src/after.json', '{"after":true}', 'json'), home);
+          expect(processes).toHaveLength(2);
+        }).pipe(provideTestLayer(parserLayer({capacity: 1, spawnWorker: spawn}, poisoned))),
+      );
+      expect(EffectArray.every(processes, worker => worker.inputClosed && !worker.killed)).toBe(true);
+    }).pipe(provideTestLayer(parserLayer({capacity: 1})), Effect.scoped);
+  });
+
+  it.effect('keeps one native compiler slot and routes TypeScript only to it', () => {
+    const launched: {readonly options: ParserWorkerSpawnOptions; readonly worker: ScriptedParserWorkerProcess}[] = [];
+    const spawn: ParserWorkerSpawner = options => {
+      const worker = echoProcess({delay: 5});
+      launched.push({options, worker});
+      return worker;
+    };
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-native-lane-'});
+      const pool = yield* CodeGraphParserPool;
+      expect(pool.nativeCapacity).toBe(1);
+      const json = (name: string) =>
+        Array.from({length: 2}, (_, index) =>
+          inventoryFile(`src/${name}-${index}.json`, `{"${name}":${index}}`, 'json'),
+        );
+      const typescript = Array.from({length: 2}, (_, index) =>
+        inventoryFile(`src/native-${index}.ts`, `export const native${index} = ${index};`),
+      );
+      const single = inventoryFile('src/single.ts', 'export const single = true;');
+      const lane = (files: readonly CodeGraphInventoryFile[], parserLane: 'general' | 'native') =>
+        pool.withParserSlot(home, files, extract => Effect.forEach(files, extract), parserLane);
+      const results = (yield* Effect.all(
+        [
+          lane(json('left'), 'general'),
+          lane(json('right'), 'general'),
+          lane(typescript, 'native'),
+          pool.extract(single, home).pipe(Effect.map(result => [result])),
+        ],
+        {concurrency: 'unbounded'},
+      )).flat();
+
+      expect(results).toHaveLength(7);
+      expect(EffectArray.every(results, result => !result.degraded)).toBe(true);
+      const native = EffectArray.filter(launched, launch => launch.options.nativeTypeScript === true);
+      expect(native).toHaveLength(1);
+      expect(launched.length).toBeLessThanOrEqual(4);
+      const typescriptWrites = EffectArray.flatMap(launched, launch =>
+        EffectArray.map(
+          EffectArray.filter(launch.worker.writes, write => EffectString.endsWith('.ts')(write.file.path)),
+          write => ({native: launch.options.nativeTypeScript === true, path: write.file.path}),
+        ),
+      );
+      expect(EffectArray.map(typescriptWrites, write => write.path).sort()).toEqual([
+        'src/native-0.ts',
+        'src/native-1.ts',
+        'src/single.ts',
+      ]);
+      expect(EffectArray.every(typescriptWrites, write => write.native)).toBe(true);
+    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
+  });
+
+  it.effect('warms native workers only in native slots', () => {
+    const launches: ParserWorkerSpawnOptions[] = [];
+    const spawn: ParserWorkerSpawner = options => {
+      launches.push(options);
+      return echoProcess();
+    };
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-native-warm-'});
+      const pool = yield* CodeGraphParserPool;
+      yield* pool.warm(home, 4, true);
+      expect(launches).toHaveLength(4);
+      expect(EffectArray.filter(launches, launch => launch.nativeTypeScript === true)).toHaveLength(1);
+    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
+  });
+
+  it.effect.each([
+    {general: false, nativeTypeScript: true, native: 1, total: 1},
+    {general: true, nativeTypeScript: false, native: 0, total: 3},
+    {general: true, nativeTypeScript: true, native: 1, total: 4},
+    {general: true, nativeTypeScript: true, nativeWorkUnits: 100, generalWorkUnits: 10, native: 1, total: 2},
+    {general: true, nativeTypeScript: true, nativeWorkUnits: 100, generalWorkUnits: 150, native: 1, total: 3},
+  ])('warms only the lanes that planned work runs: %o', ({native, total, ...work}) => {
+    const launches: ParserWorkerSpawnOptions[] = [];
+    const spawn: ParserWorkerSpawner = options => {
+      launches.push(options);
+      return echoProcess();
+    };
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-lane-warm-'});
+      const pool = yield* CodeGraphParserPool;
+      yield* warmPlannedParserCapacity(pool, home, 8, work);
+      expect(launches).toHaveLength(total);
+      expect(EffectArray.filter(launches, launch => launch.nativeTypeScript === true)).toHaveLength(native);
+    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
+  });
+
+  it.effect('reuses the started general worker across sequential general lanes', () => {
+    const launches: ParserWorkerSpawnOptions[] = [];
+    const spawn: ParserWorkerSpawner = options => {
+      launches.push(options);
+      return echoProcess();
+    };
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-general-reuse-'});
+      const pool = yield* CodeGraphParserPool;
+      for (const index of [0, 1, 2]) {
+        const file = inventoryFile(`src/general-${index}.json`, `{"index":${index}}`, 'json');
+        const [result] = yield* pool.withParserSlot(
+          home,
+          [file],
+          extract => Effect.forEach([file], extract),
+          'general',
+        );
+        expect(result.degraded).toBe(false);
+      }
+      expect(launches).toHaveLength(1);
+    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
+  });
+
+  it.effect('hands a TypeScript file in a general lane to the native slot', () => {
+    const launched: {readonly options: ParserWorkerSpawnOptions; readonly worker: ScriptedParserWorkerProcess}[] = [];
+    const spawn: ParserWorkerSpawner = options => {
+      const worker = echoProcess();
+      launched.push({options, worker});
+      return worker;
+    };
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-general-fallback-'});
+      const pool = yield* CodeGraphParserPool;
+      const json = inventoryFile('src/general.json', '{"general":true}', 'json');
+      const typescript = inventoryFile('src/fallback.ts', 'export const fallback = true;');
+      const results = yield* pool.withParserSlot(
+        home,
+        [json, typescript],
+        extract => Effect.forEach([json, typescript], extract),
+        'general',
+      );
+
+      expect(EffectArray.every(results, result => !result.degraded)).toBe(true);
+      const writes = EffectArray.flatMap(launched, launch =>
+        EffectArray.map(launch.worker.writes, write => ({
+          native: launch.options.nativeTypeScript === true,
+          path: write.file.path,
+        })),
+      );
+      expect(writes).toEqual(
+        expect.arrayContaining([
+          {native: false, path: 'src/general.json'},
+          {native: true, path: 'src/fallback.ts'},
+        ]),
+      );
+      expect(writes).toHaveLength(2);
+    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
+  });
+
   it.effect('warms every idle slot before extraction and reuses the workers', () => {
     const processes: ScriptedParserWorkerProcess[] = [];
     const spawn: ParserWorkerSpawner = () => {
@@ -805,12 +1084,12 @@ describe('code graph parser worker pool', () => {
       yield* pool.warm(home);
       expect(processes).toHaveLength(2);
       expect(
-        EffectArray.every(processes, process => process.writes[0]?.file.path === '.threadnote/parser-warmup.ts'),
+        EffectArray.every(processes, process => process.writes[0]?.file.path === '.threadnote/parser-warmup.json'),
       ).toBe(true);
 
       const files = [
-        inventoryFile('src/warm-a.ts', 'export const warmA = true;'),
-        inventoryFile('src/warm-b.ts', 'export const warmB = true;'),
+        inventoryFile('src/warm-a.json', '{"warmA":true}', 'json'),
+        inventoryFile('src/warm-b.json', '{"warmB":true}', 'json'),
       ];
       const results = yield* Effect.forEach(
         files,
@@ -842,7 +1121,7 @@ describe('code graph parser worker pool', () => {
       yield* pool.warm(home, 4);
       expect(processes).toHaveLength(4);
       expect(
-        EffectArray.every(processes, process => process.writes[0]?.file.path === '.threadnote/parser-warmup.ts'),
+        EffectArray.every(processes, process => process.writes[0]?.file.path === '.threadnote/parser-warmup.json'),
       ).toBe(true);
 
       for (const requestedSlots of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
@@ -911,15 +1190,15 @@ describe('code graph parser worker pool', () => {
       yield* pool.warm(home);
       expect(processes).toHaveLength(1);
       expect(EffectArray.map(processes[0].writes, request => request.file.path)).toEqual([
-        '.threadnote/parser-warmup.ts',
+        '.threadnote/parser-warmup.json',
       ]);
 
-      const result = yield* pool.extract(inventoryFile('src/lazy.ts', 'export const lazy = true;'), home);
+      const result = yield* pool.extract(inventoryFile('src/lazy.json', '{"lazy":true}', 'json'), home);
       expect(result.degraded).toBe(false);
       expect(processes).toHaveLength(1);
       expect(EffectArray.map(processes[0].writes, request => request.file.path)).toEqual([
-        '.threadnote/parser-warmup.ts',
-        'src/lazy.ts',
+        '.threadnote/parser-warmup.json',
+        'src/lazy.json',
       ]);
     }).pipe(provideTestLayer(parserLayer({capacity: 1, spawnWorker: spawn})), Effect.scoped);
   });
@@ -952,7 +1231,7 @@ describe('code graph parser worker pool', () => {
       expect(
         EffectArray.flatMap(processes, process => EffectArray.map(process.writes, request => request.file.path)).sort(),
       ).toEqual(EffectArray.map(files, file => file.path).sort());
-    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
+    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn}, allNativeSystemLayer(4))), Effect.scoped);
   });
 
   it.effect('does not warm extra slots when most planned files bypass parser workers', () => {
@@ -986,7 +1265,7 @@ describe('code graph parser worker pool', () => {
       expect(
         EffectArray.flatMap(processes, process => EffectArray.map(process.writes, request => request.file.path)),
       ).toEqual(['src/planned.ts', 'src/planned.ts', 'src/planned.ts', 'src/planned.ts']);
-    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
+    }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn}, allNativeSystemLayer(4))), Effect.scoped);
   });
 
   it.effect('prepares reusable parser capacity before larger planned work', () => {
@@ -1005,7 +1284,7 @@ describe('code graph parser worker pool', () => {
       yield* warmPlannedParserCapacity(pool, home, 5);
       expect(processes).toHaveLength(4);
       expect(
-        EffectArray.every(processes, process => process.writes[0]?.file.path === '.threadnote/parser-warmup.ts'),
+        EffectArray.every(processes, process => process.writes[0]?.file.path === '.threadnote/parser-warmup.json'),
       ).toBe(true);
     }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
   });
@@ -1034,14 +1313,14 @@ describe('code graph parser worker pool', () => {
       yield* Fiber.join(interrupted);
 
       const result = yield* pool.extract(
-        inventoryFile('src/reused-after-interrupt.ts', 'export const reused = true;'),
+        inventoryFile('src/reused-after-interrupt.json', '{"reused":true}', 'json'),
         home,
       );
       expect(result.degraded).toBe(false);
       expect(processes).toHaveLength(1);
       expect(EffectArray.map(prepared.writes, request => request.file.path)).toEqual([
-        '.threadnote/parser-warmup.ts',
-        'src/reused-after-interrupt.ts',
+        '.threadnote/parser-warmup.json',
+        'src/reused-after-interrupt.json',
       ]);
     }).pipe(provideTestLayer(parserLayer({capacity: 1, spawnWorker: spawn})), Effect.scoped);
   });
@@ -1505,6 +1784,24 @@ function advanceContentionClock(): Effect.Effect<void> {
       yield* TestClock.adjust(25);
     }
   });
+}
+
+/** Every slot native in one lock range: warm planning and lock rotation tests that do not exercise lanes. */
+function allNativeSystemLayer(nativeCapacity: number): Layer.Layer<SystemInfo> {
+  return Layer.effect(
+    SystemInfo,
+    SystemInfo.pipe(
+      Effect.map(current =>
+        SystemInfo.of({
+          ...current,
+          environment: () => ({
+            ...current.environment(),
+            [CODE_GRAPH_NATIVE_PARSER_WORKERS_ENV]: String(nativeCapacity),
+          }),
+        }),
+      ),
+    ),
+  ).pipe(Layer.provide(TestSystemInfoLayer));
 }
 
 function systemWith(overrides: Partial<SystemInfoShape>) {

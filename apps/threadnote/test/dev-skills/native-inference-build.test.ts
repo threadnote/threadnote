@@ -11,6 +11,8 @@ import {
   nativeContainerFailureReport,
   nativeInferenceBuildEnvironment,
   GNU_INFERENCE_COMPILER_BOOTSTRAP,
+  gnuBuildContainerBootstrap,
+  gnuContainerTypeScriptArguments,
   muslToolchainFetchScript,
   MUSL_BUILD_DEPENDENCY_INSTALL,
   buildNativeInferenceDriver,
@@ -199,6 +201,14 @@ describe('native inference overlay filesystem boundary', () => {
       ]);
     }),
   );
+
+  it('never passes the native TypeScript payload into the glibc 2.17 GNU container', () => {
+    // A reviewed-pin release defers staging to the host; the container sees neither the payload path nor a mount.
+    const deferred = gnuContainerTypeScriptArguments({THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: '/runner/temp/payload'});
+    expect(deferred).toEqual(['--env', 'THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DEFERRED=1']);
+    expect(EffectArray.join(deferred, ' ')).not.toContain('/runner/temp/payload');
+    expect(gnuContainerTypeScriptArguments({})).toEqual([]);
+  });
 
   it('retains build stdout even when Docker pull diagnostics occupy stderr', () => {
     const error = CommandFailed.make({
@@ -729,6 +739,48 @@ if [ "$1" = --bun ] && [ "$2" = husky ]; then [ "$HUSKY" = 0 ] || exit 41; fi
     );
 
     it.effect.skipIf(process.platform === 'win32')(
+      'returns the GNU container checkout to the runner user on every exit before any build step',
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const directory = yield* fs.makeTempDirectoryScoped({prefix: 'native gnu ownership '});
+          const checkout = path.join(directory, "checkout 'root'");
+          const pins = {bun: 'bun-linux-x64-baseline', bunSha: 'a', rust: 'x86_64-unknown-linux-gnu', rustupSha: 'b'};
+          const bootstrap = gnuBuildContainerBootstrap(pins, checkout, path.join(checkout, 'run.mjs'), '1001:127');
+          expect(() => gnuBuildContainerBootstrap(pins, checkout, 'run.mjs', 'runner')).toThrow('numeric uid:gid');
+          // Everything before the first download: the exit trap is armed before any step can create root-owned files.
+          const preamble = EffectString.split('\ncurl ')(bootstrap)[0] ?? '';
+          expect(preamble).toContain('trap ');
+          const log = path.join(directory, 'chown.log');
+          const chown = path.join(directory, 'chown');
+          const run = (body: string, chownStatus: number) =>
+            Effect.gen(function* () {
+              yield* fs.writeFileString(chown, `#!/bin/sh\nprintf '%s\\n' "$@" > '${log}'\nexit ${chownStatus}\n`);
+              yield* fs.chmod(chown, 0o755);
+              yield* fs.remove(log, {force: true});
+              const result = Bun.spawnSync({
+                cmd: ['bash', '-c', `${preamble}\n${body}`],
+                env: {...Bun.env, PATH: `${directory}:${Bun.env.PATH ?? ''}`},
+                stdout: 'pipe',
+                stderr: 'pipe',
+              });
+              return {status: result.exitCode, stderr: result.stderr.toString(), chown: yield* fs.readFileString(log)};
+            });
+          const restored = EffectArray.join(['-hRP', '--', '1001:127', checkout, ''], '\n');
+          expect(yield* run('stage=requested-command\nexit 0', 0)).toMatchObject({status: 0, chown: restored});
+          // A failed build still returns ownership and keeps its own status and stage report.
+          const failed = yield* run('stage=requested-command\nexit 7', 0);
+          expect(failed).toMatchObject({status: 7, chown: restored});
+          expect(failed.stderr).toContain('failed at requested-command (exit 7)');
+          // A failed ownership restore fails an otherwise successful build.
+          const unowned = yield* run('stage=requested-command\nexit 0', 3);
+          expect(unowned.status).toBe(1);
+          expect(unowned.stderr).toContain('could not return the checkout to 1001:127');
+        }),
+    );
+
+    it.effect.skipIf(process.platform === 'win32')(
       'passes exact APK constraints through world, restores it, and pins the compiler helper arguments',
       () =>
         Effect.gen(function* () {
@@ -884,6 +936,35 @@ if [ "$1" = --bun ] && [ "$2" = husky ]; then [ "$HUSKY" = 0 ] || exit 41; fi
         expect((yield* verifyNativeInferenceOverlay(destination).pipe(Effect.exit))._tag).toBe('Failure');
         yield* fs.writeFileString(path.join(source, 'runtime', 'native', 'llama.node'), 'changed');
         expect((yield* stageNativeInferenceOverlay(source, destination).pipe(Effect.exit))._tag).toBe('Failure');
+      }),
+    );
+    it.effect('binds the llama.cpp notice into a portable local build closure', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-inference-license-'});
+        const release = path.join(root, 'llama', 'localBuilds', 'linux-x64', 'Release');
+        yield* fs.makeDirectory(release, {recursive: true});
+        yield* fs.makeDirectory(path.join(root, 'runtime'), {recursive: true});
+        yield* fs.writeFileString(path.join(root, 'runtime', 'node-llama-cpp.js'), 'export const runtime = true;');
+        yield* fs.writeFileString(path.join(release, 'llama-addon.node'), 'fixture-native-bytes');
+        yield* fs.writeFileString(path.join(release, '_nlcBuildMetadata.json'), '{}');
+        yield* fs.writeFileString(path.join(path.dirname(release), 'buildDone.status'), '');
+        const fields: Parameters<typeof publishNativeInferenceOverlay>[1] = {
+          bunVersion: '1.4.4',
+          bunTarget: 'bun-linux-x64-baseline-musl',
+          packageVersion: '3.22.2',
+          llamaCommit: NATIVE_INFERENCE_LLAMA_COMMIT,
+          sourceInputDigest: EffectString.repeat(64)('a'),
+          origin: 'portable-local-build',
+          toolchain: {bun: '1.4.4'},
+        };
+        expect((yield* publishNativeInferenceOverlay(root, fields).pipe(Effect.exit))._tag).toBe('Failure');
+        yield* fs.writeFileString(path.join(root, 'runtime', 'LLAMA-CPP-LICENSE'), 'MIT License');
+        const descriptor = yield* publishNativeInferenceOverlay(root, fields);
+        expect(EffectArray.map(descriptor.files, file => file.path)).toContain('runtime/LLAMA-CPP-LICENSE');
+        yield* fs.writeFileString(path.join(root, 'runtime', 'LLAMA-CPP-LICENSE'), 'changed');
+        expect((yield* verifyNativeInferenceOverlay(root).pipe(Effect.exit))._tag).toBe('Failure');
       }),
     );
   });

@@ -1,3 +1,4 @@
+import {createTypeScriptSyntaxSession} from '../workspace/typescript-syntax.ts';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {fileURLToPath} from 'node:url';
@@ -13,7 +14,22 @@ import * as Effect from 'effect';
 import {Option as EffectOption} from 'effect';
 
 const defaultRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-export const createTargetSpecs = async (root = defaultRoot) => {
+/** @param {string} [root]
+ * @param {import('../workspace/typescript-syntax.ts').TypeScriptSyntaxSession} [suppliedSession]
+ */
+export const createTargetSpecs = async (root = defaultRoot, suppliedSession = undefined) => {
+  const session = suppliedSession ?? createTypeScriptSyntaxSession({cwd: root});
+  try {
+    return await createTargetSpecsWithSession(root, session);
+  } finally {
+    if (!suppliedSession) await session.close();
+  }
+};
+
+const createTargetSpecsWithSession = async (root, session) => {
+  // The disposable extension executes inside the editor, whose runtime supplies
+  // this module. Keep the exemption scoped; application imports still need npm ownership.
+  const hostModules = {'apps/threadnote/test/fixtures/semantic/editor/probe.cjs': ['vscode']};
   const repositoryFiles = listRepositoryFiles(root);
   const ignoredNames = new Set([
     '.DS_Store',
@@ -76,8 +92,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     }),
   );
   const sourceImportCache = new Map();
-  const applicationSourceImports = path => {
-    if (!sourceImportCache.has(path)) sourceImportCache.set(path, sourceImports(path, readSource(path)));
+  const applicationSourceImports = async path => {
+    if (!sourceImportCache.has(path)) sourceImportCache.set(path, sourceImports(session, path, readSource(path)));
     return sourceImportCache.get(path);
   };
   const applicationSourceExists = path => {
@@ -143,10 +159,11 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     name => !Effect.pipe(name, EffectString.startsWith('@threadnote/')),
   ).sort();
 
+  const graphRuntimeDataRoots = ['assets/code-graph'];
   const packageDataRoots = {
     'packages/evidence': ['apps/threadnote/test/evaluation'],
     'packages/graph': [
-      'assets/code-graph',
+      ...graphRuntimeDataRoots,
       'apps/threadnote/test/evaluation/baselines/code-graph-v1',
       'apps/threadnote/test/evaluation/fixtures/code-graph-v1/repository',
       'packages/graph/src',
@@ -173,22 +190,21 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'packages/recall': ['apps/threadnote/test/evaluation/fixtures/recall-v1/fixture.json'],
     'packages/remote-memory': ['scripts/build.ts', 'scripts/check-self-contained.ts'],
   };
-  const packageTestNpm = {
-    'packages/graph': [
-      '@repomix/tree-sitter-wasms',
-      '@tree-sitter-grammars/tree-sitter-hcl',
-      '@tree-sitter-grammars/tree-sitter-lua',
-      '@tree-sitter-grammars/tree-sitter-svelte',
-      '@tree-sitter-grammars/tree-sitter-zig',
-      '@vscode/tree-sitter-wasm',
-      'tree-sitter-elixir',
-      'tree-sitter-julia',
-      'tree-sitter-objc',
-      'tree-sitter-scala',
-      'tree-sitter-systemverilog',
-      'web-tree-sitter',
-    ],
-  };
+  const graphRuntimeNpm = [
+    '@repomix/tree-sitter-wasms',
+    '@tree-sitter-grammars/tree-sitter-hcl',
+    '@tree-sitter-grammars/tree-sitter-lua',
+    '@tree-sitter-grammars/tree-sitter-svelte',
+    '@tree-sitter-grammars/tree-sitter-zig',
+    '@vscode/tree-sitter-wasm',
+    'tree-sitter-elixir',
+    'tree-sitter-julia',
+    'tree-sitter-objc',
+    'tree-sitter-scala',
+    'tree-sitter-systemverilog',
+    'web-tree-sitter',
+  ];
+  const packageTestNpm = {'packages/graph': graphRuntimeNpm};
   const applicationReferencedInputRoots = [
     '.cursor-plugin',
     '.github',
@@ -218,17 +234,18 @@ export const createTargetSpecs = async (root = defaultRoot) => {
   ];
   const applicationTestData = ['bun.lock', 'package.json', 'tsconfig.json', 'tsconfig.test.json', 'vitest.config.ts'];
   const applicationSourceExtensions = /\.(?:[cm]?[jt]sx?)$/u;
-  const applicationTestSourceClosure = path => {
+  const applicationTestSourceClosure = async path => {
     const entries = [path, 'package.json', 'tools/bazel/project-vitest.config.ts'];
     const discoveryEntries = new Set([path]);
     const discoveredSources = new Set();
     const scanned = new Set();
     let closure;
     while (true) {
-      closure = collectSourceClosure([...entries, ...discoveredSources], {
+      closure = await collectSourceClosure(session, [...entries, ...discoveredSources], {
         read: readSource,
         exists: applicationSourceExists,
         workspaces: applicationWorkspaces,
+        hostModules,
         imports: applicationSourceImports,
       });
       const closureFiles = new Set(closure.files);
@@ -242,7 +259,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         )
           continue;
         scanned.add(source);
-        for (const candidate of sourceRepositoryPathCandidates(source, readSource(source))) {
+        for (const candidate of await sourceRepositoryPathCandidates(session, source, readSource(source))) {
           if (!allowedRepositoryPath(candidate, applicationReferencedInputRoots)) continue;
           const candidates = [candidate];
           if (/\.[cm]?jsx?$/u.test(candidate)) candidates.push(candidate.replace(/\.[cm]?jsx?$/u, '.ts'));
@@ -292,6 +309,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'packages/memory': ['apps/threadnote/src/standalone.ts'],
     'packages/platform': ['apps/threadnote/src/standalone.ts', 'scripts/remote-memory-canary.ts'],
   };
+  // Runtime targets whose spawned CLI indexes TypeScript without a native-test-helper import in the target closure.
+  const packageRuntimeNativeTypeScript = new Set(['packages/memory']);
   const packageWorkspaceTestEntries = {
     'packages/graph': ['packages/graph/test/unit/code-graph.stage3-gate.test.ts'],
   };
@@ -360,6 +379,10 @@ export const createTargetSpecs = async (root = defaultRoot) => {
               name: 'test_runtime',
               entries: runtimeEntries,
               closureEntries: packageRuntimeTestEntries[directory],
+              // These source-runtime consumers launch the graph parser through standalone.ts.
+              dataRoots: [...new Set([...shared.dataRoots, ...graphRuntimeDataRoots])],
+              npm: [...new Set([...shared.npm, ...graphRuntimeNpm])],
+              ...(packageRuntimeNativeTypeScript.has(directory) ? {nativeTypeScript: true} : {}),
             },
           ]
         : []),
@@ -405,28 +428,31 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     integrationPackages,
     name => !['integration-core', 'integration-runtime'].includes(name),
   );
-  const applicationTestAffinities = EffectRecord.fromEntries(
-    EffectArray.map(applicationStandardTests, path => {
-      const closure = applicationTestSourceClosure(path);
-      const dependencies = new Set(
-        EffectArray.filter(
-          EffectArray.map(closure.files, file => file.match(/^packages\/(integration-[^/]+)\//u)?.[1]),
-          name => integrationPackages.includes(name),
-        ),
-      );
-      const providers = EffectArray.filter(providerPackages, name => dependencies.has(name));
-      const dependencyNames =
-        providers.length === providerPackages.length
-          ? ['all']
-          : providers.length > 0
-            ? EffectArray.map(providers, name => Effect.pipe(name, EffectString.slice('integration-'.length)))
-            : EffectArray.map(
-                EffectArray.filter(integrationPackages, name => dependencies.has(name)),
-                name => Effect.pipe(name, EffectString.slice('integration-'.length)),
-              );
-      return [path, dependencyNames.length === 0 ? '' : `integration_${EffectArray.join(dependencyNames, '_')}`];
-    }),
-  );
+  const applicationTestAffinityEntries = [];
+  for (const path of applicationStandardTests) {
+    const closure = await applicationTestSourceClosure(path);
+    const dependencies = new Set(
+      EffectArray.filter(
+        EffectArray.map(closure.files, file => file.match(/^packages\/(integration-[^/]+)\//u)?.[1]),
+        name => integrationPackages.includes(name),
+      ),
+    );
+    const providers = EffectArray.filter(providerPackages, name => dependencies.has(name));
+    const dependencyNames =
+      providers.length === providerPackages.length
+        ? ['all']
+        : providers.length > 0
+          ? EffectArray.map(providers, name => Effect.pipe(name, EffectString.slice('integration-'.length)))
+          : EffectArray.map(
+              EffectArray.filter(integrationPackages, name => dependencies.has(name)),
+              name => Effect.pipe(name, EffectString.slice('integration-'.length)),
+            );
+    applicationTestAffinityEntries.push([
+      path,
+      dependencyNames.length === 0 ? '' : `integration_${EffectArray.join(dependencyNames, '_')}`,
+    ]);
+  }
+  const applicationTestAffinities = EffectRecord.fromEntries(applicationTestAffinityEntries);
   const applicationTestGroups = groupApplicationTests(applicationStandardTests, {
     affinities: applicationTestAffinities,
   });
@@ -537,6 +563,20 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'vitest.config.ts',
         'vitest.e2e.config.ts',
         'apps/threadnote/test/unit/effect-system.test.ts',
+        'packages/platform/test/system-stable-read.test.ts',
+        'packages/platform/test/writer-system/provider-process.test.ts',
+        'apps/threadnote/test/unit/semantic-runtime.test.ts',
+        'apps/threadnote/test/unit/semantic-writer-process.test.ts',
+        'apps/threadnote/test/unit/semantic-operations.test.ts',
+        'apps/threadnote/test/unit/semantic-mcp-cli.test.ts',
+        'apps/threadnote/test/unit/semantic-python.test.ts',
+        'apps/threadnote/test/unit/semantic-go-rust.test.ts',
+        'apps/threadnote/test/unit/semantic-java-preparation.test.ts',
+        'packages/platform/test/writer-system/provider-darwin-image.test.ts',
+        'tools/ci/test/macho-code-identity.test.ts',
+        'tools/ci/test/signed-native-typescript.test.ts',
+        'packages/graph/test/unit/code-graph.extractor-lazy-loading.test.ts',
+        'apps/threadnote/test/unit/semantic-native-image-launch.test.ts',
         'packages/workflow-automations/test/inventory.test.ts',
         'packages/workflow-automations/test/baseline.test.ts',
         ...EffectArrayPipe(filesBelow('apps/threadnote/test/e2e'), __effectArrayValues =>
@@ -584,6 +624,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       timeout: 'long',
       entries: platformBenchmarkPreflightTests,
       closureEntries: ['apps/threadnote/src/standalone.ts'],
+      // The preflight benchmark indexes TypeScript fixtures through the native asset.
+      nativeTypeScript: true,
       data: ['bun.lock', 'package.json'],
       dataRoots: ['.github/workflows', 'apps/threadnote/test/evaluation/baselines/code-graph-v1'],
       npm: packageTestNpm['packages/graph'],
@@ -604,8 +646,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       entries: [],
       sourceRoots: ['apps/threadnote/src', ...EffectArray.map(packageDirectories, path => `${path}/src`)],
       data: ['tsconfig.json', 'package.json'],
-      npm: ['@types/bun', '@types/react', '@types/react-dom', '@types/three'],
-      args: ['check', '-p', 'tsconfig.json'],
+      npm: ['@types/bun', '@types/react', '@types/react-dom', '@types/three', 'typescript'],
+      args: ['node_modules/typescript/bin/tsc', '--noEmit', '-p', 'tsconfig.json'],
     },
     {
       package: '',
@@ -623,9 +665,9 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'tools/workspace',
       ],
       data: ['config/lint/threadnote-plugin.d.ts', 'tsconfig.json', 'tsconfig.test.json', 'package.json'],
-      npm: ['@types/bun', '@types/react', '@types/react-dom', '@types/three'],
+      npm: ['@types/bun', '@types/react', '@types/react-dom', '@types/three', 'typescript'],
       exclude: path => path.startsWith('apps/threadnote/test/evaluation/fixtures/') && path.includes('/repository/'),
-      args: ['check', '-p', 'tsconfig.test.json'],
+      args: ['node_modules/typescript/bin/tsc', '--noEmit', '-p', 'tsconfig.test.json'],
     },
     {
       package: '',
@@ -767,8 +809,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       entries: ['apps/website/vite.config.ts'],
       sourceRoots: ['apps/website/src'],
       data: ['apps/website/tsconfig.json', 'apps/website/package.json'],
-      npm: ['@types/bun', '@types/react', '@types/react-dom', '@types/three'],
-      args: ['check', '-p', 'apps/website/tsconfig.json'],
+      npm: ['@types/bun', '@types/react', '@types/react-dom', '@types/three', 'typescript'],
+      args: ['node_modules/typescript/bin/tsc', '--noEmit', '-p', 'apps/website/tsconfig.json'],
     },
     {
       package: 'apps/website',
@@ -970,5 +1012,5 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     },
   ];
 
-  return {targetSpecs, testSuites, staticTargets, virtualModules};
+  return {targetSpecs, testSuites, staticTargets, virtualModules, hostModules};
 };

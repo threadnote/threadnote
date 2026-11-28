@@ -80,7 +80,11 @@ import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
+import {
+  readNativeWatch,
+  writeNativeWatch,
+  readNativeCandidateWatchInventory,
+} from '../../src/workflow_automation/watch_store.js';
 
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -166,3 +170,86 @@ it('requires typed diagnostic owners and fails closed on mismatched owner state 
   ).toThrow();
   expect(() => decodeNativeWatchEnvelope({...fixture(), owner})).toThrow();
 });
+
+import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {fixture as workflowFixture, run} from './native-cycle-lifecycle-fixture.js';
+
+effectIt.effect('refuses a candidate inventory replacement before decoding uncharged bytes', () =>
+  Effect.gen(function* () {
+    const f = yield* workflowFixture(['one']);
+    const stored = yield* readNativeWorkflowState(f.config, 'native-run');
+    if (!stored) throw new Error('Missing workflow fixture');
+    const watchId = 'candidate-' + EffectString.repeat(48)('a');
+    const owner = {
+      kind: 'candidate-pr' as const,
+      runId: stored.state.runId,
+      generationHash: EffectString.repeat(64)('a'),
+      phaseId: 'one',
+      phaseHash: EffectString.repeat(64)('b'),
+      snapshotRef: 'fixture-snapshot-ref',
+      snapshotId: 'fixture-snapshot',
+      snapshotDigest: EffectString.repeat(64)('c'),
+      baselineHead: EffectString.repeat(40)('a'),
+      baselineTree: EffectString.repeat(40)('b'),
+      baselineRef: 'refs/heads/main',
+      callerCwd: f.repo,
+      head: EffectString.repeat(40)('a'),
+      tree: EffectString.repeat(40)('b'),
+      branch: 'main',
+      scopeDigest: EffectString.repeat(64)('d'),
+      prUrl: fixture().state.pr,
+      comparisonRef: 'refs/heads/main',
+      comparisonResolvedRef: EffectString.repeat(40)('a'),
+      baseConfigDigest: EffectString.repeat(64)('e'),
+      baseBranch: 'main',
+      headBranch: 'main',
+    };
+    const initial = yield* writeNativeWatch(
+      f.config,
+      decodeNativeWatchEnvelope({
+        ...fixture(),
+        state: initializeNativeWatch(watchId, owner.prUrl, 0),
+        owner,
+      }),
+      null,
+    );
+    const file = f.path.join(f.config.agentContextHome, 'workflow-automations', 'native-watch-v1', watchId + '.json');
+    const firstBytes = yield* f.fs.readFileString(file);
+    const replacement = yield* writeNativeWatch(
+      f.config,
+      {
+        ...initial.envelope,
+        metrics: {...initial.envelope.metrics, requests: 1000000},
+      },
+      initial.revision,
+    );
+    const replacementBytes = yield* f.fs.readFileString(file);
+    expect(replacementBytes.length).toBeGreaterThan(firstBytes.length);
+    yield* f.fs.writeFileString(file, firstBytes);
+    const unchanged = yield* readNativeCandidateWatchInventory(f.config, stored, f.repo);
+    expect(unchanged.rows).toHaveLength(1);
+    expect(unchanged.rows[0]?.watchRevision).toBe(initial.revision);
+    let reads = 0;
+    const racingFs = FileSystem.FileSystem.of({
+      ...f.fs,
+      readFileString: name =>
+        f.path.basename(name) === watchId + '.json'
+          ? Effect.gen(function* () {
+              reads++;
+              const bytes = yield* f.fs.readFileString(name);
+              if (reads === 1) yield* f.fs.writeFileString(file, replacementBytes);
+              return bytes;
+            })
+          : f.fs.readFileString(name),
+    });
+    const raced = yield* readNativeCandidateWatchInventory(f.config, stored, f.repo).pipe(
+      Effect.provideService(FileSystem.FileSystem, racingFs),
+      Effect.result,
+    );
+    expect(reads).toBe(2);
+    expect(raced).toMatchObject({_tag: 'Failure', failure: {code: 'watch-inventory-changed'}});
+    expect((yield* readNativeWatch(f.config, watchId))?.revision).toBe(replacement.revision);
+    const updated = yield* readNativeCandidateWatchInventory(f.config, stored, f.repo);
+    expect(updated.rows[0]?.watchRevision).toBe(replacement.revision);
+  }).pipe(run),
+);

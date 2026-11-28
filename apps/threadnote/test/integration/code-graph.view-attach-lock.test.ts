@@ -1,5 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {writeFileSync} from '@threadnote/testing/node-fs';
 import {join} from '@threadnote/testing/node-path';
@@ -27,7 +28,7 @@ import type {ProjectManifest} from '@threadnote/workspace/config';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-const fixturePackProvenance = BUILTIN_LANGUAGE_PACK_REGISTRY.activePackProvenance(['main.ts']);
+const fixturePackProvenance = BUILTIN_LANGUAGE_PACK_REGISTRY.activePackProvenance(['main.py']);
 const incompatiblePackProvenance = EffectArray.map(fixturePackProvenance, (pack, index) =>
   index === 0 ? {...pack, cacheIdentity: Effect2.pipe('f', EffectString.repeat(64))} : pack,
 );
@@ -588,8 +589,7 @@ describe('shared ready view attachment locking', () => {
       );
       yield* store.acquireSnapshotLease(layout.databasePath, snapshot.id, 60_000);
       const attached = yield* graph.attachSharedReadySnapshot(threadnoteHome, identity, undefined, {
-        afterPromotion: () =>
-          Effect.sync(() => writeFileSync(join(repositoryRoot, 'main.ts'), 'export const attached = "dirty";\n')),
+        afterPromotion: () => Effect.sync(() => writeFileSync(join(repositoryRoot, 'main.py'), 'attached = "dirty"\n')),
       });
       const pointer = yield* store.readySnapshot(layout.databasePath, identity.worktreeId);
       const observed = {attached, identity, pointer, snapshot};
@@ -601,7 +601,8 @@ describe('shared ready view attachment locking', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect(
+  // The scoped project closure is resolved through npm workspaces, so this case needs the TypeScript extractor.
+  native(effectIt.effect)(
     'borrows the same scoped project graph in a fresh divergent worktree without publishing a pointer',
     () =>
       Effect.gen(function* () {
@@ -778,15 +779,15 @@ const temporaryRepository = Effect.fn('test.temporaryViewAttachRepository')(func
   execFileSync('git', ['init', repositoryRoot], {stdio: 'ignore'});
   execFileSync('git', ['-C', repositoryRoot, 'config', 'user.email', 'threadnote-test@example.invalid']);
   execFileSync('git', ['-C', repositoryRoot, 'config', 'user.name', 'Threadnote Test']);
-  writeFileSync(join(repositoryRoot, 'main.ts'), 'export const attached = true;\n');
-  git(repositoryRoot, ['add', 'main.ts']);
+  writeFileSync(join(repositoryRoot, 'main.py'), 'attached = True\n');
+  git(repositoryRoot, ['add', 'main.py']);
   git(repositoryRoot, ['commit', '-m', 'fixture']);
   return root;
 });
 
 function createNextCommit(repositoryRoot: string): string {
-  writeFileSync(join(repositoryRoot, 'main.ts'), 'export const attached = "new-head";\n');
-  git(repositoryRoot, ['add', 'main.ts']);
+  writeFileSync(join(repositoryRoot, 'main.py'), 'attached = "new-head"\n');
+  git(repositoryRoot, ['add', 'main.py']);
   git(repositoryRoot, ['commit', '-m', 'next']);
   return git(repositoryRoot, ['rev-parse', 'HEAD']);
 }

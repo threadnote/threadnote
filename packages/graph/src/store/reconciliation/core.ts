@@ -1,3 +1,4 @@
+import {CODE_GRAPH_SNAPSHOT_ID_PATTERN} from '../lexical_projection.js';
 import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -495,7 +496,7 @@ const REMOVED_VIEW_CLEANUP_BOUNDED_ROW_PROJECTION = `
 
 const CLEANUP_TOKEN = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,511}$/u;
 
-const CODE_GRAPH_SNAPSHOT_ID = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u;
+const CODE_GRAPH_SNAPSHOT_ID = CODE_GRAPH_SNAPSHOT_ID_PATTERN;
 
 function validRemovedViewCleanupBlockedCode(value: string): value is CodeGraphRemovedViewCleanupBlockedCode {
   return EffectArray.some(CODE_GRAPH_REMOVED_VIEW_CLEANUP_BLOCKED_CODES, code => code === value);

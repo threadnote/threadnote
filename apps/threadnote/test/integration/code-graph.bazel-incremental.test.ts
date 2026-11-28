@@ -13,9 +13,10 @@ import {CodeGraphStore, type StoredCodeGraph} from '@threadnote/graph/store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 describe('mixed Node and Bazel incremental indexing', () => {
-  it.effect('keeps a comment-only nested MODULE.bazel edit local and equivalent to a full rebuild', () =>
+  native(it.effect)('keeps a comment-only nested MODULE.bazel edit local and equivalent to a full rebuild', () =>
     Effect.acquireUseRelease(
       Effect.sync(createMixedWorkspaceRepository),
       fixture =>

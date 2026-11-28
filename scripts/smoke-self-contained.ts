@@ -35,11 +35,49 @@ import {SecureRandom} from 'effect/crypto';
 import {Clock, Console, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import {
+  nativeTypeScriptHostKey,
+  nativeTypeScriptReviewedBinarySha256,
+} from '@threadnote/graph/typescript_native_asset_pins';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 const ROOT_URL = new URL('..', import.meta.url);
+
+const StandaloneReleaseSchema = Schema.Struct({
+  target: Schema.String,
+  typescriptNativeAsset: Schema.optionalKey(Schema.Struct({manifest: Schema.String})),
+  typescriptNativeAssetPending: Schema.optionalKey(Schema.Literal(true)),
+});
+
+/**
+ * TypeScript graph evidence is checked only where the payload carries the native TypeScript asset. A pinned GNU or
+ * macOS payload without it fails; musl and Windows payloads have no reviewed pin and skip that check with a notice.
+ */
+const standaloneTypeScriptGraphEvidence = Effect.fn('smoke.standaloneTypeScriptGraphEvidence')(function* (
+  releaseJson: string,
+) {
+  const release = yield* Schema.decodeEffect(Schema.fromJsonString(StandaloneReleaseSchema))(releaseJson).pipe(
+    Effect.mapError(cause => ScriptError.make({message: 'dist/release.json is not a release manifest.', cause})),
+  );
+  if (release.typescriptNativeAssetPending === true)
+    return yield* ScriptError.make({
+      message: 'Native TypeScript staging is still pending; run scripts/stage-native-typescript-release.ts first.',
+    });
+  if (release.typescriptNativeAsset !== undefined) return true;
+  const pinned =
+    !/musl|windows/u.test(release.target) &&
+    nativeTypeScriptReviewedBinarySha256(nativeTypeScriptHostKey(process.platform, process.arch)) !== undefined;
+  if (pinned)
+    return yield* ScriptError.make({
+      message: `The ${release.target} payload has no runtime/typescript. Build it with THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR set to the verified payload.`,
+    });
+  yield* Console.log(
+    `Native TypeScript is not available for ${release.target}; TypeScript graph evidence is not checked.`,
+  );
+  return false;
+});
 const COMMAND_TIMEOUT_MILLISECONDS = 300_000;
 const TOTAL_TIMEOUT_MILLISECONDS = 600_000;
 const CLEANUP_RESERVE_MILLISECONDS = 30_000;
@@ -68,6 +106,9 @@ const smokeSelfContained = Effect.scoped(
     if (!(yield* fs.exists(executable))) {
       return yield* ScriptError.make({message: 'Standalone executable is missing; run bun run build first.'});
     }
+    const typeScriptGraph = yield* standaloneTypeScriptGraphEvidence(
+      yield* fs.readFileString(path.join(root, 'dist', 'release.json')),
+    );
 
     const bodyDeadline = monotonicDeadline - CLEANUP_RESERVE_MILLISECONDS;
     const temporaryRoot = yield* fs.makeTempDirectory({prefix: 'threadnote-standalone-smoke-'});
@@ -255,16 +296,33 @@ const smokeSelfContained = Effect.scoped(
       if (!/14 symbols|symbols/i.test(indexed)) {
         return yield* ScriptError.make({message: `Standalone graph index did not complete:\n${indexed}`});
       }
+      const checks = [
+        {expected: 'java', command: ['graph', 'query', '--query', 'Greeter', '--json'], stage: 'graph-query'},
+        {
+          expected: 'KotlinApp',
+          command: ['graph', 'explain', '--symbol', 'KotlinApp', '--json'],
+          stage: 'graph-explain',
+        },
+        ...(typeScriptGraph
+          ? [
+              {
+                expected: 'typescriptHelper',
+                command: ['graph', 'path', '--from', 'typescriptBoot', '--to', 'typescriptHelper', '--json'],
+                stage: 'graph-path',
+              },
+            ]
+          : []),
+        {
+          expected: 'swiftBoot',
+          command: ['graph', 'impact', '--query', 'makeService', '--json'],
+          stage: 'graph-impact',
+        },
+      ] as const;
       const graphOperations = yield* Effect.all(
-        [
-          run('graph-query', ['graph', 'query', '--query', 'Greeter', '--json']),
-          run('graph-explain', ['graph', 'explain', '--symbol', 'KotlinApp', '--json']),
-          run('graph-path', ['graph', 'path', '--from', 'typescriptBoot', '--to', 'typescriptHelper', '--json']),
-          run('graph-impact', ['graph', 'impact', '--query', 'makeService', '--json']),
-        ],
+        EffectArray.map(checks, check => run(check.stage, check.command)),
         {concurrency: 1},
       );
-      for (const [index, expected] of ['java', 'KotlinApp', 'typescriptHelper', 'swiftBoot'].entries()) {
+      for (const [index, {expected}] of checks.entries()) {
         if (!Effect2.pipe(graphOperations[index], EffectString.includes(expected))) {
           return yield* ScriptError.make({
             message: `Standalone graph operation ${index + 1} missed ${expected}:\n${graphOperations[index]}`,

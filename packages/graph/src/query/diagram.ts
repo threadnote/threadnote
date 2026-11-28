@@ -2,7 +2,7 @@ import {Array as Arr, Option, String as Str} from 'effect';
 import {codeGraphSymbolPathClass, codeGraphSymbolPathScoreMultiplier} from '../store/query/core.js';
 import {isStableCodeGraphNodeId, parseCodeGraphEndpointSelector} from './selector.js';
 import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphRelation, CodeGraphSpan} from '../types.js';
-import {renderSourceBackedSequence} from './diagram_sequence.js';
+import type {CodeGraphSourceSequence, CodeGraphSourceSequenceOutcome} from './diagram_sequence.js';
 import {CODE_GRAPH_DIAGRAM_QUESTION_MAXIMUM_LENGTH} from './diagram_contract.js';
 import type {
   CodeGraphDiagramCoverage,
@@ -12,6 +12,9 @@ import type {
   CodeGraphDiagramType,
 } from './diagram_contract.js';
 
+/** Coverage gap when no native TypeScript session parsed the verified subject source within the diagram budget. */
+export const DIAGRAM_SOURCE_ORDER_UNAVAILABLE =
+  'Native TypeScript parsing did not complete. The diagram does not show the source order of calls.';
 export const DIAGRAM_PROJECT_RETRY =
   'Retry the same question in a graph view or configured project that includes the implementation.';
 
@@ -262,7 +265,7 @@ function groupNodes(
 
 function groupSequenceLifelines(
   nodes: Diagram['evidence']['nodes'],
-  lifelines: NonNullable<ReturnType<typeof renderSourceBackedSequence>>['lifelines'],
+  lifelines: CodeGraphSourceSequence['lifelines'],
 ): Diagram['evidence']['groups'] {
   const membersByFile = new Map<string, string[]>();
   for (const node of nodes) {
@@ -919,7 +922,8 @@ export function renderCompleteCodeGraphDiagram(input: {
   readonly boundaryIds: ReadonlySet<string>;
   readonly facts: readonly Fact[];
   readonly unresolvedCalls?: readonly Fact[];
-  readonly sequenceSources?: ReadonlyMap<string, Uint8Array>;
+  /** Source order read from verified subject bytes; absent when the reader did not reach the source. */
+  readonly sourceOrder?: CodeGraphSourceSequenceOutcome;
   readonly architectureAnchor?: Fact;
   readonly pathTarget?: CodeGraphQueryNode;
 }): CodeGraphDiagramResult {
@@ -932,7 +936,7 @@ export function renderCompleteCodeGraphDiagram(input: {
     facts,
     architectureAnchor,
     pathTarget,
-    sequenceSources,
+    sourceOrder,
     unresolvedCalls = [],
   } = input;
   const limits = freshness === 'current' ? [] : [`Snapshot freshness is ${freshness}.`];
@@ -945,11 +949,10 @@ export function renderCompleteCodeGraphDiagram(input: {
     limits.push(
       `The diagram covers indexed paths to ${pathTarget.qualifiedName} at ${pathTarget.path}:${pathTarget.span.line}.`,
     );
-  const subject = input.coverage.subject ? nodes.get(input.coverage.subject.id) : undefined;
-  const sourceProjection =
-    subject && sequenceSources?.size && wantsSourceBackedSequence(question)
-      ? renderSourceBackedSequence({subject, facts, nodes, sources: sequenceSources, gaps: input.coverage.gaps})
-      : undefined;
+  const wantsSourceOrder =
+    input.coverage.subject !== undefined && nodes.has(input.coverage.subject.id) && wantsSourceBackedSequence(question);
+  const sourceProjection = wantsSourceOrder && sourceOrder?.status === 'projected' ? sourceOrder.sequence : undefined;
+  const sourceOrderUnavailable = wantsSourceOrder && sourceOrder?.status === 'unavailable';
   const sequence = completeSequence(facts);
   const discoveredGaps = sourceProjection?.discoveredGaps ?? [];
   // Keep the simple linear path unless verified source adds control flow or exposes missing evidence.
@@ -964,6 +967,7 @@ export function renderCompleteCodeGraphDiagram(input: {
       : undefined;
   const sourceGaps: CodeGraphDiagramCoverage['gaps'] = [
     ...discoveredGaps,
+    ...(sourceOrderUnavailable ? [{kind: 'missing-evidence' as const, label: DIAGRAM_SOURCE_ORDER_UNAVAILABLE}] : []),
     ...(sourceSequence?.unorderedCalls
       ? [
           {

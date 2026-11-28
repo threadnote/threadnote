@@ -124,6 +124,7 @@ const ApiSchema8099 = Schema.Union([
   Schema.Literal('ambiguous-relocation'),
   Schema.Literal('citation-limit'),
   Schema.Literal('exact'),
+  Schema.Literal('extraction-unavailable'),
   Schema.Literal('extractor-mismatch'),
   Schema.Literal('graph-incomplete'),
   Schema.Literal('graph-stale'),

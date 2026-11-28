@@ -1,6 +1,8 @@
+import {createTypeScriptSyntaxSession, type TypeScriptSyntaxSession} from '../typescript-syntax.js';
 import {Array as EffectArray} from 'effect';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, afterAll} from 'vitest';
 import {
+  analyzeSourceModule,
   moduleSpecifiers,
   validateRelocatedTestPaths,
   validateSourceVisibility,
@@ -31,7 +33,7 @@ const integrationPackage = (suffix: string, dependencies: WorkspacePackage['depe
 });
 
 describe('private workspace boundaries', () => {
-  it('rejects parent segments corrupted while relocating the legacy test root', () => {
+  it('rejects parent segments corrupted while relocating the legacy test root', async () => {
     expect(
       validateRelocatedTestPaths([
         {path: 'apps/threadnote/test/unit/example.test.ts', content: `join(path, '../../../test')`},
@@ -48,7 +50,7 @@ describe('private workspace boundaries', () => {
     ]);
   });
 
-  it('rejects source modules hidden by Git ignore rules', () => {
+  it('rejects source modules hidden by Git ignore rules', async () => {
     const sources = [
       {path: 'packages/graph/src/build/owner.ts', imports: []},
       {path: 'packages/graph/src/index.ts', imports: []},
@@ -57,7 +59,7 @@ describe('private workspace boundaries', () => {
       'packages/graph/src/build/owner.ts: source file is hidden by Git ignore rules',
     ]);
   });
-  it('accepts a declared exported domain dependency', () => {
+  it('accepts a declared exported domain dependency', async () => {
     expect(
       validateWorkspaceBoundaries(
         [platform, memory],
@@ -65,7 +67,7 @@ describe('private workspace boundaries', () => {
       ),
     ).toEqual([]);
   });
-  it('rejects relative escapes, including imports from the application workspace', () => {
+  it('rejects relative escapes, including imports from the application workspace', async () => {
     expect(
       validateWorkspaceBoundaries(
         [platform, memory],
@@ -76,7 +78,7 @@ describe('private workspace boundaries', () => {
       ),
     ).toHaveLength(3);
   });
-  it('rejects undeclared dependencies and bypassed exports', () => {
+  it('rejects undeclared dependencies and bypassed exports', async () => {
     const errors = validateWorkspaceBoundaries(
       [platform, {...memory, dependencies: {}}],
       [{path: 'packages/memory/src/document.ts', imports: ['@threadnote/platform/src/hash.ts']}],
@@ -85,7 +87,7 @@ describe('private workspace boundaries', () => {
     expect(EffectArray.join(errors, '\n')).toContain('undeclared dependency');
     expect(EffectArray.join(errors, '\n')).toContain('unexported entrypoint');
   });
-  it('rejects cycles, public packages, and reversed domain dependencies', () => {
+  it('rejects cycles, public packages, and reversed domain dependencies', async () => {
     const errors = validateWorkspaceBoundaries(
       [{...platform, private: false, dependencies: {'@threadnote/memory': 'workspace:*'}}, memory],
       [],
@@ -94,7 +96,7 @@ describe('private workspace boundaries', () => {
     expect(EffectArray.join(errors, '\n')).toContain('must be private');
     expect(EffectArray.join(errors, '\n')).toContain('forbidden dependency');
   });
-  it('keeps test dependencies out of production modules', () => {
+  it('keeps test dependencies out of production modules', async () => {
     const pkg = {...memory, dependencies: {}, devDependencies: {'@threadnote/platform': 'workspace:*'}};
     expect(
       validateWorkspaceBoundaries(
@@ -115,15 +117,23 @@ describe('private workspace boundaries', () => {
       ),
     ).toContain('undeclared dependency');
   });
-  it('finds static, dynamic, re-exported, and type-only imports', () => {
+  it('finds static, dynamic, re-exported, and type-only imports', async () => {
     expect(
-      moduleSpecifiers(
+      await moduleSpecifiers(
+        await getSyntaxSession(),
         'example.ts',
         `import type {Hash} from '@threadnote/platform/hash'; export {run} from './run.js'; const x = import('./dynamic.js'); type T = import('./type.js').T;`,
       ),
     ).toEqual(['./dynamic.js', './run.js', './type.js', '@threadnote/platform/hash']);
+    expect(
+      await analyzeSourceModule(
+        await getSyntaxSession(),
+        'virtual.d.ts',
+        `declare module 'virtual:one' {}; declare module 'unrelated' {}; import type {T} from './types.js';`,
+      ),
+    ).toEqual({path: 'virtual.d.ts', imports: ['./types.js'], virtualModules: ['virtual:one']});
   });
-  it('allows shared testing helpers only as development dependencies', () => {
+  it('allows shared testing helpers only as development dependencies', async () => {
     const testing: WorkspacePackage = {
       name: '@threadnote/testing',
       directory: 'packages/testing',
@@ -145,7 +155,7 @@ describe('private workspace boundaries', () => {
     ).toContain('forbidden dependency');
   });
 
-  it('allows provider packages to depend on core and runtime contracts', () => {
+  it('allows provider packages to depend on core and runtime contracts', async () => {
     const core = integrationPackage('core', {'@threadnote/platform': 'workspace:*'});
     const runtime = integrationPackage('runtime', {'@threadnote/integration-core': 'workspace:*'});
     const provider = integrationPackage('pocket', {
@@ -168,7 +178,7 @@ describe('private workspace boundaries', () => {
     ).toEqual([]);
   });
 
-  it('forbids provider dependencies on the application and on another provider', () => {
+  it('forbids provider dependencies on the application and on another provider', async () => {
     const core = integrationPackage('core');
     const runtime = integrationPackage('runtime', {'@threadnote/integration-core': 'workspace:*'});
     const obsidian = integrationPackage('obsidian');
@@ -193,7 +203,7 @@ describe('private workspace boundaries', () => {
     expect(errors).toContain('@threadnote/integration-pocket: forbidden dependency on @threadnote/threadnote');
   });
 
-  it('keeps core and runtime independent of concrete providers', () => {
+  it('keeps core and runtime independent of concrete providers', async () => {
     const obsidian = integrationPackage('obsidian');
     for (const owner of ['core', 'runtime']) {
       const dependent = integrationPackage(owner, {'@threadnote/integration-obsidian': 'workspace:*'});
@@ -203,7 +213,7 @@ describe('private workspace boundaries', () => {
     }
   });
 
-  it('lets providers use the generic Manager without reversing that dependency', () => {
+  it('lets providers use the generic Manager without reversing that dependency', async () => {
     const core = integrationPackage('core');
     const manager: WorkspacePackage = {
       name: '@threadnote/manager',
@@ -223,3 +233,12 @@ describe('private workspace boundaries', () => {
     }
   });
 });
+
+// One npm TypeScript syntax child serves this whole file and is closed once.
+let syntaxSession: TypeScriptSyntaxSession | undefined;
+afterAll(async () => {
+  await syntaxSession?.close();
+});
+function getSyntaxSession(): Promise<TypeScriptSyntaxSession> {
+  return Promise.resolve((syntaxSession ??= createTypeScriptSyntaxSession({cwd: process.cwd()})));
+}

@@ -1,4 +1,5 @@
 import {Array as EffectArray, Deferred, Effect, FileSystem, Fiber, Path, Record as EffectRecord, Schema} from 'effect';
+import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
 import {Command} from 'effect/cli';
 import {it as effectIt} from '@effect/vitest';
@@ -8,7 +9,8 @@ import {
   type ResourceStoreLocation,
   type ResourceStoreWriteOptions,
 } from '@threadnote/store/resource-store';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
+import fc from 'fast-check';
 import {
   decodeNativeTaskActionRef,
   encodeNativeTaskActionRef,
@@ -56,6 +58,69 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {cliTestLayer, fixture, runNativeTaskAction, packet, inspectTaskOnce} from './native-task-actions-fixture.js';
 
 describe('native task actions', () => {
+  effectIt.effect('preserves each snapshot authority command through the shared registration schema', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      const registration = yield* Effect.acquireRelease(
+        Effect.sync(() => vi.spyOn(mcp, 'registerTool')),
+        registered => Effect.sync(() => registered.mockRestore()),
+      );
+      registerWorkflowTaskTool(mcp, f.config);
+      const snapshot = EffectOption.getOrThrow(
+        EffectArray.findFirst(registration.mock.calls, ([name]) => name === 'workflow_task_snapshot'),
+      );
+      const schema = Schema.Struct(snapshot[1].inputSchema);
+      const decode = Schema.decodeUnknownEffect(schema);
+      const commands = ['recover-unreviewed-rebase', 'requalify-base', 'integrate-same-label-base'] as const;
+      for (const command of commands) {
+        const valid = {
+          runId: 'run',
+          callerCwd: f.repo,
+          snapshot: {
+            command,
+            snapshotRef: 'opaque-ref',
+            reason: 'Existing source authority',
+            userAuthority: 'Caller assertion',
+          },
+        };
+        expect(yield* decode(valid)).toEqual(valid);
+        for (const key of ['command', 'snapshotRef', 'reason', 'userAuthority'] as const) {
+          const missing: Record<string, unknown> = {...valid.snapshot};
+          delete missing[key];
+          expect((yield* decode({...valid, snapshot: missing}).pipe(Effect.exit))._tag).toBe('Failure');
+          for (const invalid of ['', null, 1, false])
+            expect(
+              (yield* decode({...valid, snapshot: {...valid.snapshot, [key]: invalid}}).pipe(Effect.exit))._tag,
+            ).toBe('Failure');
+        }
+      }
+      const value = fc.oneof(fc.string({maxLength: 32}), fc.constantFrom(null, 1, false));
+      fc.assert(
+        fc.property(
+          fc.constantFrom(...commands),
+          value,
+          value,
+          value,
+          (command, snapshotRef, reason, userAuthority) => {
+            // Independent former per-command arm: all three fields are required nonempty strings.
+            const previous = Schema.Struct({
+              command: Schema.Literal(command),
+              snapshotRef: Schema.String.check(Schema.isMinLength(1)),
+              reason: Schema.String.check(Schema.isMinLength(1)),
+              userAuthority: Schema.String.check(Schema.isMinLength(1)),
+            });
+            const input = {command, snapshotRef, reason, userAuthority};
+            expect(Schema.is(schema)({runId: 'run', callerCwd: f.repo, snapshot: input})).toBe(
+              Schema.is(previous)(input),
+            );
+          },
+        ),
+        {numRuns: 40, seed: 424244},
+      );
+    }).pipe(run),
+  );
+
   effectIt.effect('lists recorded installation targets and inspection codes on admission failure', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
@@ -1552,7 +1617,7 @@ describe('native task actions', () => {
             },
           }),
         );
-        expect(reviewed.status).toBe('recorded');
+        expect(reviewed.status, typeof reviewed.message === 'string' ? reviewed.message : undefined).toBe('recorded');
         const validated = object(
           yield* runNativeTaskAction(f.config, {
             command: 'record-validation',

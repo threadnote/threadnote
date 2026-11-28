@@ -1,4 +1,5 @@
 import {sqliteTemporaryDirectoryUsable} from '@threadnote/platform/sqlite_temporary_directory';
+import {lexicalPhysicalSnapshotIdentity} from '../store/lexical_projection.js';
 import {SecureRandom} from 'effect/crypto';
 import {degradedParserCacheIdentity, groupFilesByCacheIdentity} from './materialization_batch.js';
 export {cachedFactsMetadata} from './materialization_batch.js';
@@ -47,6 +48,8 @@ import {codeGraphDiskReservationLockPath, codeGraphDiskReservationRoot, type Cod
 import {compareCodeUnits} from '../ordering.js';
 import {codeGraphScopeIdentitySuffix, type CodeGraphScopeIdentity} from '../scope/identity.js';
 import {budgetParserWorkerFacts, type CodeGraphParserPoolShape, type CodeGraphParserResult} from '../parser_worker.js';
+import {windowGeneralParserLanes} from '../parser_worker_capacity.js';
+import {isNativeTypeScriptSource} from '../typescript_runtime.js';
 import {
   codeGraphExtractionWorkUnits,
   codeGraphSourceSizeBucket,
@@ -571,22 +574,64 @@ export function cacheContentBatch(options: {
                   }),
                 {concurrency: 1},
               );
-            let nextGroupIndex = 0;
-            const drainGroups = (parserExtract: CodeGraphParserPoolShape['extract']) =>
+            // Native TypeScript groups run only on native lanes, and general groups only on general lanes, so a native
+            // lane holds the scarce native slot only for native work. A role without slots hands its groups to the other.
+            const nativeGroup = (group: ExtractionReuseGroup) =>
+              EffectArray.some(group.files, file => isNativeTypeScriptSource(file.path));
+            const nativeGroups = EffectArray.filter(groupWindow, nativeGroup);
+            const generalGroups = EffectArray.filter(groupWindow, group => !nativeGroup(group));
+            let nextNativeGroupIndex = 0,
+              nextGeneralGroupIndex = 0;
+            const takeNativeGroup = () => nativeGroups[nextNativeGroupIndex++];
+            const takeGeneralGroup = () => generalGroups[nextGeneralGroupIndex++];
+            const drainGroups = (
+              parserExtract: CodeGraphParserPoolShape['extract'],
+              take: () => ExtractionReuseGroup | undefined,
+            ) =>
               Effect.gen(function* () {
                 const drained = [];
-                while (nextGroupIndex < groupWindow.length) {
-                  const group = groupWindow[nextGroupIndex];
-                  nextGroupIndex += 1;
-                  if (group !== undefined) drained.push(yield* extractGroup(group, parserExtract));
+                for (let group = take(); group !== undefined; group = take()) {
+                  drained.push(yield* extractGroup(group, parserExtract));
                 }
                 return drained;
               });
+            const reportedNative = options.parserPool.nativeCapacity;
+            const nativeCapacity = Number.isSafeInteger(reportedNative)
+              ? Math.max(0, Math.min(parserCapacity, reportedNative))
+              : 0;
+            const generalCapacity = parserCapacity - nativeCapacity;
+            const takeNativeFirst = () => takeNativeGroup() ?? takeGeneralGroup();
+            // Only the general lanes the planned work needs run beside native lanes: each keeps a resident worker.
+            const generalLanes = Math.min(
+              windowGeneralParserLanes({nativeCapacity, generalCapacity}, cumulativeContext.parserLaneWork),
+              nativeCapacity === 0 ? groupWindow.length : generalGroups.length,
+            );
+            // A window without native work lets the native lanes, whose workers the plan starts anyway, take the
+            // remaining general groups. They hold the native lock only for this window.
+            const nativeShares =
+              nativeGroups.length === 0 && (cumulativeContext.parserLaneWork?.nativeWorkUnits ?? 0) > 0;
+            const takeNativeLane = generalCapacity === 0 || nativeShares ? takeNativeFirst : takeNativeGroup;
+            const takeGeneralLane = nativeCapacity === 0 ? takeNativeFirst : takeGeneralGroup;
+            const sharedGeneral = nativeShares ? generalGroups.length - generalLanes : 0;
+            const nativeLanes = Math.min(
+              nativeCapacity,
+              generalCapacity === 0 ? groupWindow.length : nativeGroups.length + sharedGeneral,
+            );
             const groupedResults = (yield* Effect.forEach(
-              Array.from({length: Math.min(lane.concurrency, groupWindow.length)}),
-              () =>
-                options.parserPool.withParserSlot(options.threadnoteHome, window, extract =>
-                  drainGroups((file, _threadnoteHome) => extract(file)),
+              [
+                ...Array.from({length: nativeLanes}, () => 'native' as const),
+                ...Array.from({length: generalLanes}, () => 'general' as const),
+              ],
+              parserLane =>
+                options.parserPool.withParserSlot(
+                  options.threadnoteHome,
+                  window,
+                  extract =>
+                    drainGroups(
+                      (file, _threadnoteHome) => extract(file),
+                      parserLane === 'native' ? takeNativeLane : takeGeneralLane,
+                    ),
+                  parserLane,
                 ),
               {concurrency: 'unbounded'},
             )).flat();
@@ -866,11 +911,11 @@ export function directFullSnapshotIdentity(logicalSnapshotId: string): string {
   if (!/^cgsn_[0-9a-f]{40}$/.test(logicalSnapshotId)) {
     throw CodeGraphIndexOperationError.make({message: 'Logical snapshot identity is invalid.'});
   }
-  return `${logicalSnapshotId}-direct`;
+  return lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'direct');
 }
 
 export function forcedSnapshotIdentity(logicalSnapshotId: string, forceGeneration: string | undefined): string {
-  return forceGeneration ? `${logicalSnapshotId}-full-${forceGeneration}` : logicalSnapshotId;
+  return lexicalPhysicalSnapshotIdentity(logicalSnapshotId, 'full', undefined, forceGeneration);
 }
 
 export const firstReadySnapshotById = Effect.fn('codeGraph.firstReadySnapshotById')(function* (

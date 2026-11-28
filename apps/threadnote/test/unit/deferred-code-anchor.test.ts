@@ -136,6 +136,7 @@ describe('deferred code-anchor outbox', () => {
             CodeGraphQueryService,
             CodeGraphQueryService.of({
               ...graph.query,
+              withStatusSession: undefined,
               status: () => Effect.succeed(scoped),
             }),
           ),
@@ -186,6 +187,7 @@ describe('deferred code-anchor outbox', () => {
               ? graph.query
               : CodeGraphQueryService.of({
                   ...graph.query,
+                  withStatusSession: undefined,
                   status: () =>
                     Effect.succeed({
                       ...graph.status,
@@ -290,7 +292,11 @@ describe('deferred code-anchor outbox', () => {
         }).pipe(
           Effect.provideService(
             CodeGraphQueryService,
-            CodeGraphQueryService.of({...originalQuery, status: () => Effect.succeed(scoped)}),
+            CodeGraphQueryService.of({
+              ...originalQuery,
+              withStatusSession: undefined,
+              status: () => Effect.succeed(scoped),
+            }),
           ),
         );
         expect(selected.project).toBe('app-a');
@@ -313,7 +319,11 @@ describe('deferred code-anchor outbox', () => {
         }).pipe(
           Effect.provideService(
             CodeGraphQueryService,
-            CodeGraphQueryService.of({...originalQuery, status: () => Effect.succeed(observed)}),
+            CodeGraphQueryService.of({
+              ...originalQuery,
+              withStatusSession: undefined,
+              status: () => Effect.succeed(observed),
+            }),
           ),
         );
         expect(legacy.project).toBeUndefined();
@@ -366,7 +376,11 @@ describe('deferred code-anchor outbox', () => {
         }).pipe(
           Effect.provideService(
             CodeGraphQueryService,
-            CodeGraphQueryService.of({...originalQuery, status: () => Effect.succeed(initial)}),
+            CodeGraphQueryService.of({
+              ...originalQuery,
+              withStatusSession: undefined,
+              status: () => Effect.succeed(initial),
+            }),
           ),
         );
 
@@ -374,7 +388,11 @@ describe('deferred code-anchor outbox', () => {
         const receipt = yield* finalizeDeferredCodeAnchors(fixture.config).pipe(
           Effect.provideService(
             CodeGraphQueryService,
-            CodeGraphQueryService.of({...originalQuery, status: () => Effect.succeed(sibling)}),
+            CodeGraphQueryService.of({
+              ...originalQuery,
+              withStatusSession: undefined,
+              status: () => Effect.succeed(sibling),
+            }),
           ),
         );
         expect(receipt.items).toEqual([
@@ -407,6 +425,7 @@ describe('deferred code-anchor outbox', () => {
             CodeGraphQueryService,
             CodeGraphQueryService.of({
               ...fullQuery,
+              withStatusSession: undefined,
               status: () => Effect.succeed(selectedFullProjectStatus(fullObserved, 'app-a')),
             }),
           ),
@@ -434,6 +453,7 @@ describe('deferred code-anchor outbox', () => {
               CodeGraphQueryService,
               CodeGraphQueryService.of({
                 ...graph.query,
+                withStatusSession: undefined,
                 status: () =>
                   Ref.updateAndGet(statusReads, count => count + 1).pipe(
                     Effect.map(count => (count === transitionRead ? scopedStatus : fullStatus)),
@@ -474,6 +494,7 @@ describe('deferred code-anchor outbox', () => {
             CodeGraphQueryService,
             CodeGraphQueryService.of({
               ...scopedQuery,
+              withStatusSession: undefined,
               status: () => Effect.succeed(selectedProjectStatus(scopedObserved, 'app-a', 'code-graph-scope:app-a')),
             }),
           ),
@@ -483,6 +504,7 @@ describe('deferred code-anchor outbox', () => {
             CodeGraphQueryService,
             CodeGraphQueryService.of({
               ...scopedQuery,
+              withStatusSession: undefined,
               status: () => Effect.succeed(selectedFullProjectStatus(scopedObserved, 'app-a')),
             }),
           ),
@@ -889,6 +911,7 @@ describe('deferred code-anchor outbox', () => {
         const store = yield* ResourceStore;
         const unreadableQuery = CodeGraphQueryService.of({
           ...query,
+          withStatusSession: undefined,
           status: () =>
             Effect.sync(() => {
               graphReads += 1;
@@ -1894,6 +1917,7 @@ describe('deferred code-anchor outbox', () => {
         });
         const mismatchedQuery = CodeGraphQueryService.of({
           ...originalQuery,
+          withStatusSession: undefined,
           status: () =>
             Effect.succeed({
               ...observed,
@@ -1947,6 +1971,7 @@ describe('deferred code-anchor outbox', () => {
         });
         const unreadinessQuery = CodeGraphQueryService.of({
           ...originalQuery,
+          withStatusSession: undefined,
           status: () =>
             Effect.succeed({
               ...observed,
@@ -2646,6 +2671,7 @@ const exactCurrentCitationGraph = Effect.fn('deferredCodeAnchorTest.exactCurrent
   return {
     query: CodeGraphQueryService.of({
       ...originalQuery,
+      withStatusSession: undefined,
       status: () => Effect.succeed(exactStatus),
     }),
     status: exactStatus,

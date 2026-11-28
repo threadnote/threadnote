@@ -1,4 +1,5 @@
 import {Array as EffectArray} from 'effect';
+import {recallProjectIsEligible, type RecallProjectEligibility} from '@threadnote/recall/eligibility';
 import {uriSegment} from '@threadnote/workspace/manifest';
 export const MEMORY_RECALL_EMPTY_GAP = 'memory-recall-no-active-durable-or-handoff';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -376,6 +377,55 @@ export function mergeContextBriefMemoryEvidence(
     consideredCandidates: lexical.consideredCandidates + codeLinked.consideredCandidates,
     gaps: stableUnique([...lexicalGaps, ...codeLinked.gaps]),
     trust: lexical.trust,
+  };
+}
+
+/** The caller resolves memory project tags; navigation project roots are a different identity. */
+export type ContextBriefNavigationMemoryProjects = Exclude<RecallProjectEligibility, {readonly mode: 'unrestricted'}>;
+
+/** Applicability only: canonical citations and backlinks must name an actual selected route anchor. */
+export function selectContextBriefNavigationMemory(input: {
+  readonly memory: ContextBriefMemoryRetrievalV1;
+  readonly anchors: readonly {readonly nodeId: string; readonly path: string; readonly repositoryId: string}[];
+  readonly repositoryIdentityKind: 'local' | 'remote';
+  readonly memoryProjects?: ContextBriefNavigationMemoryProjects;
+}): ContextBriefMemoryRetrievalV1 {
+  const candidates = EffectArray.flatMap(input.memory.candidates, candidate => {
+    if (input.memoryProjects === undefined || !recallProjectIsEligible(input.memoryProjects, candidate.project))
+      return [];
+    const matches = EffectArray.filter(candidate.codeLinkMatches ?? [], match =>
+      EffectArray.some(
+        input.anchors,
+        anchor =>
+          match.anchorNodeId === anchor.nodeId &&
+          match.anchorPath === anchor.path &&
+          EffectArray.some(
+            candidate.codeCitations,
+            citation =>
+              citation.id === match.citationId &&
+              citation.path === anchor.path &&
+              citation.repositoryId === anchor.repositoryId &&
+              citation.repositoryIdentityKind === input.repositoryIdentityKind &&
+              (citation.target.kind === 'file' || citation.target.nodeId === anchor.nodeId),
+          ),
+      ),
+    );
+    return matches.length === 0 ? [] : [{...candidate, codeLinkMatches: matches}];
+  });
+  return {
+    ...input.memory,
+    candidates,
+    ...(input.memory.codeAnchorCoverage === undefined
+      ? {}
+      : {
+          codeAnchorCoverage: {...input.memory.codeAnchorCoverage, matchedMemories: candidates.length},
+        }),
+    // Shared bounded recall lanes cannot establish exhaustive absence after selection.
+    gaps: stableUnique([
+      ...input.memory.gaps,
+      'navigation-memory-coverage-incomplete',
+      ...(input.memoryProjects === undefined ? ['memory-project-scope-unavailable'] : []),
+    ]),
   };
 }
 

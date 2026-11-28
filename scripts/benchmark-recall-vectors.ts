@@ -16,7 +16,7 @@ import {
   THREADNOTE_EMBEDDING_CONTEXTS_ENV,
 } from '@threadnote/inference/engine/node-llama-cpp';
 import {formatMemoryDocument} from '@threadnote/memory/document';
-import {loadRecallIndexData} from '@threadnote/recall/index';
+import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {RecallReadyReadBoundary, RecallReadyReadBoundaryError} from '@threadnote/recall/read_boundary';
 import {makeReadDeadline} from '@threadnote/platform/read_deadline';
@@ -38,6 +38,8 @@ import {benchmarkMeasurement, parseBenchmarkArtifactV1} from '@threadnote/eviden
 import {
   NATIVE_PERFORMANCE_CONTRACT,
   NATIVE_PERFORMANCE_STAGES,
+  NATIVE_VECTOR_FULL_QUERY_DEADLINE_MILLISECONDS,
+  evaluateNativeVectorDeadlineCompletion,
   parseNativePerformanceCapture,
   nativePerformanceSourceChanges,
   createNativeStageTracing,
@@ -711,6 +713,8 @@ interface ProductionQuerySample {
   readonly milliseconds: number;
   readonly success: boolean;
   readonly reason?: string;
+  readonly deadlineExhaustion?: 'RecallReadyReadBoundaryError';
+  readonly completedWithinFullDeadline?: boolean;
   readonly querySha256?: string;
   readonly scoresSha256?: string;
   readonly children: readonly {operation: string; milliseconds: number; timeoutMs: number | undefined}[];
@@ -852,6 +856,21 @@ export function validateBaselineDependencyInstallation(target: string, command: 
   return command;
 }
 
+const verifyFrozenBaselineSource = (source: string) =>
+  Effect.gen(function* () {
+    const command = yield* CommandExecutor;
+    const git = (args: readonly string[]) => command.execute('git', args, {cwd: source, maxOutputBytes: MEBIBYTE});
+    const commit = EffectString.trim((yield* git(['rev-parse', 'HEAD'])).stdout);
+    const tree = EffectString.trim((yield* git(['rev-parse', 'HEAD^{tree}'])).stdout);
+    if (
+      commit !== FROZEN_TYPESCRIPT_BASELINE_COMMIT ||
+      tree !== FROZEN_TYPESCRIPT_BASELINE_TREE ||
+      (yield* git(['status', '--porcelain=v1', '--untracked-files=normal'])).stdout !== ''
+    )
+      return yield* ScriptError.make({message: 'Benchmark setup requires clean exact frozen TS66 source.'});
+    return {commit, tree, git};
+  });
+
 /** Benchmark build provenance is deliberately distinct from an installation receipt. Run BEFORE an overlay. */
 export const writeBaselineBuildProvenance = (
   sourceRoot: string | undefined,
@@ -865,19 +884,10 @@ export const writeBaselineBuildProvenance = (
       });
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const command = yield* CommandExecutor;
     if (!sourceRoot) return yield* writeInstalledBaselineProvenance(distributionRoot);
     const source = path.resolve(sourceRoot);
     const root = path.resolve(distributionRoot);
-    const git = (args: readonly string[]) => command.execute('git', args, {cwd: source, maxOutputBytes: MEBIBYTE});
-    const commit = EffectString.trim((yield* git(['rev-parse', 'HEAD'])).stdout);
-    const tree = EffectString.trim((yield* git(['rev-parse', 'HEAD^{tree}'])).stdout);
-    if (
-      commit !== FROZEN_TYPESCRIPT_BASELINE_COMMIT ||
-      tree !== FROZEN_TYPESCRIPT_BASELINE_TREE ||
-      (yield* git(['status', '--porcelain=v1', '--untracked-files=normal'])).stdout !== ''
-    )
-      return yield* ScriptError.make({message: 'Baseline provenance requires clean exact frozen TS66 source.'});
+    const {commit, tree, git} = yield* verifyFrozenBaselineSource(source);
     if (yield* fs.exists(path.join(root, NATIVE_INFERENCE_DESCRIPTOR)))
       return yield* ScriptError.make({
         message: 'Record original baseline provenance before staging the inference overlay.',
@@ -1111,10 +1121,27 @@ export const writeInstalledBaselineProvenance = (root: string) =>
     return provenance;
   });
 
-const makeProductionFixture = (home: string, documents: number) =>
+// Resolve the imports from the verified TS66 checkout so it uses its own lexical writer and dependencies.
+const frozenBaselineLexicalSetup = `
+  import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
+  import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+  import {provideScriptLayer} from './scripts/effect/errors.js';
+  import {Effect} from 'effect';
+
+  const config = JSON.parse(process.argv[1]);
+  const prepare = Effect.gen(function* () {
+    yield* loadRecallIndexData(config, {includeInactive: false});
+    return yield* recallIndexStatus(config);
+  });
+  console.log(JSON.stringify(await Effect.runPromise(provideScriptLayer(prepare, ApplicationLayer))));
+`;
+
+const makeProductionFixture = (home: string, documents: number, baselineSource: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const system = yield* SystemInfo;
+    const command = yield* CommandExecutor;
     const config = {
       account: 'local',
       user: 'benchmark',
@@ -1149,6 +1176,41 @@ const makeProductionFixture = (home: string, documents: number) =>
       return yield* ScriptError.make({
         message: 'Production benchmark canonical candidate count differs from requested count.',
       });
+    // Prepare both schemas against the same canonical files. Build the older schema last
+    // because a current lexical rebuild removes legacy index artifacts.
+    const baselineResult = yield* command.execute(
+      system.executablePath,
+      ['-e', frozenBaselineLexicalSetup, JSON.stringify(config)],
+      {
+        cwd: baselineSource,
+        env: {...system.environment(), THREADNOTE_HOME: home},
+        timeoutMs: 5 * 60_000,
+        maxOutputBytes: 64 * 1024,
+        verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+      },
+    );
+    const baselineLexical = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({
+        ready: Schema.Boolean,
+        generation: Schema.optionalKey(Schema.String),
+        documentCount: Schema.Int,
+        databasePath: Schema.String,
+      }),
+    )(JSON.parse(baselineResult.stdout));
+    const candidateLexical = yield* recallIndexStatus(config);
+    if (
+      !baselineLexical.ready ||
+      !candidateLexical.ready ||
+      baselineLexical.databasePath === candidateLexical.databasePath ||
+      baselineLexical.generation !== lexical.generation ||
+      candidateLexical.generation !== lexical.generation ||
+      baselineLexical.documentCount !== documents ||
+      candidateLexical.documentCount !== documents
+    )
+      return yield* ScriptError.make({
+        message:
+          'Frozen TS66 and candidate lexical indexes must separately open the same ready, complete corpus generation.',
+      });
     const status = yield* rebuildVectorIndex(config, manifest, lexical.candidates, {
       corpusGeneration: lexical.generation,
     });
@@ -1159,6 +1221,7 @@ const makeProductionFixture = (home: string, documents: number) =>
       corpusGeneration: lexical.generation,
       documents,
       databasePath: path.join(home, 'indexes', 'vectors', manifest.id, vectorIndexDatabaseFilename()),
+      lexicalDatabases: {baseline: baselineLexical.databasePath, candidate: candidateLexical.databasePath},
     };
   });
 
@@ -1170,18 +1233,21 @@ const runProductionVectorBenchmark = Effect.scoped(
       !options.modelFile ||
       !options.distributionRoot ||
       !options.baselineDistributionRoot ||
+      !options.baselineSourceRoot ||
       options.distribution === 'sparse' ||
       manifest.id !== 'bge-small-en-v1.5-q8'
     )
       return yield* ScriptError.make({
         message:
-          '--production-path requires --output, --model-file for pinned BGE, --distribution-root, independent --baseline-distribution-root and --distribution dense|tied.',
+          '--production-path requires --output, --model-file for pinned BGE, --distribution-root, independent --baseline-distribution-root, exact --baseline-source-root and --distribution dense|tied.',
       });
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const system = yield* SystemInfo;
     const command = yield* CommandExecutor;
     const runtime = yield* LocalModelRuntime;
+    const baselineSource = path.resolve(options.baselineSourceRoot);
+    yield* verifyFrozenBaselineSource(baselineSource);
     const captureStartedAt = DateTime.formatIso(yield* DateTime.now);
     const modelPath = options.modelFile;
     if (sha256HexSync(yield* fs.readFile(modelPath)) !== manifest.sha256)
@@ -1271,9 +1337,17 @@ const runProductionVectorBenchmark = Effect.scoped(
     yield* Console.log(
       `Building ${options.documents} canonical ${options.distribution} documents for compiled production retrieval.`,
     );
-    const fixture = yield* makeProductionFixture(path.join(home, 'fixture'), options.documents);
+    const fixture = yield* makeProductionFixture(path.join(home, 'fixture'), options.documents, baselineSource);
     const setupMilliseconds = Number((yield* Clock.currentTimeNanos) - setupStarted) / NANOSECONDS_PER_MILLISECOND;
     const databaseSha256 = sha256HexSync(yield* fs.readFile(fixture.databasePath));
+    const readLexicalDatabaseHashes = () =>
+      Effect.gen(function* () {
+        return {
+          baseline: sha256HexSync(yield* fs.readFile(fixture.lexicalDatabases.baseline)),
+          candidate: sha256HexSync(yield* fs.readFile(fixture.lexicalDatabases.candidate)),
+        };
+      });
+    const lexicalDatabaseHashes = yield* readLexicalDatabaseHashes();
     const eligibility = deriveRecallEligibilityPolicy({
       explicitProject: 'benchmark',
       originalQuery: 'vector production benchmark',
@@ -1309,6 +1383,12 @@ const runProductionVectorBenchmark = Effect.scoped(
     let caseGatesPassed = false;
     let closingSource: typeof openingSource | undefined;
     let fatal: string | undefined;
+    const engineProofPassed = () =>
+      proof[0]?.backend === 'baseline' &&
+      !proof[0].result.success &&
+      proof[0].result.reason === 'worker-failed' &&
+      proof[1]?.backend === 'candidate' &&
+      proof[1].result.success;
     const capture = () => ({
       format: 'threadnote-native-vector-production-v2',
       captureStartedAt,
@@ -1343,7 +1423,7 @@ const runProductionVectorBenchmark = Effect.scoped(
         samples: options.samples,
         pairs: options.pairs,
         resultLimit: VECTOR_QUERY_RESULT_LIMIT,
-        fullQueryDeadlineMilliseconds: 2000,
+        fullQueryDeadlineMilliseconds: NATIVE_VECTOR_FULL_QUERY_DEADLINE_MILLISECONDS,
         cleanupReserveMilliseconds: 1100,
         processTreeRssPolicy: {
           minimumSuccessfulSamples: 2,
@@ -1375,6 +1455,7 @@ const runProductionVectorBenchmark = Effect.scoped(
         documents: fixture.documents,
         corpusGeneration: fixture.corpusGeneration,
         databaseSha256,
+        lexicalDatabaseHashes,
         setupMilliseconds,
       },
       executableVerification,
@@ -1391,6 +1472,30 @@ const runProductionVectorBenchmark = Effect.scoped(
       arms,
       pairGates,
       caseGatesPassed,
+      deadlineCompletion: evaluateNativeVectorDeadlineCompletion({
+        documents: options.documents,
+        distribution: options.distribution,
+        warmSamples: options.samples,
+        expectedPairs: options.pairs,
+        fullQueryDeadlineMilliseconds: NATIVE_VECTOR_FULL_QUERY_DEADLINE_MILLISECONDS,
+        integrityVerified:
+          openingSource.runtimeAndHarnessMatchCandidate &&
+          closingSource?.runtimeAndHarnessMatchCandidate === true &&
+          sourceStable &&
+          fixtureStable &&
+          distributionStable &&
+          modelStable,
+        executionVerified:
+          executableVerification.length === 2 &&
+          executableVerification[0]?.backend === 'baseline' &&
+          executableVerification[0].success &&
+          executableVerification[1]?.backend === 'candidate' &&
+          executableVerification[1].success &&
+          engineProofPassed(),
+        oracleControls,
+        firstUse: firstUse.requests,
+        arms,
+      }),
       fatal,
     });
     const writeCapture = () =>
@@ -1439,8 +1544,9 @@ const runProductionVectorBenchmark = Effect.scoped(
         });
         lastQueryVector = [];
         const started = yield* Clock.currentTimeNanos;
+        const deadline = yield* makeReadDeadline(NATIVE_VECTOR_FULL_QUERY_DEADLINE_MILLISECONDS);
         const result = yield* Effect.gen(function* () {
-          const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          const boundary = yield* makeReadyRecallReadBoundary(deadline).pipe(
             Effect.provideService(SystemInfo, selected),
             Effect.provideService(CommandExecutor, observedCommands),
           );
@@ -1454,11 +1560,21 @@ const runProductionVectorBenchmark = Effect.scoped(
           ).pipe(Effect.provideService(RecallReadyReadBoundary, boundary));
         }).pipe(Effect.result);
         const milliseconds = Number((yield* Clock.currentTimeNanos) - started) / NANOSECONDS_PER_MILLISECOND;
+        const completedWithinFullDeadline = (yield* Clock.monotonicTimeNanos) < deadline.expiresAtNanos;
         if (result._tag === 'Failure') {
           const reason = Schema.is(RecallReadyReadBoundaryError)(result.failure)
             ? result.failure.reason
             : 'semantic-failure';
-          return {sample, milliseconds, success: false, reason, children} satisfies ProductionQuerySample;
+          // The typed parent boundary owns budget exhaustion. The worker reply schema excludes it.
+          const deadlineExhaustion = reason === 'budget-exhausted' ? 'RecallReadyReadBoundaryError' : undefined;
+          return {
+            sample,
+            milliseconds,
+            success: false,
+            reason,
+            deadlineExhaustion,
+            children,
+          } satisfies ProductionQuerySample;
         }
         if (!result.success)
           return {
@@ -1481,6 +1597,7 @@ const runProductionVectorBenchmark = Effect.scoped(
           sample,
           milliseconds,
           success,
+          completedWithinFullDeadline,
           ...(success ? {} : {reason: 'query-or-scalar-oracle-mismatch'}),
           querySha256,
           scoresSha256,
@@ -1530,7 +1647,7 @@ const runProductionVectorBenchmark = Effect.scoped(
       const discriminatorStartedAt = yield* Clock.currentTimeNanos;
       // A separate tiny VIEW discriminates the actual SQLite engine without changing measured data or production code.
       queryPhase = false;
-      const proofFixture = yield* makeProductionFixture(path.join(home, 'proof'), 2);
+      const proofFixture = yield* makeProductionFixture(path.join(home, 'proof'), 2, baselineSource);
       Bun.gc(true);
       queryPhase = true;
       const proofDb = new Database(proofFixture.databasePath);
@@ -1563,7 +1680,7 @@ const runProductionVectorBenchmark = Effect.scoped(
       discriminatorSetupMilliseconds =
         Number((yield* Clock.currentTimeNanos) - discriminatorStartedAt) / NANOSECONDS_PER_MILLISECOND;
       yield* writeCapture();
-      if (proof[0]?.result.success || proof[0]?.result.reason !== 'worker-failed' || !proof[1]?.result.success)
+      if (!engineProofPassed())
         return yield* ScriptError.make({
           message: 'Actual compiled native/TypeScript engine proof failed; capture is unqualified.',
         });
@@ -1669,11 +1786,14 @@ const runProductionVectorBenchmark = Effect.scoped(
         });
       }
       closingSource = yield* productionSourceFence(nativeManifest.buildInfo.sourceCommit);
+      yield* verifyFrozenBaselineSource(baselineSource);
       sourceStable =
         openingSource.runtimeAndHarnessDiffSha256 === closingSource.runtimeAndHarnessDiffSha256 &&
         openingSource.untrackedRuntimePathsSha256 === closingSource.untrackedRuntimePathsSha256 &&
         openingSource.instrumentationHash === closingSource.instrumentationHash;
-      fixtureStable = databaseSha256 === sha256HexSync(yield* fs.readFile(fixture.databasePath));
+      fixtureStable =
+        databaseSha256 === sha256HexSync(yield* fs.readFile(fixture.databasePath)) &&
+        JSON.stringify(lexicalDatabaseHashes) === JSON.stringify(yield* readLexicalDatabaseHashes());
       distributionStable =
         JSON.stringify(candidateInventory) === JSON.stringify(yield* productionDistributionInventory(candidateRoot)) &&
         JSON.stringify(baselineInventory) === JSON.stringify(yield* productionDistributionInventory(baselineRoot)) &&

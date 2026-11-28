@@ -167,9 +167,23 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Install pinned native vector toolchain
         run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Provide the verified native TypeScript asset
+        # GNU hosts have a reviewed pin: the release stages runtime/typescript. Musl has none and builds without it.
+        if: matrix.libc == 'gnu'
+        id: native-typescript
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
       - name: Build GNU release at the preserved libc floor
         if: matrix.libc == 'gnu'
         run: bun scripts/assemble-native-inference.ts --gnu-container
+        env:
+          # With a payload, the glibc 2.17 container defers native TypeScript staging to the next host step.
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
+      - name: Stage the native TypeScript asset on the host
+        if: matrix.libc == 'gnu'
+        run: bun scripts/stage-native-typescript-release.ts
+        env:
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
       - name: Build and load musl release at the preserved libc floor
         if: matrix.libc == 'musl'
         run: >-
@@ -263,9 +277,14 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Install pinned native vector toolchain
         run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Provide the verified native TypeScript asset
+        id: native-typescript
+        timeout-minutes: 80
+        uses: ./.github/actions/native-typescript-asset
       - run: bun run build:release
         env:
           THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
+          THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR: ${{ steps.native-typescript.outputs.payload }}
       - run: ./dist/threadnote --version
       - name: Prepare strict doctor fixture
         shell: bash
@@ -321,18 +340,62 @@ jobs:
             echo "::error::Expected exactly one valid Developer ID Application identity, found $identity_count."
             exit 1
           fi
+          # The imported identity must belong to the committed release Team ID (RELEASE_APPLE_TEAM_ID in
+          # tools/ci/signed-native-typescript.ts). Another or an unreadable team fails here, before any signing.
+          identity_team="$(
+            printf '%s\n' "$identity_output" |
+              sed -nE 's/^.*"Developer ID Application: .* \(([A-Z0-9]{10})\)"$/\1/p'
+          )"
+          bun tools/ci/signed-native-typescript.ts check-signing-team "$identity_team"
           printf 'APPLE_SIGNING_IDENTITY=%s\n' "$identity_hashes" >> "$GITHUB_ENV"
 
-      - name: Sign nested native code and Bun executable
+      # Order: sign the natives, verify the signed compiler, compile its signed identity into the outer executable,
+      # sign the outer executable, smoke the signed payload, then notarize the exact bytes that are archived.
+      - name: Sign nested native code
         shell: bash
         run: |
           set -euo pipefail
           while IFS= read -r -d '' native_file; do
             if file "$native_file" | grep -q 'Mach-O'; then
-              codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$native_file"
+              if [[ "$native_file" == dist/runtime/typescript/tsc ]]; then
+                # The private compiler: an explicit identifier, the hardened runtime with kill and hard (macOS 15
+                # does not imply them, and the runtime image check requires them) and no entitlements.
+                codesign --force --options runtime,kill,hard --timestamp --identifier dev.threadnote.typescript-native \
+                  --sign "$APPLE_SIGNING_IDENTITY" "$native_file"
+              else
+                codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$native_file"
+              fi
               codesign --verify --strict --verbose=2 "$native_file"
             fi
           done < <(find dist/runtime dist/llama -type f -print0)
+
+      - name: Verify signed native TypeScript identity
+        shell: bash
+        env:
+          NATIVE_TYPESCRIPT_PAYLOAD: ${{ steps.native-typescript.outputs.payload }}
+        run: >-
+          mkdir -m 700 "$RUNNER_TEMP/signed-native-typescript" &&
+          bun tools/ci/signed-native-typescript.ts verify
+          --executable dist/runtime/typescript/tsc
+          --reference "$NATIVE_TYPESCRIPT_PAYLOAD/tsc"
+          --record "$RUNNER_TEMP/signed-native-typescript/record.json"
+
+      - name: Preserve the signed native TypeScript record
+        uses: actions/upload-artifact@v7
+        with:
+          name: signed-native-typescript-darwin-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/signed-native-typescript/record.json
+          if-no-files-found: error
+
+      - name: Compile the signed native TypeScript identity into the Bun executable
+        run: bun scripts/build.ts --relink-signed-native-typescript "$RUNNER_TEMP/signed-native-typescript/record.json"
+        env:
+          THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
+
+      - name: Sign the Bun executable
+        shell: bash
+        run: |
+          set -euo pipefail
           codesign \
             --force \
             --options runtime \
@@ -344,6 +407,11 @@ jobs:
 
       - name: Bind final signed vector reader bytes
         run: bun scripts/finalize-native-vector-reader.ts
+
+      - name: Index TypeScript with the signed payload
+        run: bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/native-typescript-release.e2e.ts
+        env:
+          THREADNOTE_EXPECT_SIGNED_NATIVE_TYPESCRIPT: '1'
 
       - name: Notarize the exact release payload
         shell: bash

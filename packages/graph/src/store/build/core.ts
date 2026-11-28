@@ -1,3 +1,4 @@
+import {finalizeLexicalV2,stageActivationLexicalV2} from '../lexical_projection.js';
 import { Array as EffectArray } from "effect"
 import {DateTime, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -493,32 +494,13 @@ function stageActivationSymbolTerms(
   symbols: readonly CodeGraphSymbol[],
   mode: ActivationInsertMode = 'upsert',
   observer?: ActivationStagingObserver,
+  preparedTerms?: ReadonlyMap<CodeGraphSymbol, readonly (readonly [string, number])[]>,
 ) {
   return Effect.gen(function* () {
     yield* observer?.('terms', 0, true) ?? Effect.void;
-    let termBatch: Array<readonly [string, string, number]> = [];
-    const flush = () => {
-      if (termBatch.length === 0) return Effect.void;
-      const current = termBatch.sort(
-        (left, right) => compareCodeUnits(left[0], right[0]) || compareCodeUnits(left[1], right[1]),
-      );
-      termBatch = [];
-      return Effect.gen(function* () {
-        yield* sql.unsafe(
-          `${activationInsertClause(mode)} INTO activation_symbol_terms (term, symbol_id, weight)
-           VALUES ${EffectArray.join(EffectArray.map(current, () => '(?, ?, ?)'), ', ')}`,
-          current.flat(),
-        );
-        yield* observer?.('terms', current.length) ?? Effect.void;
-      });
-    };
-    for (const symbol of sortedBy(symbols, symbol => symbol.id)) {
-      for (const [term, weight] of symbolTerms(symbol)) {
-        termBatch.push([term, symbol.id, weight]);
-        if (termBatch.length >= ACTIVATION_TERM_BATCH_ROWS) yield* flush();
-      }
-    }
-    yield* flush();
+    const terms=new Map(EffectArray.map(symbols, symbol => [symbol,preparedTerms?.get(symbol) ?? symbolTerms(symbol)]));
+    const rows=yield* stageActivationLexicalV2(sql,symbols,terms,mode === 'upsert');
+    yield* observer?.('terms',rows) ?? Effect.void;
     yield* observer?.('terms', 0, true) ?? Effect.void;
   });
 }
@@ -667,6 +649,7 @@ const publishCompactLexicalFormat = Effect.fn('codeGraph.publishCompactLexicalFo
   snapshotId: string,
   receipt: CompactLexicalFormatReceipt,
 ) {
+  if (yield* finalizeLexicalV2(sql, snapshotId, receipt)) return;
   yield* sql`
     INSERT INTO lexical_storage_formats (
       snapshot_id, format_version, posting_count, symbol_count, term_count, created_at

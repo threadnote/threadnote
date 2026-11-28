@@ -1,3 +1,4 @@
+import {CODE_GRAPH_SNAPSHOT_ID_PATTERN} from '../store/lexical_projection.js';
 import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Clock, DateTime, Effect, FileSystem, Option, Path, Predicate} from 'effect';
@@ -61,7 +62,7 @@ function validSource(source: unknown): source is CodeGraphCitationEvidenceSource
     typeof source.sourceCommit === 'string' &&
     /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(source.sourceCommit) &&
     typeof source.sourceSnapshotId === 'string' &&
-    /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/.test(source.sourceSnapshotId) &&
+    CODE_GRAPH_SNAPSHOT_ID_PATTERN.test(source.sourceSnapshotId) &&
     typeof source.sourceDirty === 'boolean' &&
     typeof source.extractorSet === 'string' &&
     source.extractorSet.length > 0 &&

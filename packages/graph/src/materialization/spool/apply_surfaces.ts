@@ -25,6 +25,10 @@ export const CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES = [
   {name: 'lexical_symbols', pageOrder: 'ascending', source: 'symbols'},
   {name: 'lexical_terms', pageOrder: 'ascending', source: 'terms'},
   {name: 'symbol_terms', source: 'symbol_terms'},
+  {name: 'lexical_scopes', source: 'lexical_scopes'},
+  {name: 'lexical_members', source: 'lexical_members'},
+  {name: 'lexical_owners', source: 'lexical_owners'},
+  {name: 'lexical_shared', source: 'lexical_shared'},
 ] as const satisfies readonly CodeGraphMaterializationSpoolApplySurface[];
 
 export function codeGraphMaterializationSpoolApplyPlan(
@@ -48,10 +52,12 @@ export function codeGraphMaterializationSpoolApplyPlan(
   return EffectArray.map(CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES, surface => ({
     name: surface.name,
     rowCount:
-      surface.name === 'lexical_snapshot'
-        ? 1
-        : surface.name === 'lexical_terms'
-          ? ready.lexicalTermCount
-          : physicalCounts.get(surface.source)!,
+      ready.lexicalV2 && (surface.name === 'lexical_symbols' || surface.name === 'symbol_terms')
+        ? 0
+        : surface.name === 'lexical_snapshot'
+          ? 1
+          : surface.name === 'lexical_terms'
+            ? ready.lexicalTermCount
+            : physicalCounts.get(surface.source)!,
   }));
 }

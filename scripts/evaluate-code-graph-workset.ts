@@ -1,3 +1,4 @@
+import {requireNativeTypeScriptAsset} from './support/native-typescript-preflight.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
@@ -309,4 +310,7 @@ const sourceGit = Effect.fn('evaluateCodeGraphWorkset.sourceGit')((args: readonl
   }).pipe(Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim))),
 );
 
-if (import.meta.main) BunRuntime.runMain(provideScriptLayer(evaluateCodeGraphWorkset, ApplicationLayer));
+if (import.meta.main) {
+  requireNativeTypeScriptAsset('eval:code-graph-workset');
+  BunRuntime.runMain(provideScriptLayer(evaluateCodeGraphWorkset, ApplicationLayer));
+}

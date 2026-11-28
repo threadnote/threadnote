@@ -31,7 +31,7 @@ const object = (value: unknown): value is Record<string, unknown> =>
 export function nativeInferencePayloadPath(value: unknown): value is string {
   return (
     typeof value === 'string' &&
-    /^(?:runtime\/(?:node-llama-cpp\.js|NATIVE-LICENSE|native\/.+)|llama\/(?:localBuilds\/.+|lastBuild\.json|binariesGithubRelease\.json))$/u.test(
+    /^(?:runtime\/(?:node-llama-cpp\.js|NATIVE-LICENSE|LLAMA-CPP-LICENSE|native\/.+)|llama\/(?:localBuilds\/.+|lastBuild\.json|binariesGithubRelease\.json))$/u.test(
       value,
     ) &&
     EffectArray.every(
@@ -83,6 +83,11 @@ export function parseNativeInferenceOverlay(value: unknown): NativeInferenceOver
       !EffectArray.some(files, file => EffectString.endsWith('/Release/_nlcBuildMetadata.json')(file.path)))
   )
     throw new Error('Native inference local build is missing genuine upstream completion metadata.');
+  if (
+    value.origin === 'portable-local-build' &&
+    !EffectArray.some(files, file => file.path === 'runtime/LLAMA-CPP-LICENSE')
+  )
+    throw new Error('Native inference local build is missing its llama.cpp license notice.');
   return {
     schemaVersion: 1,
     bunVersion: value.bunVersion,
@@ -133,6 +138,7 @@ export const nativeInferenceInventory = Effect.fn('nativeInference.inventoryClos
   for (const relative of [
     'runtime/node-llama-cpp.js',
     'runtime/NATIVE-LICENSE',
+    'runtime/LLAMA-CPP-LICENSE',
     'runtime/native',
     'llama/localBuilds',
     'llama/lastBuild.json',
@@ -173,7 +179,13 @@ export const stageNativeInferenceOverlay = Effect.fn('nativeInference.stage')(fu
   if (path.resolve(sourceRoot) === path.resolve(destinationRoot))
     return yield* verifyNativeInferenceOverlay(sourceRoot);
   const descriptor = yield* verifyNativeInferenceOverlay(sourceRoot);
-  for (const relative of ['runtime/native', 'llama/localBuilds', 'llama/lastBuild.json', NATIVE_INFERENCE_DESCRIPTOR])
+  for (const relative of [
+    'runtime/native',
+    'runtime/LLAMA-CPP-LICENSE',
+    'llama/localBuilds',
+    'llama/lastBuild.json',
+    NATIVE_INFERENCE_DESCRIPTOR,
+  ])
     yield* fs.remove(path.join(destinationRoot, relative), {recursive: true, force: true});
   for (const file of descriptor.files) {
     const destination = path.join(destinationRoot, ...EffectString.split(file.path, '/'));

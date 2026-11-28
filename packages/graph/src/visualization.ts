@@ -972,6 +972,7 @@ export const managerGraphDiagram = Effect.fn('codeGraph.managerDiagram')(functio
         return yield* readCodeGraphDiagram(store, database, {
           question,
           diagramType,
+          threadnoteHome,
           scope: {
             repositoryId: repository.repositoryId,
             repositoryName: repository.displayName,

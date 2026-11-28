@@ -5,8 +5,13 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import {Effect, Layer, Option} from 'effect';
-import {describe, expect, it} from 'vitest';
-import {createRepositoryFactResolver, extractFileFacts} from '@threadnote/graph/extractor';
+import {afterAll, describe, expect, it} from 'vitest';
+import {
+  NativeTypeScriptSessionService,
+  isNativeTypeScriptSource,
+  type NativeTypeScriptSession,
+} from '@threadnote/graph/typescript_runtime';
+import {createRepositoryFactResolver, extractNativeFileFacts} from '@threadnote/graph/extractor';
 import {
   BUILTIN_LANGUAGE_PACK_REGISTRY,
   createCodeGraphLanguagePackRegistry,
@@ -17,6 +22,14 @@ import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {createWorkspaceAttributor, discoverManifestWorkspace} from '@threadnote/graph/workspace';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native, createNativeTypeScriptTestSession} from '@threadnote/graph/test/helpers/native-typescript-session';
+
+// One native session serves this file; each operation has its own budget.
+let nativeSession: Promise<NativeTypeScriptSession> | undefined;
+afterAll(async () => {
+  await (await nativeSession)?.close();
+});
+const currentNativeSession = () => (nativeSession ??= createNativeTypeScriptTestSession());
 
 describe('polyglot code graph language packs', () => {
   effectIt.effect('discovers named TypeScript configs used by project references', () =>
@@ -42,7 +55,7 @@ describe('polyglot code graph language packs', () => {
     }),
   );
 
-  effectIt.effect('preserves the TypeScript compiler extractor behind the registry', () =>
+  native(effectIt.effect)('preserves TypeScript extraction facts and adds registry body derivation evidence', () =>
     Effect.gen(function* () {
       const file = inventoryFile(
         'src/service.ts',
@@ -54,9 +67,27 @@ describe('polyglot code graph language packs', () => {
         export function helper(): string { return 'ok' }
       `,
       );
+      const current = yield* Effect.tryPromise(currentNativeSession);
       const viaRegistry = yield* runExtraction(file);
-      const direct = extractFileFacts(file);
-      expect(viaRegistry).toEqual(direct);
+      const direct = yield* Effect.tryPromise(() => extractNativeFileFacts(file, current));
+      const {derivationInputs, ...registryFacts} = viaRegistry;
+      const {bodyDiscovery, ...otherDerivations} = derivationInputs ?? {};
+      expect(registryFacts).toEqual(direct);
+      expect(otherDerivations).toEqual({});
+      const helperId = Option.getOrUndefined(
+        Option.map(
+          EffectArray.findFirst(viaRegistry.symbols, symbol => symbol.qualifiedName === 'helper'),
+          symbol => symbol.id,
+        ),
+      );
+      expect(helperId).toBeDefined();
+      expect(bodyDiscovery).toMatchObject({
+        version: 1,
+        path: file.path,
+        records: expect.arrayContaining([
+          expect.objectContaining({ownerId: helperId, terms: expect.arrayContaining(['ok'])}),
+        ]),
+      });
       expect(EffectArray.map(viaRegistry.symbols, symbol => [symbol.kind, symbol.qualifiedName])).toEqual(
         expect.arrayContaining([
           ['interface', 'Store'],
@@ -1105,11 +1136,13 @@ describe('polyglot code graph language packs', () => {
       BUILTIN_LANGUAGE_PACK_REGISTRY.activeDerivationIdentities(['Sources/App/Main.swift']),
     );
   });
-  effectIt.effect('keeps rationale derivation out of cached parser facts', () =>
+  native(effectIt.effect)('keeps rationale derivation out of cached parser facts', () =>
     Effect.gen(function* () {
+      const native = yield* Effect.tryPromise(currentNativeSession);
       const file = inventoryFile('src/rationale.ts', '// WHY: preserve parser facts\nexport function run(): void {}\n');
       const provideRuntime = <A, E>(effect: Effect.Effect<A, E, TreeSitterRuntime>) =>
         effect.pipe(
+          Effect.provideService(NativeTypeScriptSessionService, native),
           provideTestLayer(TreeSitterRuntime.layer),
           provideTestLayer(TestSystemInfoLayer),
           provideTestLayer(Layer.merge(BunFileSystem.layer, BunPath.layer)),
@@ -1123,7 +1156,13 @@ describe('polyglot code graph language packs', () => {
   );
 });
 function runExtraction(file: CodeGraphInventoryFile) {
-  return BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(file).pipe(
+  const extract = BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(file);
+  const selected = isNativeTypeScriptSource(file.path)
+    ? Effect.flatMap(Effect.tryPromise(currentNativeSession), session =>
+        extract.pipe(Effect.provideService(NativeTypeScriptSessionService, session)),
+      )
+    : extract;
+  return selected.pipe(
     provideTestLayer(TreeSitterRuntime.layer),
     provideTestLayer(TestSystemInfoLayer),
     provideTestLayer(Layer.merge(BunFileSystem.layer, BunPath.layer)),

@@ -190,6 +190,7 @@ describe('Bun distribution contract', () => {
       expect(version).toMatch(exactVersion);
     }
     expect(lockfile).toContain(`"node-llama-cpp": ["node-llama-cpp@${nodeLlamaCppVersion}"`);
+    expect(nodeLlamaCppVersion).toBe('3.22.2');
     expect(lockfile).toContain(`"postgres": ["postgres@${postgresVersion}"`);
     expect(thirdPartyNotices).toContain(`\`postgres\` ${postgresVersion} (MIT)`);
     expect(lockfile).toContain(`"@types/bun": ["@types/bun@${bunTypesVersion}"`);

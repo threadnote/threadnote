@@ -1,3 +1,4 @@
+import {CONTEXT_BRIEF_NAVIGATION_MODE} from '@threadnote/context/navigation/request';
 import {nativeWaivableGateIds} from '@threadnote/workflow-automations/gates';
 import {nativeCyclePublicationField} from '@threadnote/workflow-automations/cycle';
 import {Array as EffectArray, Effect, Schema} from 'effect';
@@ -490,6 +491,13 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly validationRef: string;
     readonly commitEvidence: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  sameLabelIntegrationHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly snapshotRef: string;
+    readonly reason: string;
+    readonly userAuthority: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
   recoverUnreviewedRebaseHandler?: (options: {
     readonly runId: string;
     readonly callerCwd: string;
@@ -702,6 +710,31 @@ export function makeNativeTaskActionCommands<E, R>(
             }),
           ),
   ).pipe(Command.withDescription('Requalify an exact reviewed predecessor against a newly approved base'));
+  const integrateSameLabelBaseSnapshot = Command.make(
+    'integrate-same-label-base-snapshot',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      snapshotRef: requiredString('snapshot-ref', 'Exact reviewed predecessor reference from workflow task view'),
+      reason: requiredString(
+        'reason',
+        'Why the rewritten same-label base is integrated into the existing reviewed phase lineage',
+      ),
+      userAuthority: requiredString(
+        'user-authority',
+        'Caller-provided human authority statement for this same-label upstream integration; actor identity is not independently authenticated',
+      ),
+    },
+    options =>
+      sameLabelIntegrationHandler
+        ? sameLabelIntegrationHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({
+              code: 'invalid-request',
+              message: 'This task-action command has no same-label integration handler.',
+            }),
+          ),
+  ).pipe(Command.withDescription('Qualify an ancestry-preserving integration of a rewritten same-label upstream base'));
   const recoverUnreviewedRebaseSnapshot = Command.make(
     'recover-unreviewed-rebase-snapshot',
     {
@@ -990,6 +1023,7 @@ export function makeNativeTaskActionCommands<E, R>(
       extendReviewBudget,
       recordSnapshot,
       requalifyBaseSnapshot,
+      integrateSameLabelBaseSnapshot,
       supersedeUnreviewedSnapshot,
       recoverUnreviewedRebaseSnapshot,
       recordReview,
@@ -1056,7 +1090,16 @@ export function makeContextBriefCommand<E, R>(
         'compact',
       ),
       json: boolean('json', 'Print the structured Context Brief projection'),
-      mode: defaultChoice('mode', CONTEXT_BRIEF_MODES, 'Evidence-planning mode', 'brief'),
+      mode: defaultChoice(
+        'mode',
+        [...CONTEXT_BRIEF_MODES, CONTEXT_BRIEF_NAVIGATION_MODE],
+        'Evidence-planning mode; navigate returns a versioned navigation answer',
+        'brief',
+      ),
+      continuation: optionalString(
+        'continuation',
+        'Navigate only: opaque continuation from a prior navigate answer, for the write-boundary follow-up',
+      ),
       project: optionalString('project', 'Optional memory project scope, at most 256 UTF-8 bytes'),
       surface: optionalString('surface', 'Agent catalog surface selector used for compatible procedure admission'),
       task: requiredString('task', 'Engineering task or question, 1-4096 UTF-8 bytes without control characters'),

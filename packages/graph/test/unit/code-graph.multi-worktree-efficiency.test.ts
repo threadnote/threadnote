@@ -19,6 +19,7 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import {native, nativeProperty} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const platform = Layer.effect(
   SystemInfo,
@@ -127,8 +128,8 @@ const fixture = (worktreeCount: number) =>
     const observedParser = CodeGraphParserPool.of({
       ...parser,
       extract: (file, threadnoteHome) => observeExtract(value => parser.extract(value, threadnoteHome))(file),
-      withParserSlot: (threadnoteHome, files, use) =>
-        parser.withParserSlot(threadnoteHome, files, extract => use(observeExtract(extract))),
+      withParserSlot: (threadnoteHome, files, use, lane) =>
+        parser.withParserSlot(threadnoteHome, files, extract => use(observeExtract(extract)), lane),
     });
     const observedStore = CodeGraphStore.of({
       ...store,
@@ -217,9 +218,9 @@ const fixture = (worktreeCount: number) =>
   });
 
 describe('multi-worktree structural indexing efficiency', () => {
-  effectIt.layer(dependencies)(it => {
+  effectIt.layer(dependencies)('with the shared indexer dependencies', it => {
     for (const count of [1, 2, 4, 8]) {
-      it.effect(`reuses warm clean views across ${count} linked worktree(s)`, () =>
+      native(it.effect)(`reuses warm clean views across ${count} linked worktree(s)`, () =>
         Effect.gen(function* () {
           const f = yield* fixture(count);
           const first = yield* f.index(f.worktrees[0]);
@@ -238,7 +239,7 @@ describe('multi-worktree structural indexing efficiency', () => {
           expect(yield* f.reference(f.worktrees[0])).toEqual(expected);
         }).pipe(TestClock.withLive),
       );
-      it.effect(`reuses unchanged files across ${count} nearby-commit linked worktree(s)`, () =>
+      native(it.effect)(`reuses unchanged files across ${count} nearby-commit linked worktree(s)`, () =>
         Effect.gen(function* () {
           const f = yield* fixture(count);
           yield* f.index(f.worktrees[0]);
@@ -259,7 +260,7 @@ describe('multi-worktree structural indexing efficiency', () => {
       );
     }
 
-    it.effect('isolates disjoint dirty worktrees and agrees with independent clean rebuilds', () =>
+    native(it.effect)('isolates disjoint dirty worktrees and agrees with independent clean rebuilds', () =>
       Effect.gen(function* () {
         const f = yield* fixture(2);
         yield* f.index(f.worktrees[0]);
@@ -301,7 +302,7 @@ describe('multi-worktree structural indexing efficiency', () => {
       }).pipe(TestClock.withLive),
     );
 
-    it.effect(
+    native(it.effect)(
       'keeps a cold eight-worktree foreground wave equivalent to serial reference builds',
       () =>
         Effect.gen(function* () {
@@ -327,7 +328,7 @@ describe('multi-worktree structural indexing efficiency', () => {
     );
 
     fcEffectProp(
-      it,
+      nativeProperty(it),
       'incremental dirty values equal an independent serial build',
       [fc.integer({min: 2, max: 1_000})],
       ([value]) =>

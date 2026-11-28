@@ -1,0 +1,846 @@
+--- a/tsc/cmd/tsc/api.go
++++ b/tsc/cmd/tsc/api.go
+@@ -4,8 +4,10 @@
+ 	"context"
+ 	"flag"
+ 	"fmt"
++	"io"
+ 	"os"
+ 	"os/signal"
++	"runtime"
+ 	"strings"
+ 	"syscall"
+ 
+@@ -70,6 +72,17 @@
+ 	}
+ 	if flags.pipePath != "" {
+ 		options.PipePath = flags.pipePath
++		// The original parent stdin is a lifecycle channel, not the RPC pipe.
++		options.In = os.Stdin
++		if runtime.GOOS == "windows" && flags.async {
++			options.PipeBound = func() error {
++				n, err := io.WriteString(os.Stdout, "THREADNOTE_TS_API_BOUND_V1\n")
++				if err == nil && n != len("THREADNOTE_TS_API_BOUND_V1\n") {
++					return io.ErrShortWrite
++				}
++				return err
++			}
++		}
+ 	} else {
+ 		options.In = os.Stdin
+ 		options.Out = os.Stdout
+--- a/tsc/internal/api/server.go
++++ b/tsc/internal/api/server.go
+@@ -2,8 +2,12 @@
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"io"
++	"net"
++	"os"
++	"sync/atomic"
+ 
+ 	"github.com/microsoft/TypeScript/tsc/internal/bundled"
+ 	"github.com/microsoft/TypeScript/tsc/internal/contentmapper"
+@@ -24,6 +28,9 @@
+ 	// PipePath, if set, is the named pipe path on Windows. On Unix, it must
+ 	// not exist and is created as a private directory containing "socket".
+ 	PipePath string
++	// PipeBound observes successful namespace reservation, not connected-peer identity.
++	// It runs only for pipe transports, before Accept, and must not write RPC data.
++	PipeBound func() error
+ 	// Callbacks specifies which filesystem operations should be delegated
+ 	// to the client (e.g., "readFile", "fileExists"). Empty means no callbacks.
+ 	Callbacks []string
+@@ -63,14 +70,16 @@
+ 
+ // Run starts the server and blocks until the connection closes.
+ func (s *StdioServer) Run(ctx context.Context) error {
++	if s.options.PipePath != "" {
++		return s.runPipe(ctx)
++	}
++	return s.runTransport(ctx, nil)
++}
++
++func (s *StdioServer) runTransport(ctx context.Context, pipe ipc.Transport) error {
+ 	var transport ipc.Transport
+-	if s.options.PipePath != "" {
+-		t, err := ipc.NewPipeTransport(s.options.PipePath)
+-		if err != nil {
+-			return fmt.Errorf("failed to create pipe transport: %w", err)
+-		}
+-		defer t.Close()
+-		transport = t
++	if pipe != nil {
++		transport = pipe
+ 	} else {
+ 		t := ipc.NewStdioTransport(s.options.In, s.options.Out)
+ 		defer t.Close()
+@@ -105,10 +114,34 @@
+ 	})
+ 	defer session.Close()
+ 
++	if pipe != nil && ctx.Err() != nil {
++		return ctx.Err()
++	}
++	if pipe != nil && s.options.PipeBound != nil {
++		if err := s.options.PipeBound(); err != nil {
++			return fmt.Errorf("failed to publish pipe namespace reservation: %w", err)
++		}
++	}
++
+ 	// Accept connection from transport
+ 	rwc, err := transport.Accept()
+ 	if err != nil {
+ 		return fmt.Errorf("failed to accept connection: %w", err)
++	}
++
++	defer rwc.Close()
++	var stopConnection func() bool
++	if pipe != nil {
++		closed := make(chan struct{})
++		stopConnection = context.AfterFunc(ctx, func() {
++			_ = rwc.Close()
++			close(closed)
++		})
++		defer func() {
++			if !stopConnection() {
++				<-closed
++			}
++		}()
+ 	}
+ 
+ 	// Create protocol and connection based on async mode
+@@ -131,7 +164,11 @@
+ 	}
+ 	session.SetConnection(conn)
+ 
+-	return serverRunError(ctx, conn.Run(ctx))
++	err = conn.Run(ctx)
++	if pipe != nil {
++		return err
++	}
++	return serverRunError(ctx, err)
+ }
+ 
+ func serverRunError(ctx context.Context, err error) error {
+@@ -140,3 +177,92 @@
+ 	}
+ 	return err
+ }
++
++// errPipeParentEOF is internal lifecycle evidence from the original parent pipe.
++// Neither a protocol error nor arbitrary context cancellation is a clean close.
++var errPipeParentEOF = errors.New("original API parent stdin closed")
++
++func (s *StdioServer) runPipe(parent context.Context) error {
++	transport, err := ipc.NewPipeTransport(s.options.PipePath)
++	if err != nil {
++		return fmt.Errorf("failed to create pipe transport: %w", err)
++	}
++	ctx, cancel := context.WithCancelCause(parent)
++	defer cancel(context.Canceled)
++	closed := make(chan struct{})
++	stopClose := context.AfterFunc(ctx, func() {
++		_ = transport.Close()
++		close(closed)
++	})
++	defer func() {
++		if stopClose() {
++			_ = transport.Close()
++		} else {
++			<-closed
++		}
++	}()
++	finishInput := func() {}
++	if s.options.In != nil {
++		done := make(chan struct{})
++		var closingInput atomic.Bool
++		go func() {
++			defer close(done)
++			var byte [1]byte
++			n, readErr := s.options.In.Read(byte[:])
++			if n != 0 {
++				cancel(errors.New("unexpected data on API parent lifecycle stream"))
++			} else if errors.Is(readErr, io.EOF) {
++				cancel(errPipeParentEOF)
++			} else if readErr != nil {
++				if !closingInput.Load() || (!errors.Is(readErr, os.ErrClosed) && !errors.Is(readErr, io.ErrClosedPipe)) {
++					cancel(fmt.Errorf("API parent lifecycle read failed: %w", readErr))
++				}
++			} else {
++				cancel(errors.New("API parent lifecycle read made no progress"))
++			}
++		}()
++		finishInput = func() {
++			closingInput.Store(true)
++			_ = s.options.In.Close()
++			<-done
++		}
++		defer finishInput()
++	}
++	err = s.runTransport(ctx, transport)
++	// Join the lifecycle reader before deciding success. Teardown-induced closed
++	// reads are ignored; bytes, EOF and actual read failures are never discarded.
++	finishInput()
++	cause := context.Cause(ctx)
++	if parent.Err() != nil {
++		return errors.Join(parent.Err(), err)
++	}
++	if errors.Is(cause, errPipeParentEOF) {
++		if pipeLifecycleCloseError(err) {
++			return nil
++		}
++		return err
++	}
++	if cause != nil {
++		return errors.Join(cause, err)
++	}
++	return err
++}
++
++// A joined real request/reader fault must survive concurrent lifecycle closure.
++func pipeLifecycleCloseError(err error) bool {
++	if err == nil {
++		return true
++	}
++	if joined, ok := err.(interface{ Unwrap() []error }); ok {
++		for _, nested := range joined.Unwrap() {
++			if !pipeLifecycleCloseError(nested) {
++				return false
++			}
++		}
++		return true
++	}
++	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
++		return pipeLifecycleCloseError(wrapped.Unwrap())
++	}
++	return err == net.ErrClosed || err == io.ErrClosedPipe || err == context.Canceled
++}
+--- a/tsc/internal/api/server_test.go
++++ b/tsc/internal/api/server_test.go
+@@ -3,7 +3,16 @@
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
++	"github.com/microsoft/TypeScript/tsc/internal/ipc"
++	"github.com/microsoft/TypeScript/tsc/internal/tspath"
++	"io"
++	"net"
++	"os"
++	"path/filepath"
++	"runtime"
+ 	"testing"
++	"time"
+ 
+ 	"gotest.tools/v3/assert"
+ )
+@@ -36,3 +45,183 @@
+ 		assert.NilError(t, serverRunError(ctx, errors.New("server failed")))
+ 	})
+ }
++
++// These tests exercise the real listener and server, without a synthetic native owner.
++func pipeLifecycleOptions(t *testing.T) *StdioServerOptions {
++	t.Helper()
++	root := t.TempDir()
++	// Unix socket paths have a small kernel bound; test names and subtest paths
++	// must not become the transport address, even with a private short TMPDIR.
++	socketRoot, err := os.MkdirTemp("", "api-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = os.Remove(socketRoot) }) // never remove a live socket tree
++	pipe := filepath.Join(socketRoot, "api")
++	if runtime.GOOS == "windows" {
++		pipe = ipc.GeneratePipePath(filepath.Base(socketRoot))
++	}
++	return &StdioServerOptions{PipePath: pipe, Cwd: tspath.ToRootedDirectoryPath(root, ""), Async: true}
++}
++
++func awaitPipeRun(t *testing.T, result <-chan error) error {
++	t.Helper()
++	select {
++	case err := <-result:
++		return err
++	case <-time.After(5 * time.Second):
++		t.Fatal("original API server did not finish")
++		return nil
++	}
++}
++
++func TestPipeBoundRefusalClosesNamespace(t *testing.T) {
++	options := pipeLifecycleOptions(t)
++	refusal := errors.New("bound output failed")
++	calls := 0
++	options.PipeBound = func() error { calls++; return refusal }
++	err := NewStdioServer(options).Run(context.Background())
++	if !errors.Is(err, refusal) || calls != 1 {
++		t.Fatalf("bound result = %v, calls = %d", err, calls)
++	}
++	// Rebind proves the original reservation and Unix directory were released.
++	rebound, err := ipc.NewPipeTransport(options.PipePath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer rebound.Close()
++	options.PipeBound = func() error { t.Fatal("failed bind published ready"); return nil }
++	if err := NewStdioServer(options).Run(context.Background()); err == nil {
++		t.Fatal("existing namespace accepted")
++	}
++}
++
++func TestPipeParentEOFFinishesUnusedServer(t *testing.T) {
++	options := pipeLifecycleOptions(t)
++	reader, writer := io.Pipe()
++	options.In = reader
++	defer writer.Close()
++	bound := make(chan struct{})
++	options.PipeBound = func() error { close(bound); return nil }
++	result := make(chan error, 1)
++	go func() { result <- NewStdioServer(options).Run(context.Background()) }()
++	select {
++	case <-bound:
++	case err := <-result:
++		t.Fatalf("server failed before namespace reservation: %v", err)
++	case <-time.After(5 * time.Second):
++		t.Fatal("namespace not bound")
++	}
++	if err := writer.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := awaitPipeRun(t, result); err != nil {
++		t.Fatal(err)
++	}
++	rebound, err := ipc.NewPipeTransport(options.PipePath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer rebound.Close()
++}
++
++func TestPipeParentLifecycleFailuresRemainFailures(t *testing.T) {
++	for _, kind := range []string{"bytes", "read-error", "cancel"} {
++		t.Run(kind, func(t *testing.T) {
++			options := pipeLifecycleOptions(t)
++			reader, writer := io.Pipe()
++			options.In = reader
++			defer writer.Close()
++			bound := make(chan struct{})
++			options.PipeBound = func() error { close(bound); return nil }
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			result := make(chan error, 1)
++			go func() { result <- NewStdioServer(options).Run(ctx) }()
++			select {
++			case <-bound:
++			case err := <-result:
++				t.Fatalf("server failed before namespace reservation: %v", err)
++			case <-time.After(5 * time.Second):
++				t.Fatal("namespace not bound")
++			}
++			original := errors.New("original lifecycle read fault")
++			switch kind {
++			case "bytes":
++				if _, err := writer.Write([]byte{1}); err != nil {
++					t.Fatal(err)
++				}
++			case "read-error":
++				_ = writer.CloseWithError(original)
++			case "cancel":
++				cancel()
++			}
++			err := awaitPipeRun(t, result)
++			if err == nil {
++				t.Fatal("lifecycle failure became clean close")
++			}
++			if kind == "read-error" && !errors.Is(err, original) {
++				t.Fatalf("lost original error: %v", err)
++			}
++			if kind == "cancel" && !errors.Is(err, context.Canceled) {
++				t.Fatalf("lost original cancel: %v", err)
++			}
++		})
++	}
++}
++
++func TestPipeParentEOFClosesAcceptedConnection(t *testing.T) {
++	if runtime.GOOS == "windows" {
++		t.Skip("public Windows connector is qualified by the original Windows runtime case")
++	}
++	options := pipeLifecycleOptions(t)
++	reader, writer := io.Pipe()
++	options.In = reader
++	defer writer.Close()
++	bound := make(chan struct{})
++	options.PipeBound = func() error { close(bound); return nil }
++	result := make(chan error, 1)
++	go func() { result <- NewStdioServer(options).Run(context.Background()) }()
++	select {
++	case <-bound:
++	case err := <-result:
++		t.Fatalf("server failed before namespace reservation: %v", err)
++	case <-time.After(5 * time.Second):
++		t.Fatal("namespace not bound")
++	}
++	client, err := net.Dial("unix", filepath.Join(options.PipePath, "socket"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.Close()
++	// Send one real JSON-RPC notification then hold the read loop open.
++	if _, err := io.WriteString(client, "Content-Length: 42\r\n\r\n{\"jsonrpc\":\"2.0\",\"method\":\"unknownNotice\"}"); err != nil {
++		t.Fatal(err)
++	}
++	if err := writer.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := awaitPipeRun(t, result); err != nil {
++		t.Fatal(err)
++	}
++	_ = client.SetReadDeadline(time.Now().Add(time.Second))
++	var byte [1]byte
++	if _, err := client.Read(byte[:]); err == nil {
++		t.Fatal("accepted connection remained open")
++	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
++		t.Fatal("accepted connection was not closed")
++	}
++}
++
++func TestPipeLifecycleCloseDoesNotMaskRequestFailure(t *testing.T) {
++	original := errors.New("original request failure")
++	if pipeLifecycleCloseError(errors.Join(io.ErrClosedPipe, original)) {
++		t.Fatal("close masked original joined failure")
++	}
++	if pipeLifecycleCloseError(fmt.Errorf("wrapped: %w", original)) {
++		t.Fatal("wrapper masked original failure")
++	}
++	if !pipeLifecycleCloseError(fmt.Errorf("wrapped: %w", io.ErrClosedPipe)) {
++		t.Fatal("actual lifecycle close not recognized")
++	}
++}
+--- a/tsc/internal/ipc/transport.go
++++ b/tsc/internal/ipc/transport.go
+@@ -4,6 +4,7 @@
+ 	"errors"
+ 	"io"
+ 	"net"
++	"sync"
+ )
+ 
+ // Transport is an interface for accepting connections from API clients.
+@@ -18,6 +19,8 @@
+ type PipeTransport struct {
+ 	listener net.Listener
+ 	cleanup  func() error
++	closeMu  sync.Mutex
++	closed   bool
+ }
+ 
+ // NewPipeTransport creates a new pipe transport.
+@@ -53,11 +56,31 @@
+ 
+ // Close implements Transport.
+ func (t *PipeTransport) Close() error {
++	t.closeMu.Lock()
++	defer t.closeMu.Unlock()
++	if t.closed {
++		return net.ErrClosed
++	}
++	t.closed = true
+ 	closeErr := t.listener.Close()
+-	if t.cleanup == nil || errors.Is(closeErr, net.ErrClosed) {
++	if errors.Is(closeErr, net.ErrClosed) {
++		closeErr = nil
++	}
++	if t.cleanup == nil {
+ 		return closeErr
+ 	}
+ 	return errors.Join(closeErr, t.cleanup())
++}
++
++// StopAccepting preserves this transport's namespace for its one accepted
++// connection. Close must still run after that connection finishes. In particular,
++// repeated Close cannot remove a replacement namespace created after cleanup.
++func (t *PipeTransport) StopAccepting() error {
++	err := t.listener.Close()
++	if errors.Is(err, net.ErrClosed) {
++		return nil
++	}
++	return err
+ }
+ 
+ // Path returns the path of the pipe/socket.
+--- a/tsc/internal/ipc/transport_unix.go
++++ b/tsc/internal/ipc/transport_unix.go
+@@ -48,6 +48,9 @@
+ 	if err != nil {
+ 		return nil, nil, errors.Join(fmt.Errorf("listen on private socket: %w", err), cleanup())
+ 	}
++	// Namespace cleanup belongs to PipeTransport.Close, after its accepted
++	// connection ends; stopping a one-shot listener must retain the socket inode.
++	listener.(*net.UnixListener).SetUnlinkOnClose(false)
+ 	if err := os.Chmod(socketPath, 0o600); err != nil { //nolint:forbidigo
+ 		return nil, nil, errors.Join(fmt.Errorf("set private socket permissions: %w", err), listener.Close(), cleanup())
+ 	}
+--- a/tsc/internal/ipc/transport_unix_test.go
++++ b/tsc/internal/ipc/transport_unix_test.go
+@@ -5,6 +5,7 @@
+ import (
+ 	"errors"
+ 	"fmt"
++	"io"
+ 	"net"
+ 	"os"
+ 	"os/exec"
+@@ -101,3 +102,70 @@
+ 		t.Fatalf("%s mode = %04o, want %04o", path, got, want)
+ 	}
+ }
++
++func TestPipeTransportStopAcceptingRetainsNamespace(t *testing.T) {
++	transport, err := NewPrivatePipeTransport("tsgo-api-one-shot")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer transport.Close()
++	path := transport.Path()
++	before, err := os.Lstat(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	accepted := make(chan net.Conn, 1)
++	failed := make(chan error, 1)
++	go func() {
++		connection, err := transport.Accept()
++		if err != nil {
++			failed <- err
++			return
++		}
++		accepted <- connection.(net.Conn)
++	}()
++	client, err := net.DialTimeout("unix", path, time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.Close()
++	var server net.Conn
++	select {
++	case server = <-accepted:
++	case err := <-failed:
++		t.Fatal(err)
++	case <-time.After(time.Second):
++		t.Fatal("one-shot accept did not finish")
++	}
++	defer server.Close()
++	if err := transport.StopAccepting(); err != nil {
++		t.Fatal(err)
++	}
++	after, err := os.Lstat(path)
++	if err != nil || !os.SameFile(before, after) {
++		t.Fatalf("active namespace changed: %v", err)
++	}
++	if second, err := net.DialTimeout("unix", path, time.Second); err == nil {
++		second.Close()
++		t.Fatal("one-shot listener admitted another connection")
++	}
++	_ = server.SetDeadline(time.Now().Add(time.Second))
++	if _, err := client.Write([]byte{7}); err != nil {
++		t.Fatal(err)
++	}
++	var byte [1]byte
++	if _, err := io.ReadFull(server, byte[:]); err != nil || byte[0] != 7 {
++		t.Fatalf("accepted connection lost: %v", err)
++	}
++	_ = server.Close()
++	_ = client.Close()
++	if err := transport.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := os.Lstat(path); !os.IsNotExist(err) {
++		t.Fatalf("finished socket remains: %v", err)
++	}
++	if _, err := os.Lstat(filepath.Dir(path)); !os.IsNotExist(err) {
++		t.Fatalf("finished private directory remains: %v", err)
++	}
++}
+--- a/tsc/internal/ipc/transport_windows.go
++++ b/tsc/internal/ipc/transport_windows.go
+@@ -19,7 +19,10 @@
+ 	listener, err := winio.ListenPipe(path, &winio.PipeConfig{
+ 		SecurityDescriptor: "D:P(A;;GA;;;" + user.User.Sid.String() + ")",
+ 	})
+-	return listener, nil, err
++	if err != nil {
++		return nil, nil, err
++	}
++	return &windowsPipeListener{listener}, nil, nil
+ }
+ 
+ func newPrivatePipeListener(name string) (net.Listener, func() error, error) {
+@@ -30,3 +33,35 @@
+ func GeneratePipePath(name string) string {
+ 	return `\\.\pipe\` + name
+ }
++
++// The native winio close sentinel is distinct from net.ErrClosed. Normalize only
++// that exact leaf at the original accepted connection boundary, before protocol
++// wrappers can add context; never suppress a joined or unrelated request fault.
++type windowsPipeListener struct{ net.Listener }
++
++func (listener *windowsPipeListener) Accept() (net.Conn, error) {
++	connection, err := listener.Listener.Accept()
++	if err != nil {
++		return nil, err
++	}
++	return &windowsPipeConnection{connection}, nil
++}
++
++type windowsPipeConnection struct{ net.Conn }
++
++func windowsPipeIOError(err error) error {
++	if err == winio.ErrFileClosed {
++		return net.ErrClosed
++	}
++	return err
++}
++
++func (connection *windowsPipeConnection) Read(bytes []byte) (int, error) {
++	n, err := connection.Conn.Read(bytes)
++	return n, windowsPipeIOError(err)
++}
++
++func (connection *windowsPipeConnection) Write(bytes []byte) (int, error) {
++	n, err := connection.Conn.Write(bytes)
++	return n, windowsPipeIOError(err)
++}
+--- a/tsc/internal/ipc/transport_windows_test.go
++++ b/tsc/internal/ipc/transport_windows_test.go
+@@ -3,7 +3,9 @@
+ package ipc
+ 
+ import (
++	"errors"
+ 	"fmt"
++	"net"
+ 	"os"
+ 	"testing"
+ 	"time"
+@@ -74,3 +76,66 @@
+ 		t.Fatalf("pipe security descriptor = %s, want %s", got, want)
+ 	}
+ }
++
++func TestPipeAcceptedConnectionCloseRetainsNetClosed(t *testing.T) {
++	transport, err := NewPrivatePipeTransport(fmt.Sprintf("tsgo-api-close-%d-%d", os.Getpid(), time.Now().UnixNano()))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer transport.Close()
++	accepted := make(chan net.Conn, 1)
++	failure := make(chan error, 1)
++	go func() {
++		connection, err := transport.Accept()
++		if err != nil {
++			failure <- err
++			return
++		}
++		accepted <- connection.(net.Conn)
++	}()
++	timeout := time.Second
++	client, err := winio.DialPipe(transport.Path(), &timeout)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.Close()
++	var server net.Conn
++	select {
++	case server = <-accepted:
++	case err := <-failure:
++		t.Fatal(err)
++	case <-time.After(timeout):
++		t.Fatal("original pipe did not accept")
++	}
++	defer server.Close()
++	reading := make(chan struct{})
++	readResult := make(chan error, 1)
++	go func() {
++		close(reading)
++		var byte [1]byte
++		_, err := server.Read(byte[:])
++		readResult <- err
++	}()
++	<-reading
++	// Both already pending and newly entered reads must report the same exact
++	// local-close disposition. Scheduler ordering is not a kernel-pending proof.
++	if err := server.Close(); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case err := <-readResult:
++		if !errors.Is(err, net.ErrClosed) {
++			t.Fatalf("closed accepted read = %v", err)
++		}
++	case <-time.After(timeout):
++		t.Fatal("closed accepted read did not return")
++	}
++	if _, err := server.Write([]byte{1}); !errors.Is(err, net.ErrClosed) {
++		t.Fatalf("closed accepted write = %v", err)
++	}
++	original := errors.New("original request fault")
++	joined := errors.Join(original, winio.ErrFileClosed)
++	if windowsPipeIOError(joined) != joined || windowsPipeIOError(original) != original {
++		t.Fatal("native close normalization suppressed a real error")
++	}
++}
+--- a/tsc/internal/lsp/server.go
++++ b/tsc/internal/lsp/server.go
+@@ -2414,15 +2414,21 @@
+ 	go func() {
+ 		defer close(state.done)
+ 		defer apiCancel()
++		defer transport.Close()
+ 		defer func() {
+ 			apiSession.Close()
+ 			s.removeAPISession(apiSession.ID())
+ 		}()
+ 
+ 		rwc, acceptErr := transport.Accept()
+-		_ = transport.Close()
++		stopErr := transport.StopAccepting()
+ 		if acceptErr != nil {
+ 			s.logger.Errorf("API session %s: failed to accept connection: %v", apiSession.ID(), acceptErr)
++			return
++		}
++		if stopErr != nil {
++			_ = rwc.Close()
++			s.logger.Errorf("API session %s: failed to stop accepting: %v", apiSession.ID(), stopErr)
+ 			return
+ 		}
+ 		if !state.attachConnection(rwc) {
+--- a/tsc/internal/lsp/server_test.go
++++ b/tsc/internal/lsp/server_test.go
+@@ -4,10 +4,16 @@
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"github.com/microsoft/TypeScript/tsc/internal/ipc"
+ 	"io"
++	"net"
++	"os"
++	"path/filepath"
++	"runtime"
+ 	"strings"
+ 	"sync"
+ 	"testing"
++	"time"
+ 
+ 	"github.com/microsoft/TypeScript/tsc/internal/bundled"
+ 	"github.com/microsoft/TypeScript/tsc/internal/jsonrpc"
+@@ -509,3 +515,69 @@
+ 		t.Errorf("did not receive the subsequent well-formed response (write loop likely died)")
+ 	}
+ }
++
++func TestServerAPIOneShotNamespaceSurvivesAcceptedSession(t *testing.T) {
++	if runtime.GOOS == "windows" {
++		t.Skip("Windows public connector/namespace proof belongs to actual Windows qualification")
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	server := newProtocolExitServer(t, ctx, shutdownTestReader{}, shutdownTestWriter{})
++	server.backgroundCtx = ctx
++	defer server.closeAPISessions()
++	issued, err := server.handleInitializeAPISession(ctx, &lsproto.InitializeAPISessionParams{}, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	server.apiSessionsMu.Lock()
++	state := server.apiSessions[issued.SessionId]
++	server.apiSessionsMu.Unlock()
++	if state == nil {
++		t.Fatal("original API session not retained")
++	}
++	before, err := os.Lstat(issued.Pipe)
++	if err != nil {
++		t.Fatal(err)
++	}
++	client, err := net.DialTimeout("unix", issued.Pipe, time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.Close()
++	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
++	protocol := ipc.NewJSONRPCProtocol(client)
++	if err := protocol.WriteRequest(jsonrpc.NewIDInt(1), "initialize", nil); err != nil {
++		t.Fatal(err)
++	}
++	response, err := protocol.ReadMessage()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !response.IsResponse() || response.Error != nil {
++		t.Fatalf("actual API initialization failed: %v", response.Error)
++	}
++	// A real response is an ordering barrier after the one original accept and
++	// listener stop, not a sleep or a fake observed connection.
++	after, err := os.Lstat(issued.Pipe)
++	if err != nil || !os.SameFile(before, after) {
++		t.Fatalf("active API lost its original namespace: %v", err)
++	}
++	if second, err := net.DialTimeout("unix", issued.Pipe, time.Second); err == nil {
++		second.Close()
++		t.Fatal("one-shot API listener admitted another connection")
++	}
++	if err := client.Close(); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-state.done:
++	case <-time.After(5 * time.Second):
++		t.Fatal("original API connection/session cleanup did not join")
++	}
++	if _, err := os.Lstat(issued.Pipe); !os.IsNotExist(err) {
++		t.Fatalf("finished API socket remains: %v", err)
++	}
++	if _, err := os.Lstat(filepath.Dir(issued.Pipe)); !os.IsNotExist(err) {
++		t.Fatalf("finished API directory remains: %v", err)
++	}
++}
+diff --git a/tsc/go.mod b/tsc/go.mod
+index 9d7fefcba..541e8782d 100644
+--- a/tsc/go.mod
++++ b/tsc/go.mod
+@@ -3,7 +3,7 @@ module github.com/microsoft/TypeScript/tsc
+ go 1.27
+ 
+ require (
+-	github.com/Microsoft/go-winio v0.6.2
++	github.com/Microsoft/go-winio v0.6.3
+ 	github.com/google/go-cmp v0.7.0
+ 	github.com/klauspost/compress v1.20.0
+ 	github.com/mackerelio/go-osstat v0.2.8
+diff --git a/tsc/go.sum b/tsc/go.sum
+index 943d815a1..1c1129f6c 100644
+--- a/tsc/go.sum
++++ b/tsc/go.sum
+@@ -1,5 +1,5 @@
+-github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
+-github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
++github.com/Microsoft/go-winio v0.6.3 h1:M/52tsoyTfwaxajLnXZm7PqkbMGRH8iSWP+8fcg9MQ4=
++github.com/Microsoft/go-winio v0.6.3/go.mod h1:ma0QpxizD4fyyzJ1C7MIblymTD2Nxz5Mho/3CepwIZg=
+ github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
+ github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+ github.com/klauspost/compress v1.20.0 h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=
+@@ -14,6 +14,8 @@ github.com/peter-evans/patience v0.3.0 h1:rX0JdJeepqdQl1Sk9c9uvorjYYzL2TfgLX1adq
+ github.com/peter-evans/patience v0.3.0/go.mod h1:Kmxu5sY1NmBLFSStvXjX1wS9mIv7wMcP/ubucyMOAu0=
+ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRIccs7FGNTlIRMkT8wgtp5eCXdBlqhYGL6U=
+ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
++github.com/sirupsen/logrus v1.10.2 h1:G2SED73/qrAu6YwbdxOD6peLkCBI3z7L+ykJFTXJBBo=
++github.com/sirupsen/logrus v1.10.2/go.mod h1:SLEg8TqYulVKKfIGHldVp2K2aYz2DKSVBq4g/H5bR7Q=
+ github.com/zeebo/assert v1.3.0 h1:g7C04CbJuIDKNPFHmsk4hwZDO5O+kntRxzaUoNXj+IQ=
+ github.com/zeebo/assert v1.3.0/go.mod h1:Pq9JiuJQpG8JLJdtkwrJESF0Foym2/D9XMU5ciN/wJ0=
+ github.com/zeebo/xxh3 v1.1.0 h1:s7DLGDK45Dyfg7++yxI0khrfwq9661w9EN78eP/UZVs=

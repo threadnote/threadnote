@@ -455,7 +455,9 @@ function citationFinding(
     if (!includeCoverageFindings && receipt.provenance === 'historical-verified') return [];
     if (
       !includeCoverageFindings &&
-      ['citation-limit', 'graph-incomplete', 'graph-stale', 'validation-error'].includes(receipt.reason)
+      ['citation-limit', 'extraction-unavailable', 'graph-incomplete', 'graph-stale', 'validation-error'].includes(
+        receipt.reason,
+      )
     )
       return [];
     return [

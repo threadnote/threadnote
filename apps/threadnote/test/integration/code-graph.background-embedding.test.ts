@@ -37,12 +37,13 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fixtureLayer, manifest} from '../fixtures/code-graph-embedding-worker-child.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 /** Real registered route, real discovery/index/query/storage; only model and process boundaries are held in-process. */
 for (const scoped of [false, true])
-  effectIt.effect(
+  native(effectIt.effect)(
     `registered ${scoped ? 'scoped monorepo' : 'full-repository'} automatic index returns structure while inference is held, then semantic-only evidence without reindex`,
     () => {
       const inferenceStarted = Deferred.makeUnsafe<void>();

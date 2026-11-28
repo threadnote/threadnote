@@ -40,6 +40,7 @@ import {codeGraphDiagramMcpResponse} from '../../src/mcp/code_graph_diagram_proj
 import {runEffect} from '../helpers/effect-runtime.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {skipWithoutNativeTypeScript} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const graphResponseProjectionSchema = Schema.Struct({
   continuation: Schema.optional(Schema.Struct({cursor: Schema.optional(Schema.String)})),
@@ -49,6 +50,7 @@ const graphResponseProjectionSchema = Schema.Struct({
   output: Schema.Struct({returnedEdges: Schema.Finite, returnedNodes: Schema.Finite}),
   repository: Schema.Unknown,
   snapshot: Schema.Unknown,
+  sourceVersion: Schema.Finite,
   trust: Schema.Unknown,
 });
 
@@ -179,7 +181,8 @@ describe('MCP code graph response format', () => {
     }),
   );
 
-  it('preserves the complete projected graph across explicit dual/text and default agent formats', async () => {
+  it('preserves the complete projected graph across explicit dual/text and default agent formats', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = mkdtempSync(join(tmpdir(), 'threadnote-graph-format-'));
     const repository = join(root, 'repository');
     const home = join(root, 'home');
@@ -294,6 +297,7 @@ describe('MCP code graph response format', () => {
           operation: dualProjection.operation,
           repository: dualProjection.repository,
           snapshot: dualProjection.snapshot,
+          sourceVersion: dualProjection.sourceVersion,
           trust: dualProjection.trust,
         });
         expect(parsed.nodes).toEqual(expect.arrayContaining([...dualProjection.nodes]));
@@ -350,6 +354,14 @@ describe('MCP code graph response format', () => {
         }).totalBytes;
         const measuredTextBytes = measureAgentToolResponse({text: textOnly}).totalBytes;
         const measuredAgentBytes = measureAgentToolResponse({text: agentOnly}).totalBytes;
+        if (query.id === 'documentation-recovery') {
+          expect(dual.structuredContent).toMatchObject({
+            output: {returnedEdges: 1, returnedNodes: 1, totalEdges: 12, totalNodes: 8, truncated: true},
+            warnings: expect.arrayContaining(['Budget truncated.']),
+          });
+          expect(parsed.output).toMatchObject({returnedEdges: 2, returnedNodes: 2});
+          expect(measuredDualBytes).toBeLessThanOrEqual(800 * 3);
+        }
         dualBytes += measuredDualBytes;
         textBytes += measuredTextBytes;
         agentBytes += measuredAgentBytes;
@@ -384,7 +396,8 @@ describe('MCP code graph response format', () => {
     }
   }, 120_000);
 
-  it('returns complete Mermaid and evidence for one scoped ready snapshot', async () => {
+  it('returns complete Mermaid and evidence for one scoped ready snapshot', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = mkdtempSync(join(tmpdir(), 'threadnote-mcp-mermaid-'));
     const home = join(root, 'home');
     const manifestPath = join(home, 'seed-manifest.yaml');
@@ -671,7 +684,8 @@ describe('MCP code graph response format', () => {
     }
   }, 30_000);
 
-  it('reconstructs more than 2 MiB from text and preserves broker parts across release changes', async () => {
+  it('reconstructs more than 2 MiB from text and preserves broker parts across release changes', async context => {
+    skipWithoutNativeTypeScript(context);
     const root = mkdtempSync(join(tmpdir(), 'threadnote-mcp-large-diagram-'));
     const home = join(root, 'home');
     const repository = join(root, 'repository');

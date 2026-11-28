@@ -39,6 +39,7 @@ import {verifyAutomaticMaintenanceReviewSource} from '../../src/memory/context/m
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 const selectorPin = () =>
   createMemoryCodeCitation({
@@ -374,10 +375,12 @@ describe('automatic current symbol capture', () => {
     );
   });
 
-  effectIt.effect.each([
-    {previousExtractor: true, label: 'previous extractor'},
-    {previousExtractor: false, label: 'genuine old pin8 to approved9'},
-  ])(
+  native(
+    effectIt.effect.each([
+      {previousExtractor: true, label: 'previous extractor'},
+      {previousExtractor: false, label: 'genuine old pin8 to approved9'},
+    ]),
+  )(
     'persists bounded current symbol support through real approval and canonical-only fresh-home drift ($label)',
     ({previousExtractor}) =>
       Effect.gen(function* () {

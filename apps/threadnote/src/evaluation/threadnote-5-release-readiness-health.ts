@@ -603,6 +603,7 @@ function isCitationValidationReceipt(value: unknown): boolean {
         'ambiguous-relocation',
         'citation-limit',
         'exact',
+        'extraction-unavailable',
         'extractor-mismatch',
         'graph-incomplete',
         'graph-stale',

@@ -1,11 +1,11 @@
+import {isLexicalV2Snapshot, lexicalSnapshotLayoutMode} from '../store/lexical_projection.js';
+import * as EffectString from 'effect/String';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect} from 'effect';
 import {readCodeGraphBuildStatuses} from '../build_status.js';
 import type {CodeGraphLayout} from '../layout.js';
 import type {CodeGraphStoreShape} from '../store.js';
 import type {RepositoryIdentity} from '../types.js';
-import * as EffectString from 'effect/String';
-import * as Effect2 from 'effect';
 
 /** Reuse the exact snapshot published by a concurrent owner of the same request. */
 export const completedConcurrentSnapshot = Effect.fn('codeGraph.completedConcurrentSnapshot')(function* (
@@ -30,7 +30,10 @@ export const completedConcurrentSnapshot = Effect.fn('codeGraph.completedConcurr
     ready.dirty !== overlay.dirty ||
     (overlay.dirty &&
       requireDirectFull &&
-      (ready.baseSnapshotId !== undefined || !Effect2.pipe(ready.id, EffectString.endsWith('-direct'))))
+      (ready.baseSnapshotId !== undefined ||
+        (isLexicalV2Snapshot(ready.id)
+          ? lexicalSnapshotLayoutMode(ready) !== 'direct'
+          : !EffectString.endsWith('-direct')(ready.id))))
   ) {
     return undefined;
   }

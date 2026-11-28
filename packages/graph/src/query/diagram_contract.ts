@@ -56,6 +56,10 @@ const CoverageSite = {
   path: Schema.optionalKey(Schema.String),
   span: Schema.optionalKey(Span),
 };
+export const CodeGraphDiagramGapSchema = Schema.Struct({
+  ...CoverageSite,
+  kind: Schema.Literals(['unresolved-target', 'missing-evidence', 'partial-project', 'interrupted']),
+});
 const Coverage = Schema.Struct({
   completeness: Schema.Literals(['complete', 'incomplete', 'undetermined']),
   subject: Schema.optionalKey(Subject),
@@ -65,12 +69,7 @@ const Coverage = Schema.Struct({
       kind: Schema.Literals(['external', 'outside-scope']),
     }),
   ),
-  gaps: Schema.Array(
-    Schema.Struct({
-      ...CoverageSite,
-      kind: Schema.Literals(['unresolved-target', 'missing-evidence', 'partial-project', 'interrupted']),
-    }),
-  ),
+  gaps: Schema.Array(CodeGraphDiagramGapSchema),
 });
 const Base = {
   scope: Scope,

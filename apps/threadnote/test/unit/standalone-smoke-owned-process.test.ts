@@ -213,6 +213,7 @@ effectIt.effect('the model-load control exits without a reply or stdin EOF after
       JSON.stringify({buildOptions: {gpu: false, arch: process.arch, platform: 'win'}}),
     );
     yield* fs.writeFileString(path.join(path.dirname(build), 'buildDone.status'), 'done');
+    yield* fs.writeFileString(path.join(candidate, 'runtime', 'LLAMA-CPP-LICENSE'), 'fixture llama.cpp notice');
     yield* publishNativeInferenceOverlay(candidate, {
       bunVersion: '1.4.4',
       bunTarget: nativeInferenceHostTarget(),

@@ -69,8 +69,8 @@ export const CONTEXT_BRIEF_MAXIMUM_CITATION_VALIDATIONS = 96 as const;
 export const CONTEXT_BRIEF_MAXIMUM_CITED_REPOSITORIES = 32 as const;
 export type {ContextHealthCitationSourceExcerptV1} from './citation/evidence_excerpt.js';
 import {
+  checkHistoricalCitationBytes,
   citationSourceExcerpt,
-  historicalCitationBytesMatch,
   historicalSnapshotCitationMatches,
   type ContextHealthCitationSourceExcerptV1,
 } from './citation/evidence_excerpt.js';
@@ -290,6 +290,7 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
             continue;
           }
           let recovered: ContextBriefCitationValidationReceiptV2 | undefined;
+          const extraction: HistoricalExtractionObservation = {unavailable: false};
           for (const route of resolution.routes) {
             if (policy === 'brief' && route.aliasProof === undefined) continue;
             recovered = yield* Effect.gen(function* () {
@@ -378,16 +379,28 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
                 }
               }
               if (policy === 'brief') return undefined;
-              const historical = yield* recoverHistoricalCitationEvidence(config, route, citation, original);
+              const historical = yield* recoverHistoricalCitationEvidence(
+                config,
+                route,
+                citation,
+                original,
+                extraction,
+              );
               return historical === undefined ? undefined : {...historical, recovery};
             }).pipe(Effect.orElseSucceed(() => undefined));
             if (recovered !== undefined) break;
           }
           const retained =
             policy === 'health' && recovered === undefined
-              ? yield* recoverCapsuleCitationEvidence(config, resolution.checkoutIds, citation, original)
+              ? yield* recoverCapsuleCitationEvidence(config, resolution.checkoutIds, citation, original, extraction)
               : undefined;
-          receipts.push(recovered ?? retained ?? {...original, provenance: 'unverified'});
+          receipts.push(
+            recovered ??
+              retained ??
+              (extraction.unavailable
+                ? extractionUnavailableReceipt(original)
+                : {...original, provenance: 'unverified'}),
+          );
         }
         return {...validation, receipts};
       }),
@@ -452,11 +465,42 @@ const retainCitationEvidenceUnderLease = Effect.fn('contextHealth.retainCitation
   }
 });
 
+/** Set when an independent re-check could not re-derive a signature, so the result names that instead of a route reason. */
+interface HistoricalExtractionObservation {
+  unavailable: boolean;
+}
+
+const historicalBytesVerified = Effect.fn('contextHealth.historicalBytesVerified')(function* (
+  config: RuntimeConfig,
+  citation: MemoryCodeCitationV1,
+  objectFormat: RepositoryIdentity['objectFormat'],
+  bytes: Uint8Array,
+  observation: HistoricalExtractionObservation,
+) {
+  const check = yield* checkHistoricalCitationBytes(citation, objectFormat, bytes, config.agentContextHome);
+  if (check === 'extraction-unavailable') observation.unavailable = true;
+  return check === 'verified';
+});
+
+/** The explicit unverified result when no independent extraction was possible; never a silent verification. */
+function extractionUnavailableReceipt(
+  original: ContextBriefCitationValidationReceiptV2,
+): ContextBriefCitationValidationReceiptV2 {
+  return {
+    ...original,
+    coverage: 'incomplete',
+    provenance: 'unverified',
+    reason: 'extraction-unavailable',
+    status: 'unknown',
+  };
+}
+
 const recoverCapsuleCitationEvidence = Effect.fn('contextHealth.recoverCapsuleCitationEvidence')(function* (
   config: RuntimeConfig,
   checkoutIds: readonly string[],
   citation: MemoryCodeCitationV1,
   original: ContextBriefCitationValidationReceiptV2,
+  extraction: HistoricalExtractionObservation,
 ) {
   for (const checkoutId of checkoutIds) {
     const retained = yield* readRetainedCodeGraphCitationEvidence(
@@ -465,7 +509,8 @@ const recoverCapsuleCitationEvidence = Effect.fn('contextHealth.recoverCapsuleCi
       citationEvidenceSource(citation),
     );
     if (retained === undefined) continue;
-    if (!(yield* historicalCitationBytesMatch(citation, retained.capsule.objectFormat, retained.bytes))) continue;
+    if (!(yield* historicalBytesVerified(config, citation, retained.capsule.objectFormat, retained.bytes, extraction)))
+      continue;
     return {
       ...original,
       provenance: 'historical-verified' as const,
@@ -480,6 +525,7 @@ const readHistoricalGitCitationBytes = Effect.fn('contextHealth.readHistoricalGi
   config: RuntimeConfig,
   route: CodeGraphCitationRecoveryRouteV1,
   citation: MemoryCodeCitationV1,
+  extraction: HistoricalExtractionObservation,
 ) {
   if (citation.sourceDirty || !(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route)))
     return undefined;
@@ -497,7 +543,10 @@ const readHistoricalGitCitationBytes = Effect.fn('contextHealth.readHistoricalGi
     sources: [request],
   });
   const bytes = sources.get(codeGraphCitationSourceKey(request));
-  if (bytes === undefined || !(yield* historicalCitationBytesMatch(citation, route.identity.objectFormat, bytes)))
+  if (
+    bytes === undefined ||
+    !(yield* historicalBytesVerified(config, citation, route.identity.objectFormat, bytes, extraction))
+  )
     return undefined;
   if (!(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))) return undefined;
   return bytes;
@@ -630,6 +679,7 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
     }
   if (options.purpose !== 'current') {
     attemptedSteps.push('retained-capsule');
+    const extraction: HistoricalExtractionObservation = {unavailable: false};
     let historical: Uint8Array | undefined;
     for (const checkoutId of resolution.checkoutIds) {
       const retained = yield* readRetainedCodeGraphCitationEvidence(
@@ -639,7 +689,7 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
       );
       if (
         retained !== undefined &&
-        (yield* historicalCitationBytesMatch(citation, retained.capsule.objectFormat, retained.bytes))
+        (yield* historicalBytesVerified(config, citation, retained.capsule.objectFormat, retained.bytes, extraction))
       ) {
         historical = retained.bytes;
         break;
@@ -684,7 +734,7 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
               });
               const bytes = sources.get(codeGraphCitationSourceKey(request));
               return bytes !== undefined &&
-                (yield* historicalCitationBytesMatch(citation, route.identity.objectFormat, bytes)) &&
+                (yield* historicalBytesVerified(config, citation, route.identity.objectFormat, bytes, extraction)) &&
                 (yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))
                 ? bytes
                 : undefined;
@@ -693,12 +743,13 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
         }).pipe(Effect.orElseSucceed(() => undefined));
         if (historical === undefined) {
           attemptedSteps.push('exact-clean-git');
-          historical = yield* readHistoricalGitCitationBytes(config, route, citation).pipe(
+          historical = yield* readHistoricalGitCitationBytes(config, route, citation, extraction).pipe(
             Effect.orElseSucceed(() => undefined),
           );
         }
         if (historical !== undefined) break;
       }
+    if (historical === undefined && extraction.unavailable) attemptedSteps.push('historical-extraction-unavailable');
     if (historical !== undefined) {
       const excerpt = citationSourceExcerpt(historical, citationEvidenceSource(citation), 'historical-verified', true, {
         ...options,
@@ -730,6 +781,7 @@ const recoverHistoricalCitationEvidence = Effect.fn('contextHealth.recoverHistor
   route: CodeGraphCitationRecoveryRouteV1,
   citation: MemoryCodeCitationV1,
   original: ContextBriefCitationValidationReceiptV2,
+  extraction: HistoricalExtractionObservation,
 ) {
   const store = yield* CodeGraphStore;
   const exact = yield* store
@@ -754,7 +806,7 @@ const recoverHistoricalCitationEvidence = Effect.fn('contextHealth.recoverHistor
     snapshot.dirty !== citation.sourceDirty ||
     snapshot.extractorSet !== citation.extractorSet
   ) {
-    const bytes = yield* readHistoricalGitCitationBytes(config, route, citation);
+    const bytes = yield* readHistoricalGitCitationBytes(config, route, citation, extraction);
     if (bytes === undefined) return undefined;
     yield* retainCodeGraphCitationEvidence({
       bytes,

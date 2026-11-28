@@ -165,12 +165,26 @@ describe('workflow deferred citation recovery', () => {
       });
       const initial = {...state, operations: {...state.operations, sibling}};
       const query = yield* CodeGraphQueryService;
+      const session = query.withStatusSession;
+      let sessionObservations = 0;
+      const observe = Effect.sync(() => {
+        graphLocks.push(held.size);
+      });
+      const observedSession: typeof session = session
+        ? (home, cwd, expected, options, use) =>
+            session(home, cwd, expected, options, status =>
+              Effect.sync(() => {
+                sessionObservations++;
+              }).pipe(
+                Effect.andThen(observe),
+                Effect.flatMap(() => use(status)),
+              ),
+            )
+        : undefined;
       const guarded = CodeGraphQueryService.of({
         ...query,
-        status: (...args) =>
-          Effect.sync(() => {
-            graphLocks.push(held.size);
-          }).pipe(Effect.andThen(query.status(...args))),
+        status: (...args) => observe.pipe(Effect.flatMap(() => query.status(...args))),
+        ...(observedSession ? {withStatusSession: observedSession} : {}),
       });
       const recovered = yield* withWorkflowLock(
         f.config,
@@ -189,6 +203,7 @@ describe('workflow deferred citation recovery', () => {
       expect(recovered).toMatchObject({status: 'ok', revision: sha256HexSync(f.content)});
       expect(historyLocks.length).toBeGreaterThan(0);
       expect(graphLocks.length).toBeGreaterThan(0);
+      if (session) expect(sessionObservations).toBeGreaterThan(0);
       expect(EffectArray.every(historyLocks, count => count === 0)).toBe(true);
       expect(EffectArray.every(graphLocks, count => count === 0)).toBe(true);
       expect(held.size).toBe(0);

@@ -1,7 +1,8 @@
 import {Array as EffectArray} from 'effect';
 import {codeGraphUtf8ByteLength} from '../disk/capacity.js';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM, type MeasuredCodeGraphFact} from '../fact/budget.js';
-import {symbolTerms} from '../store/utilities.js';
+import {factBodyDiscovery, preparedSymbolTerms} from '../store/utilities.js';
+import {projectLexicalSymbols} from '../store/lexical_projection.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '../types.js';
 import * as EffectRecord from 'effect/Record';
 
@@ -140,7 +141,7 @@ export interface CodeGraphIncrementalWork {
   readonly deletedFiles: number;
   /** Exact UTF-8 bytes of the final attributed facts entering incremental staging. */
   readonly factBytes: number;
-  /** Exact rows presented to bounded staging, including changed-path markers. */
+  /** Conservative rows reserved for staging/publication, including every physical lexical category and path counter. */
   readonly plannedRows: number;
   /** Exact repository-membership candidates batch-probed for attribution. */
   readonly probedDependencyPaths: number;
@@ -163,6 +164,7 @@ export type CodeGraphIncrementalWorkObservation = Pick<
 export function measureCodeGraphIncrementalWork(input: {
   readonly deletedPaths?: readonly string[];
   readonly facts: readonly CodeGraphFileFacts[];
+  readonly lexicalRepresentation?: 'factored' | 'compact';
   readonly files: readonly CodeGraphInventoryFile[];
   readonly observation?: CodeGraphIncrementalWorkObservation;
   readonly totalFiles: number;
@@ -173,11 +175,31 @@ export function measureCodeGraphIncrementalWork(input: {
     0,
     (total, facts) => total + codeGraphUtf8ByteLength(JSON.stringify(facts)),
   );
-  let factRows = 0;
+  let lexicalRows: number;
+  if (input.lexicalRepresentation === 'compact') {
+    const symbols = EffectArray.flatMap(input.facts, fact => fact.symbols);
+    const logical = preparedSymbolTerms(symbols, factBodyDiscovery(input.facts));
+    const terms = new Set<string>();
+    let postings = 0;
+    for (const rows of logical.values())
+      for (const [term] of rows) {
+        terms.add(term);
+        postings++;
+      }
+    // Every compact dictionary/posting plus its header and format receipt is independently charged.
+    lexicalRows = terms.size + symbols.length + postings + 2;
+  } else {
+    const lexical = projectLexicalSymbols(
+      EffectArray.flatMap(input.facts, fact => fact.symbols),
+      factBodyDiscovery(input.facts),
+    );
+    lexicalRows = lexical.physicalRowCount + 3;
+  }
+  let factRows = lexicalRows + new Set(EffectArray.map(input.facts, fact => fact.path)).size;
   for (const facts of input.facts) {
     factRows += facts.symbols.length;
     factRows += EffectArray.reduce(facts.symbols, 0, (total, symbol) => total + (symbol.lookupKeys?.length ?? 0));
-    factRows += EffectArray.reduce(facts.symbols, 0, (total, symbol) => total + symbolTerms(symbol).length);
+    factRows += facts.monikers?.length ?? 0;
     factRows += facts.edges.length;
     const references = facts.references ?? [];
     factRows += references.length;

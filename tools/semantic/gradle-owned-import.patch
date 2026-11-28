@@ -1,0 +1,398 @@
+--- a/platforms/core-runtime/client-services/src/main/java/org/gradle/launcher/daemon/client/DaemonClientFactory.java
++++ b/platforms/core-runtime/client-services/src/main/java/org/gradle/launcher/daemon/client/DaemonClientFactory.java
+@@ -63,6 +63,13 @@
+             .build();
+     }
+ 
++    /** Threadnote source-overlay: controlled operations may reuse only their original foreground. */
++    public ServiceRegistry createOwnedBuildClientServices(ServiceLookup logging, DaemonParameters daemonParameters, DaemonRequestContext requestContext, BuildLayoutConfiguration layout, InputStream stdin, Optional<InternalBuildProgressListener> listener, OwnedBuildControl control) {
++        if (control == null) throw new IllegalStateException("Missing owned Gradle control.");
++        return clientServicesBuilder(logging, daemonParameters, requestContext, layout, listener)
++            .provider(new DaemonClientServices(stdin, control)).build();
++    }
++
+     private ServiceRegistryBuilder clientServicesBuilder(ServiceLookup clientLoggingServices, DaemonParameters daemonParameters, DaemonRequestContext requestContext, BuildLayoutConfiguration buildLayoutConfiguration, Optional<InternalBuildProgressListener> buildProgressListener) {
+         ServiceRegistry loggingServices = createLoggingServices(clientLoggingServices);
+ 
+--- a/platforms/core-runtime/client-services/src/main/java/org/gradle/launcher/daemon/client/DaemonClientServices.java
++++ b/platforms/core-runtime/client-services/src/main/java/org/gradle/launcher/daemon/client/DaemonClientServices.java
+@@ -31,8 +31,13 @@
+  */
+ public class DaemonClientServices extends DaemonClientServicesSupport {
+ 
++    private final OwnedBuildControl ownedControl;
+     public DaemonClientServices(InputStream buildStandardInput) {
++        this(buildStandardInput, null);
++    }
++    public DaemonClientServices(InputStream buildStandardInput, OwnedBuildControl ownedControl) {
+         super(buildStandardInput);
++        this.ownedControl = ownedControl;
+     }
+ 
+     @Provides
+@@ -45,6 +50,6 @@
+         ProcessEnvironment processEnvironment
+     ) {
+         DaemonCompatibilitySpec matchingContextSpec = new DaemonCompatibilitySpec(daemonRequestContext);
+-        return new DaemonClient(daemonConnector, outputEventListener, matchingContextSpec, getBuildStandardInput(), globalUserInputReceiver, idGenerator, processEnvironment);
++        return new DaemonClient(ownedControl == null ? daemonConnector : ownedControl.wrap(daemonConnector, matchingContextSpec), outputEventListener, matchingContextSpec, getBuildStandardInput(), globalUserInputReceiver, idGenerator, processEnvironment);
+     }
+ }
+--- /dev/null
++++ b/platforms/core-runtime/client-services/src/main/java/org/gradle/launcher/daemon/client/OwnedBuildControl.java
+@@ -0,0 +1,202 @@
++/*
++ * Copyright 2026 Threadnote contributors.
++ * Licensed under the Apache License, Version 2.0.
++ * Source-overlay derivative of Gradle 9.8.2; identity data is NOT native process authority.
++ */
++package org.gradle.launcher.daemon.client;
++
++import org.gradle.api.internal.specs.ExplainingSpec;
++import org.gradle.launcher.daemon.context.DaemonContext;
++import org.gradle.launcher.daemon.context.DaemonConnectDetails;
++import java.io.File;
++import java.io.IOException;
++import java.net.URI;
++import java.nio.ByteBuffer;
++import java.nio.charset.CodingErrorAction;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.LinkOption;
++import java.nio.file.Path;
++import java.nio.file.StandardOpenOption;
++import java.security.MessageDigest;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Base64;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.UUID;
++import java.util.concurrent.atomic.AtomicBoolean;
++
++/** Immutable per-call identity and bounded observations; never a signal/drain capability. */
++public final class OwnedBuildControl {
++    private final String attempt;
++    private final String launchNonce;
++    private final String uid;
++    private final String contextHash;
++    private final String operation = UUID.randomUUID().toString();
++    private final Path events;
++    private final AtomicBoolean connected = new AtomicBoolean();
++    private final AtomicBoolean finished = new AtomicBoolean();
++
++    private OwnedBuildControl(Map<String, String> values) throws Exception {
++        attempt = hex(values.get("attemptNonce"));
++        launchNonce = hex(values.get("launchNonce"));
++        uid = values.get("uid");
++        if (!uid.matches("[a-fA-F0-9-]{36}")) throw denied();
++        contextHash = hex(values.get("contextHash"));
++        events = absolute(values.get("events"));
++        if (!Files.isDirectory(events, LinkOption.NOFOLLOW_LINKS)) throw denied();
++        long remaining = Long.parseLong(values.get("expiresAt")) - System.currentTimeMillis();
++        if (remaining <= 0 || remaining > 300000) throw denied();
++    }
++
++    public static OwnedBuildControl capture(File project, File userHome, File baseDir, File javaHome, boolean embedded) {
++        try {
++            if (embedded) throw denied();
++            String uri = System.getProperty("threadnote.ownedImport.controlUri");
++            String expected = hex(System.getProperty("threadnote.ownedImport.controlSha256"));
++            if (uri == null) throw denied();
++            Path input = absolute(new File(new URI(uri)).getPath());
++            if (!Files.isRegularFile(input, LinkOption.NOFOLLOW_LINKS) || Files.size(input) > 16384) throw denied();
++            byte[] bytes = Files.readAllBytes(input);
++            if (bytes.length > 16384 || !hash(bytes).equals(expected)) throw denied();
++            String text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
++                .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
++            Map<String, String> values = new HashMap<String, String>();
++            for (String line : text.split("\\n", -1)) {
++                if (line.isEmpty()) continue;
++                int split = line.indexOf('=');
++                if (split <= 0 || !line.substring(split + 1).matches("[A-Za-z0-9_-]+")) throw denied();
++                String value = new String(Base64.getUrlDecoder().decode(line.substring(split + 1)), StandardCharsets.UTF_8);
++                if (value.length() > 4096 || value.indexOf('\0') >= 0 || value.indexOf('\n') >= 0 || values.put(line.substring(0, split), value) != null) throw denied();
++            }
++            List<String> keys = Arrays.asList("version", "attemptNonce", "launchNonce", "uid", "contextHash", "project", "userHome", "baseDir", "javaHome", "gradleHome", "events", "expiresAt");
++            if (!values.keySet().equals(new java.util.HashSet<String>(keys)) || !"1".equals(values.get("version"))) throw denied();
++            same(project, values.get("project"));
++            same(userHome, values.get("userHome"));
++            same(baseDir, values.get("baseDir"));
++            same(javaHome, values.get("javaHome"));
++            File ownJar = new File(OwnedBuildControl.class.getProtectionDomain().getCodeSource().getLocation().toURI()).getCanonicalFile();
++            if (!"gradle-client-services-9.8.2.jar".equals(ownJar.getName())) throw denied();
++            same(ownJar.getParentFile().getParentFile(), values.get("gradleHome"));
++            return new OwnedBuildControl(values);
++        } catch (Exception failure) {
++            throw denied();
++        }
++    }
++
++    public static void ready(String expectedUid, DaemonContext actual) {
++        try {
++            String nonce = hex(System.getProperty("threadnote.ownedImport.launchNonce"));
++            if (!expectedUid.equals(actual.getUid())) throw denied();
++            // Original foreground stdout is the only ready transport. No token/registry/PID becomes authority.
++            String image = contextImage(actual);
++            String frame = "THREADNOTE_OWNED_READY_V1 " + nonce + " " + actual.getUid() + " " + hash(image.getBytes(StandardCharsets.UTF_8)) + " " + Base64.getUrlEncoder().withoutPadding().encodeToString(image.getBytes(StandardCharsets.UTF_8));
++            if (frame.length() > 12288) throw denied();
++            System.out.println(frame);
++            System.out.flush();
++            if (System.out.checkError()) throw denied();
++        } catch (Exception failure) { throw denied(); }
++    }
++
++    private static String context(DaemonContext value) throws Exception {
++        return hash(contextImage(value).getBytes(StandardCharsets.UTF_8));
++    }
++
++    private static String contextImage(DaemonContext value) throws Exception {
++        List<String> options = new ArrayList<String>(value.getDaemonOpts());
++        Collections.sort(options);
++        List<String> fields = new ArrayList<String>(Arrays.asList(value.getUid(), value.getJavaHome().getCanonicalPath(),
++            value.getJavaVersion().toString(), value.getJavaVendor(), value.getDaemonRegistryDir().getCanonicalPath(),
++            String.valueOf(value.getPid()), String.valueOf(value.getIdleTimeout()), value.getPriority().name(),
++            String.valueOf(value.shouldApplyInstrumentationAgent()), value.getNativeServicesMode().name()));
++        fields.addAll(options);
++        StringBuilder canonical = new StringBuilder();
++        for (String field : fields) {
++            if (field.length() > 4096 || canonical.length() + field.length() + 6 > 8192) throw denied();
++            canonical.append(field.length()).append(':').append(field);
++        }
++        return canonical.toString();
++    }
++
++    public DaemonConnector wrap(final DaemonConnector delegate, final ExplainingSpec<DaemonContext> normal) {
++        final OwnedBuildControl control = this;
++        return new DaemonConnector() {
++            private ExplainingSpec<DaemonContext> constrained(final ExplainingSpec<DaemonContext> requested) {
++                return new ExplainingSpec<DaemonContext>() {
++                    public boolean isSatisfiedBy(DaemonContext candidate) { return whyUnsatisfied(candidate) == null; }
++                    public String whyUnsatisfied(DaemonContext candidate) {
++                        try {
++                            if (!uid.equals(candidate.getUid()) || !contextHash.equals(context(candidate))) return "Owned foreground context differs.";
++                        } catch (Exception failure) { return "Owned foreground context unavailable."; }
++                        String mismatch = normal.whyUnsatisfied(candidate);
++                        return mismatch == null ? requested.whyUnsatisfied(candidate) : mismatch;
++                    }
++                };
++            }
++            private DaemonClientConnection accepted(DaemonClientConnection connection) {
++                if (connection == null) throw denied();
++                if (!uid.equals(connection.getDaemon().getUid())) {
++                    connection.stop();
++                    throw denied();
++                }
++                if (connected.compareAndSet(false, true)) control.record("connected");
++                return connection;
++            }
++            // connect() on the ordinary connector can start a daemon internally: never delegate it.
++            public DaemonClientConnection connect(ExplainingSpec<DaemonContext> requested) {
++                return accepted(delegate.maybeConnect(constrained(requested)));
++            }
++            public DaemonClientConnection maybeConnect(ExplainingSpec<DaemonContext> requested) {
++                return accepted(delegate.maybeConnect(constrained(requested)));
++            }
++            // Direct address retry cannot establish complete compatibility; refuse before delegation.
++            public DaemonClientConnection maybeConnect(DaemonConnectDetails details) { throw denied(); }
++            public DaemonClientConnection startDaemon(ExplainingSpec<DaemonContext> requested) { throw denied(); }
++            public DaemonClientConnection startSingleUseDaemon() { throw denied(); }
++            public void markDaemonAsUnavailable(DaemonConnectDetails details) {
++                if (!uid.equals(details.getUid())) throw denied();
++                delegate.markDaemonAsUnavailable(details);
++            }
++        };
++    }
++
++    public void succeeded() {
++        if (!connected.get() || !finished.compareAndSet(false, true)) throw denied();
++        record("success");
++    }
++    public void failed(Throwable original) {
++        if (finished.compareAndSet(false, true)) {
++            try { record("failure"); } catch (RuntimeException observationFailure) { original.addSuppressed(observationFailure); }
++        }
++    }
++    private void record(String state) {
++        try {
++            byte[] frame = ("THREADNOTE_OWNED_OPERATION_V1 " + attempt + " " + launchNonce + " " + operation + " " + uid + " " + contextHash + " " + state + "\n").getBytes(StandardCharsets.US_ASCII);
++            if (frame.length > 1024) throw denied();
++            Files.write(events.resolve(operation + "." + state), frame, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
++        } catch (IOException failure) { throw denied(); }
++    }
++    private static Path absolute(String value) throws IOException {
++        if (value == null) throw denied();
++        File file = new File(value);
++        if (!file.isAbsolute() || !file.getCanonicalPath().equals(file.getPath())) throw denied();
++        return file.toPath();
++    }
++    private static void same(File actual, String expected) throws IOException {
++        if (actual == null || !actual.getCanonicalFile().toPath().equals(absolute(expected))) throw denied();
++    }
++    private static String hex(String value) {
++        if (value == null || !value.matches("[a-f0-9]{64}")) throw denied();
++        return value;
++    }
++    private static String hash(byte[] bytes) throws Exception {
++        byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
++        StringBuilder result = new StringBuilder();
++        for (byte value : digest) result.append(String.format(java.util.Locale.ROOT, "%02x", value & 255));
++        return result.toString();
++    }
++    private static IllegalStateException denied() { return new IllegalStateException("Owned Gradle import control refused."); }
++}
+--- a/platforms/core-runtime/launcher/src/main/java/org/gradle/launcher/daemon/bootstrap/ForegroundDaemonAction.java
++++ b/platforms/core-runtime/launcher/src/main/java/org/gradle/launcher/daemon/bootstrap/ForegroundDaemonAction.java
+@@ -16,6 +16,8 @@
+ package org.gradle.launcher.daemon.bootstrap;
+ 
+ import org.gradle.internal.concurrent.CompositeStoppable;
++import org.gradle.launcher.daemon.client.OwnedBuildControl;
++import org.gradle.launcher.daemon.context.DaemonContext;
+ import org.gradle.internal.instrumentation.agent.AgentInitializer;
+ import org.gradle.internal.logging.LoggingManagerFactory;
+ import org.gradle.internal.logging.LoggingManagerInternal;
+@@ -55,6 +57,7 @@
+ 
+         try {
+             daemonRegistry.markState(daemon.getAddress(), Idle);
++            OwnedBuildControl.ready(configuration.getUid(), daemonServices.get(DaemonContext.class));
+             daemon.stopOnExpiration(expirationStrategy, configuration.getPeriodicCheckIntervalMs());
+         } finally {
+             CompositeStoppable.stoppable(daemon, daemonProcessState).stop();
+--- a/platforms/core-runtime/launcher/src/main/java/org/gradle/tooling/internal/provider/ProviderConnection.java
++++ b/platforms/core-runtime/launcher/src/main/java/org/gradle/tooling/internal/provider/ProviderConnection.java
+@@ -52,6 +52,7 @@
+ import org.gradle.launcher.configuration.BuildLayoutResult;
+ import org.gradle.launcher.configuration.InitialProperties;
+ import org.gradle.launcher.daemon.client.DaemonClient;
++import org.gradle.launcher.daemon.client.OwnedBuildControl;
+ import org.gradle.launcher.daemon.client.DaemonClientFactory;
+ import org.gradle.launcher.daemon.client.NotifyDaemonClientExecuter;
+ import org.gradle.launcher.daemon.configuration.DaemonBuildOptions;
+@@ -217,7 +218,7 @@
+         List<String> tasks = providerParameters.getTasks();
+         SerializedPayload serializedAction = payloadSerializer.serialize(clientAction);
+         Parameters params = initParams(providerParameters);
+-        StartParameterInternal startParameter = new ProviderStartParameterConverter().toStartParameter(providerParameters, params.buildLayout, params.properties, params.tapiEnvironmentVariables);
++        StartParameterInternal startParameter = params.startParameter;
+         ProgressListenerConfiguration listenerConfig = ProgressListenerConfiguration.from(providerParameters, consumerVersion, payloadSerializer, isolatableSerializerRegistry);
+         BuildAction action = new ClientProvidedBuildAction(startParameter, serializedAction, tasks != null, listenerConfig.clientSubscriptions);
+         return run(action, cancellationToken, listenerConfig, listenerConfig.buildEventConsumer, providerParameters, params);
+@@ -232,21 +233,17 @@
+         List<String> tasks = providerParameters.getTasks();
+         SerializedPayload serializedAction = payloadSerializer.serialize(clientPhasedAction);
+         Parameters params = initParams(providerParameters);
+-        StartParameterInternal startParameter = new ProviderStartParameterConverter().toStartParameter(providerParameters, params.buildLayout, params.properties, params.tapiEnvironmentVariables);
++        StartParameterInternal startParameter = params.startParameter;
+         FailsafePhasedActionResultListener failsafePhasedActionResultListener = new FailsafePhasedActionResultListener(resultListener);
+         ProgressListenerConfiguration listenerConfig = ProgressListenerConfiguration.from(providerParameters, consumerVersion, payloadSerializer, isolatableSerializerRegistry);
+         BuildAction action = new ClientProvidedPhasedAction(startParameter, serializedAction, tasks != null, listenerConfig.clientSubscriptions);
+-        try {
+-            return run(action, cancellationToken, listenerConfig, new PhasedActionEventConsumer(failsafePhasedActionResultListener, payloadSerializer, listenerConfig.buildEventConsumer),
+-                providerParameters, params);
+-        } finally {
+-            failsafePhasedActionResultListener.rethrowErrors();
+-        }
++        return run(action, cancellationToken, listenerConfig, new PhasedActionEventConsumer(failsafePhasedActionResultListener, payloadSerializer, listenerConfig.buildEventConsumer),
++            providerParameters, params, () -> failsafePhasedActionResultListener.rethrowErrors());
+     }
+ 
+     public Object runTests(ProviderInternalTestExecutionRequest testExecutionRequest, BuildCancellationToken cancellationToken, ProviderOperationParameters providerParameters) {
+         Parameters params = initParams(providerParameters);
+-        StartParameterInternal startParameter = new ProviderStartParameterConverter().toStartParameter(providerParameters, params.buildLayout, params.properties, params.tapiEnvironmentVariables);
++        StartParameterInternal startParameter = params.startParameter;
+         ProgressListenerConfiguration listenerConfig = ProgressListenerConfiguration.from(providerParameters, consumerVersion, payloadSerializer, isolatableSerializerRegistry);
+         TestExecutionRequestAction action = TestExecutionRequestAction.create(listenerConfig.clientSubscriptions, startParameter, testExecutionRequest);
+         return run(action, cancellationToken, listenerConfig, listenerConfig.buildEventConsumer, providerParameters, params);
+@@ -271,15 +268,30 @@
+         ProviderOperationParameters providerParameters,
+         Parameters parameters
+     ) {
++        return run(action, cancellationToken, progressListenerConfiguration, buildEventConsumer, providerParameters, parameters, () -> {});
++    }
++
++    private Object run(BuildAction action, BuildCancellationToken cancellationToken,
++        ProgressListenerConfiguration progressListenerConfiguration, BuildEventConsumer buildEventConsumer,
++        ProviderOperationParameters providerParameters, Parameters parameters, Runnable phaseFinalizer) {
+         try {
+-            BuildActionExecutor<ConnectionOperationParameters, ClientBuildRequestContext> executor = createExecutor(providerParameters, parameters);
+-            boolean interactiveConsole = providerParameters.getStandardInput() != null;
+-            ClientBuildRequestContext context = new ClientBuildRequestContext(new GradleLauncherMetaData(), providerParameters.getStartTime(), interactiveConsole, cancellationToken, buildEventConsumer);
+-            BuildActionResult result = executor.execute(action, new ConnectionOperationParameters(parameters.daemonParams, parameters.tapiSystemProperties, providerParameters), context);
+-            throwFailure(result);
+-            return payloadSerializer.deserialize(result.getResult());
+-        } finally {
+-            progressListenerConfiguration.failsafeWrapper.rethrowErrors();
++            Object value;
++            try {
++                BuildActionExecutor<ConnectionOperationParameters, ClientBuildRequestContext> executor = createExecutor(providerParameters, parameters);
++                boolean interactiveConsole = providerParameters.getStandardInput() != null;
++                ClientBuildRequestContext context = new ClientBuildRequestContext(new GradleLauncherMetaData(), providerParameters.getStartTime(), interactiveConsole, cancellationToken, buildEventConsumer);
++                BuildActionResult result = executor.execute(action, new ConnectionOperationParameters(parameters.daemonParams, parameters.tapiSystemProperties, providerParameters), context);
++                throwFailure(result);
++                value = payloadSerializer.deserialize(result.getResult());
++            } finally {
++                try { progressListenerConfiguration.failsafeWrapper.rethrowErrors(); }
++                finally { phaseFinalizer.run(); }
++            }
++            parameters.ownedControl.succeeded();
++            return value;
++        } catch (RuntimeException | Error failure) {
++            parameters.ownedControl.failed(failure);
++            throw failure;
+         }
+     }
+ 
+@@ -315,19 +327,12 @@
+             standardInput = SafeStreams.emptyInput();
+         }
+         CompositeStoppable stoppable = new CompositeStoppable();
+-        if (Boolean.TRUE.equals(operationParameters.isEmbedded())) {
+-            loggingManager = sharedServices.get(LoggingManagerFactory.class).createLoggingManager();
+-            loggingManager.captureSystemSources();
+-            executor = new RunInProcess(new SystemPropertySetterExecuter(new ForwardStdInToThisProcess(
+-                sharedServices.get(GlobalUserInputReceiver.class),
+-                sharedServices.get(UserInputReader.class),
+-                standardInput,
+-                sharedServices.get(BuildExecutor.class)
+-            )));
++        if (params.ownedControl == null || Boolean.TRUE.equals(operationParameters.isEmbedded())) {
++            throw new IllegalStateException("Embedded or unowned Gradle execution is refused.");
+         } else {
+             ServiceRegistry requestSpecificLogging = LoggingServiceRegistry.newNestedLogging();
+             loggingManager = requestSpecificLogging.get(LoggingManagerFactory.class).createLoggingManager();
+-            ServiceRegistry clientServices = daemonClientFactory.createBuildClientServices(requestSpecificLogging, params.daemonParams, params.requestContext, params.buildLayout.toLayoutConfiguration(), standardInput, Optional.ofNullable(operationParameters.getBuildProgressListener()));
++            ServiceRegistry clientServices = daemonClientFactory.createOwnedBuildClientServices(requestSpecificLogging, params.daemonParams, params.requestContext, params.buildLayout.toLayoutConfiguration(), standardInput, Optional.ofNullable(operationParameters.getBuildProgressListener()), params.ownedControl);
+             stoppable.add(clientServices);
+             stoppable.add(requestSpecificLogging);
+             executor = clientServices.get(DaemonClient.class);
+@@ -426,10 +431,13 @@
+         gradlePropertiesAsSeenByToolchains.putAll(startParameter.getProjectProperties());
+         new BuildOptionBackedConverter<>(ToolchainBuildOptions.forToolChainConfiguration()).convert(parsedCommandLine, gradlePropertiesAsSeenByToolchains, environmentVariables, daemonParams.getToolchainConfiguration());
+ 
+-        return new Parameters(daemonParams, buildLayoutResult, properties, effectiveSystemProperties, environmentVariables, startParameter, requestContext);
++        Parameters result = new Parameters(daemonParams, buildLayoutResult, properties, effectiveSystemProperties, environmentVariables, startParameter, requestContext);
++        OwnedBuildControl control = OwnedBuildControl.capture(startParameter.getCurrentDir(), buildLayoutResult.getGradleUserHomeDir(), daemonParams.getBaseDir(), reportableJavaHomeForBuild(result), Boolean.TRUE.equals(operationParameters.isEmbedded()));
++        return new Parameters(daemonParams, buildLayoutResult, properties, effectiveSystemProperties, environmentVariables, startParameter, requestContext, control);
+     }
+ 
+     private static class Parameters {
++        final OwnedBuildControl ownedControl;
+         final DaemonParameters daemonParams;
+         final BuildLayoutResult buildLayout;
+         final AllProperties properties;
+@@ -439,6 +447,11 @@
+         final DaemonRequestContext requestContext;
+ 
+         public Parameters(DaemonParameters daemonParams, BuildLayoutResult buildLayout, AllProperties properties, Map<String, String> tapiSystemProperties, Map<String, String> tapiEnvironmentVariables, StartParameterInternal startParameter, DaemonRequestContext requestContext) {
++            this(daemonParams, buildLayout, properties, tapiSystemProperties, tapiEnvironmentVariables, startParameter, requestContext, null);
++        }
++
++        private Parameters(DaemonParameters daemonParams, BuildLayoutResult buildLayout, AllProperties properties, Map<String, String> tapiSystemProperties, Map<String, String> tapiEnvironmentVariables, StartParameterInternal startParameter, DaemonRequestContext requestContext, OwnedBuildControl ownedControl) {
++            this.ownedControl = ownedControl;
+             this.daemonParams = daemonParams;
+             this.buildLayout = buildLayout;
+             this.properties = properties;

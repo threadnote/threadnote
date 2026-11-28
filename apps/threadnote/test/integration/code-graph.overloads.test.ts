@@ -14,9 +14,10 @@ import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 describe('TypeScript overload indexing', () => {
-  effectIt.effect(
+  native(effectIt.effect)(
     'keeps overload symbols while resolving calls to implementations or unique arities',
     () => {
       let root: string | undefined;

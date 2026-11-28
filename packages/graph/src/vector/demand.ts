@@ -5,7 +5,10 @@ import {CodeGraphStoreError} from '../types.js';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import {CODE_GRAPH_SNAPSHOT_ID, validCanonicalTimestamp} from '../store/reconciliation/core.js';
 import {CODE_GRAPH_EMBEDDING_DEMAND_TABLE_SQL} from '../store/schema/contracts.js';
-import {CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT_REVISION} from '../store/schema/revision.js';
+import {
+  CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT_REVISION,
+  codeGraphPersistentSchemaSupports,
+} from '../store/schema/revision.js';
 import {
   acknowledgeCodeGraphEmbeddingDemandLane,
   claimCodeGraphEmbeddingDemandLane,
@@ -95,8 +98,9 @@ const requireDemandSchema = Effect.fn('codeGraph.requireEmbeddingDemandSchema')(
   if (!Number.isSafeInteger(version) || version > CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT_REVISION)
     return yield* CodeGraphStoreError.of('Code graph embedding demand mutation version is unsupported.');
   const state = yield* codeGraphEmbeddingDemandSchemaState(sql);
-  if (!mutation && state === 'absent' && version < CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT_REVISION) return false;
-  if (state !== 'ready' || version !== CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT_REVISION)
+  const capable = codeGraphPersistentSchemaSupports(version, 'embedding-demand');
+  if (!mutation && state === 'absent' && !capable) return false;
+  if (state !== 'ready' || (mutation ? version !== CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT_REVISION : !capable))
     return yield* CodeGraphStoreError.of('Code graph embedding demand schema requires write preparation.');
   return true;
 });

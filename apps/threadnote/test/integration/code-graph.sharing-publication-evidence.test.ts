@@ -31,10 +31,11 @@ import {
   runGraphPublisherListen,
   runGraphShareInit,
 } from '@threadnote/threadnote/code_graph/sharing/publisher';
+import {native} from '@threadnote/graph/test/helpers/native-typescript-session';
 
 describe('publisher contribution evidence with an independent clean control', () => {
   for (const scenario of ['valid', 'forged', 'quarantine', 'abi-transition'] as const) {
-    effectIt.effect(
+    native(effectIt.effect)(
       scenario === 'abi-transition'
         ? 'compacts an independently verified graph when the active language-pack ABI changes'
         : scenario === 'quarantine'

@@ -17,6 +17,7 @@ import {CodeGraphDiskCapacityPressureError} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {claimPersistentBuildForTest} from '@threadnote/graph/test/helpers/code-graph-build';
 import {materializationStorageFiles} from '@threadnote/graph/indexer/materialization';
+import {codeGraphMaterializationSpoolPath} from '@threadnote/graph/materialization/spool';
 import {codeGraphSqliteGet} from '@threadnote/graph/sqlite_statement';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -128,7 +129,7 @@ effectIt.effect('materializes a full build through the sorted sidecar and remove
       },
     );
     expect(resources.indexOf('preparation-released')).toBeLessThan(resources.indexOf('writer-acquired'));
-    const sidecarPath = path.join(repositoryRoot, `materialization-spool-v2-${snapshot.id}.sqlite`);
+    const sidecarPath = codeGraphMaterializationSpoolPath(path, {repositoryRoot}, snapshot.id);
     for (const candidate of [sidecarPath, `${sidecarPath}-journal`, `${sidecarPath}-shm`, `${sidecarPath}-wal`]) {
       expect(yield* fs.exists(candidate)).toBe(false);
     }
@@ -359,7 +360,7 @@ effectIt.effect('seals raw spool surfaces before a refused sort and resumes with
         expect(boundaries[0].finalFactBytes).toBeGreaterThan(0);
         expect(boundaries[0].mainSortPayloadBytes).toBeGreaterThanOrEqual(boundaries[0].finalFactBytes);
 
-        const spoolPath = path.join(repositoryRoot, `materialization-spool-v2-${snapshot.id}.sqlite`);
+        const spoolPath = codeGraphMaterializationSpoolPath(path, {repositoryRoot}, snapshot.id);
         const sealed = new Database(spoolPath, {readonly: true, strict: true});
         try {
           expect(sealed.query('SELECT stage, sorted_surface_count FROM materialization_spool_state').get()).toEqual({
@@ -372,7 +373,7 @@ effectIt.effect('seals raw spool surfaces before a refused sort and resumes with
                 "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name LIKE 'materialization_raw_%'",
               )
               .get(),
-          ).toEqual({count: 7});
+          ).toEqual({count: 12});
           expect(
             sealed
               .query(
@@ -404,6 +405,10 @@ effectIt.effect('seals raw spool surfaces before a refused sort and resumes with
           'lexical_symbols',
           'lexical_terms',
           'symbol_terms',
+          'lexical_scopes',
+          'lexical_members',
+          'lexical_owners',
+          'lexical_shared',
         ]);
         expect(EffectArray.filter(prepared.surfaces, surface => surface.name === 'symbols')).toEqual([
           {name: 'symbols', rowCount: 2},

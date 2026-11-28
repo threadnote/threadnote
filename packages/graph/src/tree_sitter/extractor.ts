@@ -6,6 +6,7 @@ import type {
   CodeGraphEdge,
   CodeGraphFileFacts,
   CodeGraphInventoryFile,
+  CodeGraphNavigationFacts,
   CodeGraphProvenance,
   CodeGraphReference,
   CodeGraphRelation,
@@ -53,6 +54,12 @@ export const TREE_SITTER_EXTRACTOR_POLICY_VERSION =
 
 type NodeSpan = (node: Node) => CodeGraphSpan;
 
+export interface TreeSitterNavigationFactInput {
+  readonly root: Node;
+  readonly symbols: readonly CodeGraphSymbol[];
+  readonly edges: readonly CodeGraphEdge[];
+  readonly span: NodeSpan;
+}
 export interface TreeSitterLanguageDefinition {
   readonly asset: VerifiedLanguageAsset;
   readonly declarationQuery: string;
@@ -70,6 +77,8 @@ export interface TreeSitterLanguageDefinition {
   readonly referenceRelation?: (capture: string, node: Node) => CodeGraphRelation;
   readonly referenceTarget?: (capture: string, node: Node) => string;
   readonly resolutionDomain: string;
+  /** Optional finite navigation proofs; a pack that sets it must version its definition. */
+  readonly navigationFacts?: (input: TreeSitterNavigationFactInput) => CodeGraphNavigationFacts | undefined;
 }
 
 interface Declaration {
@@ -171,7 +180,15 @@ export function extractTreeSitterFacts(
         const diagnostics = parsed.root.hasError
           ? [`${file.path}: ${definition.id} parser recovered from one or more syntax errors`]
           : [];
-        return {diagnostics, edges, path: file.path, references, symbols} satisfies CodeGraphFileFacts;
+        const navigationFacts = definition.navigationFacts?.({root: parsed.root, symbols, edges, span: spanForNode});
+        return {
+          diagnostics,
+          edges,
+          path: file.path,
+          references,
+          symbols,
+          ...(navigationFacts === undefined ? {} : {navigationFacts}),
+        } satisfies CodeGraphFileFacts;
       })
       .pipe(Effect.mapError(cause => languageError(`${file.path}: ${cause.message}`, cause)));
   });

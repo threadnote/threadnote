@@ -1,0 +1,24 @@
+--- a/src/api/node/wtf8.ts
++++ b/src/api/node/wtf8.ts
+@@ -112,6 +112,9 @@
+ }
+ 
+ export class Wtf8Decoder extends TextDecoder {
++    constructor(label = "utf-8", options?: ConstructorParameters<typeof TextDecoder>[1]) {
++        super(label, { ignoreBOM: true, ...options });
++    }
+     override decode(input?: DecodeInput, options?: DecodeOptions): string {
+         if (input == null) {
+             return super.decode(undefined, options);
+--- a/dist/api/node/wtf8.js
++++ b/dist/api/node/wtf8.js
+@@ -97,6 +97,9 @@
+     return bytes;
+ }
+ export class Wtf8Decoder extends TextDecoder {
++    constructor(label = "utf-8", options) {
++        super(label, { ignoreBOM: true, ...options });
++    }
+     decode(input, options) {
+         if (input == null) {
+             return super.decode(undefined, options);

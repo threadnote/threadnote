@@ -41,13 +41,215 @@ and `macos-15-intel` runner labels used by the release workflow. Their real-mode
 supervised local-model worker and disk-capacity admission—is therefore a pre-tag gate rather than being exercised for
 the first time after a tag is pushed.
 
+## Native TypeScript 7.1 source asset
+
+`tools/semantic/build-typescript-native.ts` constructs the private source-overlay `tsc` from pinned inputs. It never
+downloads a toolchain, and a construction receipt is build evidence only: it does not make the asset qualified or
+provider-eligible.
+
+- Inputs: a clean checkout of the exact official TypeScript commit in `typescriptNativeBuildRecipe.upstream`, the
+  pinned Go archive for the current host (checked by SHA-256 and size before extraction), a fresh private root outside
+  the checkout, and the canonical repository root. The pinned module graph is fetched once unless a module cache is
+  passed as the optional last argument.
+- `bun tools/semantic/build-typescript-native.ts --prepare OFFICIAL_SOURCE GO_ARCHIVE PRIVATE_ROOT REPOSITORY_ROOT`
+  writes `PRIVATE_ROOT/native-ts71-*/payload` (binary, notices, `probe-config.json`, `construction-receipt.json`) and
+  the sibling `prepared` runtime asset, then verifies both.
+- The nine construction commands have finite deadlines: Go archive extraction 60 s (300 s on Windows), each Git
+  command 30 s, `go version` and `tsc --version` 10 s, module download 120 s, module verify 60 s, and the focused
+  tests, race tests and build 240 s each. On a slower host, `THREADNOTE_TYPESCRIPT_NATIVE_DEADLINE_MULTIPLIER` (one
+  digit from 1 to 4) scales exactly these; the frontend patch's fixed `git apply` deadlines and Go's test `-timeout`
+  do not scale. The multiplier does not change the constructed bytes or receipt, and the workflow records it in
+  `summary.json`. A timeout, an undrained process tree and lost process-tree ownership fail with distinct errors that
+  name the command, elapsed time and an output tail.
+- A cold Go test or build spawns hundreds of processes, so the Go commands raise the owned Windows Job's lifetime
+  process cap from the platform default of 256 to 2048 (the platform maximum is 4096); POSIX has no such cap.
+- `--verify-construction PAYLOAD` re-checks a payload on its own and prints the executable to run; take the probe
+  executable from this output. `--verify-prepared PREPARED` re-checks a prepared asset, including POSIX modes, and
+  succeeds only beside its sibling `payload`. A schema-v1 payload stores an absolute probe command and is refused once
+  moved; schema-v2 commands are relative to `payload`.
+- Cache `payload` and `prepared` together as one unit so the prepared asset stays verifiable.
+- `.github/workflows/native-typescript-construction.yml` runs `--prepare` and both verifiers on the six GitHub-hosted
+  targets on manual dispatch and for same-repository pull requests into `main` or a ci.yml release base that touch
+  the builder, its overlays, `packages/platform`, `bun.lock`, `.gitattributes` or the workflow and its helper. It
+  uploads `payload` and `prepared` as one mode-preserving tar, re-verified after extraction, with a summary. Its
+  artifacts are retained for only 14 days and exist only for those construction pull requests and manual dispatches,
+  so a contributor often has none to download (see "To get an asset locally" below). These artifacts are unreviewed
+  construction evidence, not pins.
+- A reviewed host binary pin is a separate change. It may come only from a trusted run of a reviewed commit on this
+  repository, never a fork pull request, and the summary's `threadnoteCommit` must match that commit.
+- `THREADNOTE_TYPESCRIPT_NATIVE_ASSET_DIR` names a raw `payload` for `bun run build`, which stages
+  `dist/runtime/typescript` only for a reviewed host binary pin.
+- Every CI and publish job that builds a compiled payload on a reviewed-pin host (Linux GNU x64 and arm64, macOS
+  arm64 and x64) sets that variable on its build step to the `payload` output of the native TypeScript asset action.
+  The GNU container mounts the payload read-only. The self-contained smoke then requires the TypeScript graph path, and
+  it fails a pinned payload that has no `runtime/typescript`.
+- Musl and Windows payloads have no reviewed pin. They build without the asset, and TypeScript extraction is not
+  available in those releases: TypeScript files index as degraded modules. The smoke skips its TypeScript graph check
+  there and prints the reason.
+- The product requires the verified asset. A compiled executable uses only its staged `runtime/typescript` and
+  ignores the variable below; it refuses with a distinct, value-free reason when the asset is missing, aliased,
+  lacks a valid manifest, is not owner-private, or its binary is not this host's reviewed pin (in a notarized macOS
+  release, the compiled-in signed digest; see "Signed native TypeScript identity"). There is no fallback.
+- `THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR` names a prepared asset (the `prepared` sibling of `payload`) for
+  source-mode TypeScript extraction and for the native tests. Repository tooling never reads it: Bazel generation,
+  `check:workspaces`, `check:self-contained` and the syntax-only repository tests parse with the official npm
+  `typescript` package after `bun install`.
+- Native tests need that asset: the graph native runtime, session, extractor and navigation tests, the semantic native
+  provider and runtime tests, the native parser-worker paths, and the graph, context and MCP suites that index
+  TypeScript. They are gated by `packages/graph/test/helpers/native-typescript-session.ts`. Without the asset, or on a
+  host with no reviewed pin, they skip and report the reason. On a host with a reviewed pin, a run is _required_ when
+  `THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED` or `CI` is set to anything except empty, `0` or `false`; a required run with
+  no asset fails each gated test file at load instead of skipping.
+- Under Bazel the test environment is fixed, so `CI` does not reach a test. Generation declares `inherited_env` only for
+  vitest targets whose closure includes the gate helper, and those targets inherit exactly two host variables:
+  `THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR` and `THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED` (`bun.bzl` and the runner
+  refuse any other name). Lint, format, typecheck and workspace targets inherit nothing. A local
+  `bun run bazel -- test` with neither variable set therefore skips the native tests visibly; set
+  `THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED=1` to make a missing asset fail as it does in CI.
+- To get an asset locally when no construction artifact is available, construct it from the pinned inputs; the
+  upstream repository, commit and tree and this host's Go archive URL, size and SHA-256 are in
+  `typescriptNativeBuildRecipe` in `tools/semantic/build-typescript-native.ts`. The private root must be a fresh
+  `0700` directory outside the checkout on a filesystem that records file ownership:
+
+  ```bash
+  git init ts-src && git -C ts-src fetch --depth=1 --no-tags <upstream repository> <upstream commit>
+  git -C ts-src -c advice.detachedHead=false checkout --detach FETCH_HEAD
+  curl --fail --location --connect-timeout 30 --max-time 600 --output go-archive <this host's Go archive URL>
+  mkdir -m 700 ntc
+  bun tools/semantic/build-typescript-native.ts --prepare ts-src go-archive ntc "$PWD" > prepare.json
+  export THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR="$(bun -e 'console.log((await Bun.file("prepare.json").json()).assetDirectory)')"
+  ```
+
+  With a `native-typescript-construction-<host>` artifact instead, extract it with `tar -xpf
+native-typescript-construction.tar` (`-p` keeps the `0755` `tsc` mode that a umask would otherwise strip), run
+  `--verify-prepared <dir>/prepared`, and export that directory.
+
+- Asset location: the asset directory and every parent must be owned by you or root, and none may be other-writable
+  unless it is sticky (like `/tmp`). A group-writable parent is accepted only when it is yours and its group is your
+  own user-private group, which Threadnote can prove only when `/etc/nsswitch.conf` resolves `passwd` and `group` from
+  `files`, `systemd` or `altfiles` alone. Fedora's default lists `sss` first, so a group-writable `~/.local` left by
+  umask 002 is refused there as `group-writable-ancestor`; remove group write from that directory (`chmod g-w <dir>`)
+  or keep the asset below a private directory.
+
+- CI provisioning: `.github/actions/native-typescript-asset` restores `payload` and `prepared` from `actions/cache`
+  under a key that digests every construction input: the recipe, the builder source, its ordered overlay patches, the
+  host's pinned Go archive, the host and the asset pins. Each workflow that needs the asset has one asset job per
+  reviewed-pin host it uses (`ci.yml`: `native-typescript-asset` for linux-x64 and
+  `native-typescript-asset-linux-arm64`, `-darwin-arm64` and `-darwin-x64` for the other release hosts; the benchmark,
+  production-ratchet and production-large workflows have their own). An asset job restores, constructs on a miss with
+  the same steps as the construction workflow (`.github/actions/native-typescript-construct`, with the deadline
+  multiplier) and saves. Consumers (the Bazel shards whose targets inherit the native variables, recall quality, the
+  non-musl, non-Windows release smoke legs, and the benchmark and evidence captures that index TypeScript) only restore
+  it with `restore-only` and the producer job's `cache_key` output as `cache-key`, so a missing cache entry fails them.
+  They never re-derive the key from their own checkout: a pull request's merge commit can derive a different key than
+  the head commit the producer built (each producer also exposes that `ref`, which recall quality checks out). Every
+  consumer runs on its producer's exact runner image, and each pinned release leg depends only on its own host's asset
+  job, so one failed asset never skips the other release legs. The production-ratchet asset job runs the ratchet's
+  scope classifier first and builds nothing for a diff without ratchet-relevant paths. When the ratchet's static gate
+  fails and the protected base pins different native TypeScript asset inputs than the head, no same-asset control
+  exists: the job fails closed with that reason instead of measuring a degraded control. Hit or miss, `--verify-prepared` re-checks the bytes before the action exports
+  `THREADNOTE_TYPESCRIPT_NATIVE_PREPARED_ASSET_DIR` and `THREADNOTE_NATIVE_TYPESCRIPT_REQUIRED=1`, because cached bytes
+  are untrusted. The asset lives at the fixed `$RUNNER_TEMP/threadnote-native-typescript/<host>`, so the exported path,
+  and the Bazel test action keys that inherit it, are identical on every runner of an image. Windows and unpinned hosts
+  provision and export nothing: their native tests skip with the stated reason, and the Windows benchmark lanes skip the
+  TypeScript-dependent quality evaluation with a visible notice. The musl release lane runs its semantic suites inside
+  an `env -i` musl userspace without the asset and records that documented skip. The code-graph evaluations and
+  benchmarks check for the asset up front and stop with `native TypeScript asset missing` on a reviewed-pin host
+  instead of reporting a misleading regression.
+- Platform support: `darwin-arm64`, `darwin-x64`, `linux-x64` and `linux-arm64` have reviewed binary pins. Windows
+  (`win32-x64`, `win32-arm64`) has no pin yet: it builds construction evidence only, its native tests skip, and its
+  product build has no TypeScript asset.
+- To label a local stage, set `THREADNOTE_DEVELOPMENT_BUILD_VERSION` to a SHA-bound version such as
+  `6.0.0-local.g<40-hex commit>`.
+
 ## Signing order
 
-macOS builds sign each nested Mach-O native library first, then sign the Bun executable with hardened runtime and the
-minimal JIT entitlements in `scripts/macos-entitlements.plist`. CI verifies the signatures, submits a ZIP containing
-the exact `dist/` payload to Apple notarization, waits for acceptance, and verifies the executable signature again.
-Only then does it create the release archive and checksum. `spctl` app assessment is not used because Threadnote is a
-standalone command-line executable rather than an application bundle.
+macOS builds sign each nested Mach-O native library first. CI then verifies the signed private TypeScript compiler,
+compiles its signed identity into the Bun executable, and signs the Bun executable with hardened runtime and the
+minimal JIT entitlements in `scripts/macos-entitlements.plist`. It smokes TypeScript indexing with the signed payload,
+submits a ZIP containing the exact `dist/` payload to Apple notarization, waits for acceptance, and verifies the
+executable signature again. Only then does it create the release archive and checksum. `spctl` app assessment is not
+used because Threadnote is a standalone command-line executable rather than an application bundle.
+
+### Signed native TypeScript identity
+
+Signing changes the bytes of `runtime/typescript/tsc`, so a notarized release cannot accept it by the reviewed
+construction pin. The reviewed pins stay the trust root, and the macOS publish legs bind the signed compiler to them:
+
+1. "Sign nested native code" signs `tsc` with Developer ID, the hardened runtime, no entitlements and the explicit
+   identifier `dev.threadnote.typescript-native`.
+2. "Verify signed native TypeScript identity" (`tools/ci/signed-native-typescript.ts`, release tooling that the product
+   never ships) proves, or fails closed with every violation:
+   - The reference payload from the native TypeScript asset action has the reviewed host pin.
+   - The signed code is the reviewed code. On arm64, whose reviewed binary is linker-signed, `macho-code-v1` (SHA-256
+     of the bytes up to `dataoff` with `__LINKEDIT.vmsize`, `__LINKEDIT.filesize` and `LC_CODE_SIGNATURE.datasize`
+     set to zero) equals the recorded canonical digest of the reviewed binary, recomputed from the reference on each
+     run. On x64, whose reviewed binary is unsigned, `unsigned-origin-v1` (remove the added `LC_CODE_SIGNATURE`,
+     restore `ncmds` and `sizeofcmds`, truncate at `dataoff`, restore the unaligned `__LINKEDIT` sizes) restores bytes
+     with the exact reviewed pin.
+   - The signature policy holds: one SHA-256 CodeDirectory and no alternate one, superblob slots limited to the
+     CodeDirectory, requirements and CMS, no entitlement slot or special-slot hash, the hardened runtime flag, flags
+     limited to adhoc, linker-signed and runtime, `execSegFlags` equal to MAIN_BINARY only, the expected identifier,
+     a code limit equal to `dataoff`, bound special slots and every page hash equal to the file.
+   - Every `__LINKEDIT` data reference ends at or before `dataoff`.
+   - `codesign --verify --strict` accepts the Developer ID requirement built from the committed release Team ID:
+     `anchor apple generic`, the identifier, the Developer ID intermediate and leaf markers, and
+     `certificate leaf[subject.OU]`.
+
+   It then records the exact signed SHA-256 and the cdhash in `$RUNNER_TEMP/signed-native-typescript/record.json`,
+   prints them in the job log and uploads the record as the `signed-native-typescript-darwin-<arch>` workflow
+   artifact.
+
+3. "Compile the signed native TypeScript identity into the Bun executable" runs
+   `bun scripts/build.ts --relink-signed-native-typescript <record>`. It recompiles only `dist/threadnote`. It first
+   recomputes the SHA-256 and the cdhash from the `tsc` bytes now in `dist` and requires both to equal the record, and
+   it requires the source identity, version and target to equal `dist/release.json`. The build define
+   `THREADNOTE_SIGNED_NATIVE_TYPESCRIPT` carries the host and the recomputed SHA-256 and cdhash; every other compiled
+   build defines it as `null`. The Bun executable is signed after this step, so the outer signature covers the
+   compiled-in identity.
+4. "Index TypeScript with the signed payload" (`apps/threadnote/test/e2e/native-typescript-release.e2e.ts`) requires
+   the compiler's identifier, `flags=0x10300(hard,kill,runtime)`, a non-ad-hoc signature and the release `TeamIdentifier`, then
+   builds a TypeScript code graph through `dist/threadnote` in
+   an isolated home and queries a resolved call. With a refused compiler, TypeScript files index as degraded modules
+   and the query finds no call, so the step fails.
+
+The release Team ID is a committed constant, `RELEASE_APPLE_TEAM_ID` in `tools/ci/signed-native-typescript.ts`. It is
+public: every signed binary carries it, and its value comes from the Developer ID signature of the v5.4.4 darwin-arm64
+release executable. Changing it needs a reviewed change.
+There are two check points. Before any signing, the import step requires the one imported Developer ID Application
+identity (from `APPLE_CERTIFICATE_P12_BASE64`) to name that team (`check-signing-team`). In step 2 the code
+requirement compares the constant with the leaf certificate's subject OU, so an identity name that disagrees with its
+certificate also fails. A changed signing secret therefore cannot move releases to another team without a reviewed
+change to the constant.
+
+At runtime a compiled macOS release accepts exactly the compiled-in signed SHA-256; it ships no Mach-O parser. The
+manifest beside `tsc` still names the reviewed construction digest. Source mode and builds without the define, such
+as `dev:install-global`, accept exactly the reviewed pin. On Darwin both compiler spawn paths (the graph native API
+session and the semantic LSP) start `tsc` with `POSIX_SPAWN_START_SUSPENDED` through the owned-process spawn. Before
+any instruction runs, `csops` must report the expected cdhash, `CS_VALID` and `CS_KILL` (plus `CS_HARD` and
+`CS_RUNTIME` for a release image), no `CS_GET_TASK_ALLOW` or `CS_DEBUGGED`, and empty XML and DER entitlement blobs.
+The expected cdhash comes from the compiled-in value, or, for the linker-signed arm64 reviewed binary in source mode,
+from a pin that is a pure function of the reviewed bytes. It is never read from the file at launch. The child is then
+resumed with `SIGCONT`. Otherwise it is killed while suspended and reaped within a bound of two seconds, the session
+fails with `image-mismatch` or `code-signature-unavailable`, and the next launch is not quarantined. With an equal
+cdhash every executed page is hashed by the same CodeDirectory, and `CS_KILL` makes the kernel kill the child on a
+page that differs, so a swap of the file after the pre-spawn recheck cannot run different code.
+
+What CI proves without the real identity: the canonical digests across signing variants, every policy refusal, the
+kernel binding and suspended-spawn lifecycle, the expected image on both spawn paths, and admission of a
+hardened-runtime signed compiler through a compiled-in identity, all with ad-hoc signatures on copies. The Bazel shards
+run on Linux, so the macOS release-smoke legs (`macos-15` and `macos-15-intel`) run these tests in "Darwin signed
+native TypeScript identity components" with the restored prepared asset. Only the Team ID requirement, a real CMS
+signature and notarization need a `workflow_dispatch` publish run.
+
+Limits:
+
+- The darwin-x64 reviewed binary is unsigned, so source mode and unsigned builds on x64 keep the exact byte check with
+  no kernel binding. A signed x64 release has the binding. `csops` was measured to report the cdhash and status of a
+  signed x64 `tsc` that runs under Rosetta on arm64; confirm it on the first x64 publish.
+- If the parent process dies between the suspended spawn and `SIGCONT` or `SIGKILL`, the stopped child stays behind.
+  This orphan is an accepted leak: it never ran user code and holds no Threadnote state. No sweeper exists.
+- A writer that can replace the outer executable is out of scope, as for every pinned native asset.
 
 Windows x64 and arm64 build, strict-doctor, real-embedding, archive, and clean-machine installer verification are
 publication dependencies. Their release metadata declares the payload unsigned, and official installers reject a

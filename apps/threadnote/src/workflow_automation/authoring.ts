@@ -11,7 +11,6 @@ import {
   NativeAuthoringDocumentSchema,
   canonicalAuthoringJson,
   decodeNativeAuthoringDocument,
-  isNativeMermaidDiagram,
   nativeAuthoringDigest,
   nativeAuthoringIssueSummary,
   nativeSpecIntentDigest,
@@ -29,6 +28,8 @@ import {
   type NativeDocumentEnvelope,
 } from '@threadnote/workflow-automations/documents';
 import {createNativeDocument, nativeDocumentTemplateDefinitions} from '@threadnote/workflow-automations/templates';
+import {compact, documentViews, projectNativeAuthoringDocumentViews} from './authoring_views.js';
+export {projectNativeAuthoringDocumentViews} from './authoring_views.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   admitNativeAuthoringSave,
@@ -50,7 +51,7 @@ import {
   type ForegroundAuthoringCitationCollector,
 } from '../workflow_memory/artifacts.js';
 import {workflowArtifactUri} from '../workflow_memory/naming.js';
-import {nativeWorkflowError} from './memory.js';
+import {nativeWorkflowError, workflowWriteRequest} from './memory.js';
 import {assertNativeJobLiveSource, CurrentNativeJobReadyPromotion, CurrentNativeJobSourceView} from './native_jobs.js';
 import {nativeAuthoringRequestSchema} from './authoring_request_schema.js';
 export {nativeAuthoringRequestSchema} from './authoring_request_schema.js';
@@ -66,6 +67,7 @@ import {
   AuthoringReferenceSchema,
   AuthoringRootSchema,
   artifactReference,
+  rootSummary,
   decodeAuthoringArtifact,
   encodeAuthoringArtifact,
   encodeAuthoringDocument,
@@ -149,18 +151,6 @@ const hasControl = (value: string) =>
         Effect2.Option.getOrElse(() => NaN),
       ) === 127,
   );
-const compact = (text: string, maximum = 400) => {
-  const characters = [...text];
-  return characters.length <= maximum
-    ? text
-    : EffectArray.join(characters.slice(0, maximum), '') + '… (complete content in linked structured data)';
-};
-const bullets = (items: readonly string[]) =>
-  EffectArray.join(
-    EffectArray.map(items, item => '- ' + item),
-    '\n',
-  );
-
 const sourcePathLabel = (origin: string | undefined, relative: string) =>
   `${origin ?? 'source path'} (${EffectArray.join([...relative].slice(0, 128), '') + (relative.length > 128 ? '…' : '')})`;
 
@@ -286,175 +276,6 @@ const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(func
     );
 });
 
-/** Reuse the section's existing UTF-8-safe excerpt rule for independently visible prose. */
-function boundedViewText(body: string, limit: number): string {
-  const bytes = utf8.encode(body);
-  if (bytes.byteLength <= limit) return body;
-  let end = limit - 100;
-  while ((bytes[end] & 0xc0) === 0x80) end--;
-  return (
-    new TextDecoder('utf-8', {fatal: true}).decode(bytes.slice(0, end)) +
-    '\n\nComplete content is retained in the linked structured data.'
-  );
-}
-
-/** Small semantic views link to the complete separately indexed structured data. */
-function createViewDocument(input: Parameters<typeof createNativeDocument>[0]): NativeDocumentEnvelope {
-  const sections = EffectRecord.fromEntries(
-    EffectArray.map(EffectRecord.toEntries(input.sections), ([id, body]) => [
-      id,
-      boundedViewText(body, id === 'diagram' ? 10000 : 2000),
-    ]),
-  );
-  return createNativeDocument({...input, sections});
-}
-
-function documentViews(document: NativeAuthoringDocument): readonly {id: string; document: NativeDocumentEnvelope}[] {
-  if (document.kind === 'spec')
-    return [
-      {
-        id: 'spec',
-        document: createViewDocument({
-          kind: 'spec',
-          title: document.title,
-          sections: {
-            summary: document.objective,
-            problem: bullets(EffectArray.map(document.inScope, item => compact(item))),
-            requirements: compact(
-              bullets(EffectArray.map(document.requirements, item => item.id + ': ' + compact(item.behavior, 120))),
-              3500,
-            ),
-            acceptance: compact(
-              bullets(EffectArray.map(document.scenarios, item => item.id + ': ' + compact(item.then, 120))),
-              3500,
-            ),
-            domain: compact(
-              bullets(EffectArray.map(document.artifacts, item => item.title + ': ' + compact(item.summary))),
-              1600,
-            ),
-            contracts: compact(bullets(document.constraints), 1600),
-            questions: compact(
-              bullets(EffectArray.map(document.questions, item => item.id + ': ' + item.question)),
-              1600,
-            ),
-          },
-        }),
-      },
-    ];
-  const architecture = (kind: 'architecture-current' | 'architecture-target', value: typeof document.current) =>
-    createViewDocument({
-      kind,
-      title:
-        compact(document.title, 180) +
-        ' — ' +
-        (Effect2.pipe(kind, EffectString.endsWith('current')) ? 'Current architecture' : 'Target architecture'),
-      sections: {
-        summary: value.summary,
-        components: compact(bullets(value.components), 3000),
-        contracts: compact(bullets(value.contracts), 3000),
-        diagram: isNativeMermaidDiagram(value.diagram) ? '```mermaid\n' + value.diagram + '\n```' : value.diagram,
-      },
-    });
-  const compactDraft = document.compactOrigin !== undefined && !document.compactOrigin.expanded;
-  return [
-    {
-      id: 'plan',
-      document: createViewDocument({
-        kind: 'plan',
-        title: document.title,
-        sections: {
-          summary: compactDraft
-            ? EffectArray.join(
-                [
-                  'Objective: ' + boundedViewText(document.objective, 600),
-                  'Current behavior: ' + boundedViewText(document.current.summary, 600),
-                  'Desired change: ' + boundedViewText(document.target.summary, 600),
-                ],
-                '\n\n',
-              )
-            : document.objective,
-          phases: compact(
-            bullets(EffectArray.map(document.phases, item => item.id + ': ' + compact(item.outcome, 120))),
-            3500,
-          ),
-          validation: compact(
-            bullets(
-              EffectArray.flatMap(document.phases, item =>
-                EffectArray.map(
-                  item.acceptance,
-                  acceptance => item.id + '/' + acceptance.id + ': ' + compact(acceptance.verification, 120),
-                ),
-              ),
-            ),
-            3500,
-          ),
-          decisions: document.decisions.length
-            ? compact(
-                bullets(EffectArray.map(document.decisions, item => item.id + ': ' + compact(item.selected, 120))),
-                2000,
-              )
-            : document.compactOrigin
-              ? 'Compact eligibility: ' + compact(document.compactOrigin.eligibilityRationale, 1800)
-              : 'Design decision remains unresolved; this is a durable draft.',
-        },
-      }),
-    },
-    ...(compactDraft
-      ? []
-      : [
-          {id: 'current', document: architecture('architecture-current', document.current)},
-          {id: 'target', document: architecture('architecture-target', document.target)},
-        ]),
-    {
-      id: 'decisions',
-      document: createViewDocument({
-        kind: 'decisions',
-        title: compact(document.title, 180) + ' — Design decisions',
-        sections: {
-          decision: document.decisions.length
-            ? compact(bullets(EffectArray.map(document.decisions, item => item.id + ': ' + item.selected)), 3000)
-            : 'Pending orchestrator decision.',
-          alternatives: document.decisions.length
-            ? compact(
-                bullets(
-                  EffectArray.flatMap(document.decisions, item =>
-                    item.alternatives.length
-                      ? EffectArray.map(
-                          item.alternatives,
-                          alternative =>
-                            item.id + '/' + alternative.id + ': ' + alternative.design + '; ' + alternative.tradeoffs,
-                        )
-                      : [item.id + ': No better alternative identified.'],
-                  ),
-                ),
-                5000,
-              )
-            : 'Alternatives have not yet been judged.',
-          rationale: document.decisions.length
-            ? compact(bullets(EffectArray.map(document.decisions, item => item.id + ': ' + item.rationale)), 5000)
-            : 'A ready plan requires the orchestrator’s justification.',
-          consequences: compact(
-            bullets(
-              EffectArray.map(
-                document.decisions,
-                item => item.id + ': affects ' + EffectArray.join(item.affectedPhases, ', '),
-              ),
-            ),
-            2000,
-          ),
-        },
-      }),
-    },
-  ];
-}
-
-/** Project canonical authoring data into the same semantic view envelopes used by rendering and persistence. */
-export function projectNativeAuthoringDocumentViews(
-  document: NativeAuthoringDocument,
-): readonly {id: string; document: NativeDocumentEnvelope}[] {
-  return documentViews(document);
-}
-
 function isWorkflowArtifact(value: unknown): value is WorkflowArtifact {
   return (
     isJsonObject(value) &&
@@ -473,19 +294,6 @@ const asArtifact = (value: unknown): WorkflowArtifact => {
   }
   return value.artifact;
 };
-const rootSummary = (root: AuthoringRoot, artifact: WorkflowArtifact) => ({
-  root: artifactReference(artifact),
-  kind: root.kind,
-  featureId: root.featureId,
-  documentHash: root.documentHash,
-  intentHash: root.intentHash,
-  readiness: root.readiness,
-  ...(root.confirmation ? {confirmation: root.confirmation} : {}),
-  data: root.data,
-  documents: root.documents,
-  previous: root.previous,
-});
-
 const acceptancePacket = (
   document: NativeAuthoringDocument,
   validation: ReturnType<typeof validateNativeAuthoring>,
@@ -517,6 +325,29 @@ const ownedAuthoringUris = (state: NativeWorkflowState) =>
     operation.status === 'verified' && operation.artifact?.state === 'active' ? [operation.artifact.uri] : [],
   );
 
+const validateAuthoringRequest = Effect.fn('workflowAutomation.authoring.validateRequest')(function* (
+  state: NativeWorkflowState,
+  request: Request,
+  document: NativeAuthoringDocument,
+) {
+  const planIntentPolicyVersion =
+    request.command === 'save'
+      ? nativePlanIntentPolicyForSave(
+          state,
+          yield* Effect.try({
+            try: () => verifiedAuthoringRoot(state.operations, document.kind),
+            catch: nativeWorkflowError,
+          }),
+          request.confirmation?.intentHash,
+        )
+      : nativePlanIntentPolicyFor(state);
+  const validation = yield* Effect.try({
+    try: () => validateNativeAuthoring(document, {...request, planIntentPolicyVersion}),
+    catch: nativeWorkflowError,
+  });
+  return {planIntentPolicyVersion, validation};
+});
+
 export const runNativeAuthoring = <R>(
   config: RuntimeConfig,
   input: unknown,
@@ -547,7 +378,22 @@ export const runNativeAuthoring = <R>(
     yield* call(base('inspect'));
     const stored = yield* readNativeWorkflowState(config, request.runId);
     if (!stored) return yield* fail('run-not-found', 'Start a fresh native run before authoring.');
-    const state = stored.state;
+    let state = stored.state;
+    if (request.command === 'save' && state.authoringSave) {
+      const document = yield* Effect.try({
+        try: () => decodeNativeAuthoringDocument(request.document),
+        catch: nativeWorkflowError,
+      });
+      if (document.id !== state.featureId || document.project !== state.project)
+        return yield* fail('binding-drift', 'Authoring document identity must match its existing native binding.');
+      const {validation} = yield* validateAuthoringRequest(state, request, document);
+      const saving = request.ready && !validation.ready ? {...request, ready: false} : request;
+      if (yield* recoverAuthoringChild(config, saving, document, validation, call)) {
+        const recovered = yield* readNativeWorkflowState(config, request.runId);
+        if (!recovered) return yield* fail('run-not-found', 'The original native run disappeared during recovery.');
+        state = recovered.state;
+      }
+    }
     if (request.command === 'scope-inspect') {
       if (!request.paths) return yield* fail('invalid-request', 'Provide the exact existing source paths to inspect.');
       if (!request.literalOnly) yield* call(base('graph-ready'));
@@ -1021,21 +867,7 @@ export const runNativeAuthoring = <R>(
         withRecallIdentityPreparation,
       );
     yield* admitLinkedSpec(document);
-    const planIntentPolicyVersion =
-      request.command === 'save'
-        ? nativePlanIntentPolicyForSave(
-            state,
-            yield* Effect.try({
-              try: () => verifiedAuthoringRoot(state.operations, document.kind),
-              catch: nativeWorkflowError,
-            }),
-            request.confirmation?.intentHash,
-          )
-        : nativePlanIntentPolicyFor(state);
-    const validation = yield* Effect.try({
-      try: () => validateNativeAuthoring(document, {...request, planIntentPolicyVersion}),
-      catch: nativeWorkflowError,
-    });
+    const {planIntentPolicyVersion, validation} = yield* validateAuthoringRequest(state, request, document);
     if (request.command === 'acceptance-packet') return acceptancePacket(document, validation, request.detail);
     if (request.command === 'confirm') {
       if (
@@ -1243,6 +1075,86 @@ const clearAuthoringSave = (config: RuntimeConfig, runId: string, intentDigest: 
     }),
   );
 
+const authoringSaveIntent = (
+  state: NativeWorkflowState,
+  request: Request,
+  document: NativeAuthoringDocument,
+  validation: ReturnType<typeof validateNativeAuthoring>,
+) => {
+  const previous = state.authoringSave
+    ? state.authoringSave.rootUri
+    : (EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...state.operations].reverse(),
+          operation =>
+            operation.status === 'verified' && operation.intent.artifactKey === 'author-root-' + document.kind,
+        ),
+      )?.artifact?.uri ?? null);
+  const rootUri = request.uri ?? previous;
+  const readiness: 'ready' | 'draft' = request.ready ? 'ready' : 'draft';
+  const metadata = {
+    ...(request.confirmation ? {confirmation: request.confirmation} : {}),
+    ...(request.review ? {review: request.review} : {}),
+  };
+  const saveDigest = sha256HexSync(
+    stableJson({
+      documentHash: validation.documentHash,
+      readiness,
+      metadata,
+      expectedRevision: request.expectedRevision ?? null,
+      uri: rootUri,
+    }),
+  );
+  return {rootUri, readiness, metadata, saveDigest};
+};
+
+// Only the original admitted save may finish an already-journaled non-root
+// child. Ordinary validation/reads and pending roots retain their own guards.
+const recoverAuthoringChild = <R>(
+  config: RuntimeConfig,
+  request: Request,
+  document: NativeAuthoringDocument,
+  validation: ReturnType<typeof validateNativeAuthoring>,
+  call: NativeAuthoringCall<R>,
+) =>
+  withNativeAuthoringLock(
+    config,
+    request.runId,
+    Effect.gen(function* () {
+      const stored = yield* readNativeWorkflowState(config, request.runId);
+      const state = stored?.state;
+      const reservation = state?.authoringSave;
+      if (!state || !reservation) return false;
+      const {saveDigest} = authoringSaveIntent(state, request, document, validation);
+      if (reservation.intentDigest !== saveDigest)
+        return yield* fail('pending-operation', 'Resume the exact authoring save admitted by this run.');
+      const pending = EffectArray.filter(state.operations, operation => operation.status === 'prepared');
+      if (pending.length !== 1) return false;
+      const child = pending[0];
+      if (
+        !['authoring-child', 'authoring-context', 'authoring-history'].includes(child.intent.role) ||
+        !state.operations.slice(reservation.operationStart, reservation.operationLimit).includes(child)
+      )
+        return false;
+      const journal = yield* withWorkflowLock(config, state.bindingId, inspectWorkflowJournal(config, state.bindingId));
+      if (!journal.needsRecovery) return false;
+      const original = journal.state.operations[child.intent.operationId];
+      if (!original) return false;
+      if (original.intentDigest !== sha256HexSync(stableJson(workflowWriteRequest(child.intent))))
+        return yield* fail('invalid-state', 'The admitted child differs from its original native intent.');
+      yield* verifySource(journal.state.binding.repo, document);
+      yield* call({
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'recover',
+        runId: request.runId,
+        generation: request.generation,
+        operationId: child.intent.operationId,
+      }).pipe(Effect.provideService(CurrentNativeAuthoringSave, saveDigest));
+      return true;
+    }),
+  );
+
 const saveAuthoring = <R>(
   config: RuntimeConfig,
   request: Request,
@@ -1261,30 +1173,7 @@ const saveAuthoring = <R>(
       if (!stored) return yield* fail('run-not-found', 'The original native run is missing.');
       const state = stored.state;
       if (state.closeoutSave) return yield* fail('pending-operation', 'Finish the admitted closeout before authoring.');
-      const priorRootUri = state.authoringSave
-        ? state.authoringSave.rootUri
-        : (EffectOption.getOrUndefined(
-            EffectArray.findFirst(
-              [...state.operations].reverse(),
-              operation =>
-                operation.status === 'verified' && operation.intent.artifactKey === 'author-root-' + document.kind,
-            ),
-          )?.artifact?.uri ?? null);
-      const rootUri = request.uri ?? priorRootUri;
-      const readiness = request.ready ? 'ready' : 'draft';
-      const metadata = {
-        ...(request.confirmation ? {confirmation: request.confirmation} : {}),
-        ...(request.review ? {review: request.review} : {}),
-      };
-      const saveDigest = sha256HexSync(
-        stableJson({
-          documentHash: validation.documentHash,
-          readiness,
-          metadata,
-          expectedRevision: request.expectedRevision ?? null,
-          uri: rootUri,
-        }),
-      );
+      const {rootUri, readiness, metadata, saveDigest} = authoringSaveIntent(state, request, document, validation);
       if (state.authoringSave && state.authoringSave.intentDigest !== saveDigest)
         return yield* fail('pending-operation', 'Resume the exact authoring save admitted by this run.');
       const initialCompactResume =

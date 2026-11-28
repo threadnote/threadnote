@@ -24,6 +24,7 @@
     "THREADNOTE_STANDALONE": "readonly",
     "THREADNOTE_VERSION": "readonly",
     "THREADNOTE_RUNTIME_SOURCE_IDENTITY": "readonly",
+    "THREADNOTE_SIGNED_NATIVE_TYPESCRIPT": "readonly",
     "process": "readonly"
   },
   "ignorePatterns": [
@@ -145,20 +146,6 @@
     "typescript/no-unsafe-type-assertion": "error"
   },
   "overrides": [
-    {
-      "files": ["packages/graph/src/typescript_runtime.ts"],
-      "globals": {
-        "require": "readonly"
-      },
-      "rules": {
-        "typescript/no-require-imports": [
-          "error",
-          {
-            "allow": ["^typescript-compiler$"]
-          }
-        ]
-      }
-    },
     {
       "files": ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"],
       "rules": {

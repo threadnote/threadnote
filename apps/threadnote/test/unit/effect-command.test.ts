@@ -3,10 +3,11 @@ import {TestError} from '@threadnote/testing/test-error';
 import {mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
-import {Array as EffectArray, Clock, Effect, Fiber, FileSystem, Path, Result, Schema} from 'effect';
+import {Array as EffectArray, Clock, Deferred, Effect, Fiber, FileSystem, Path, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import {
+  type CommandDeferredInput,
   runBinaryCommandEffect,
   runCommandEffect,
   runDetachedCommandEffect,
@@ -110,6 +111,38 @@ describe('Effect CommandExecutor', () => {
       expect(lines).toEqual(['private-alpha', 'private-beta', 'private-omega']);
       // The arguments build the text at runtime, so only captured stdout could contain it.
       expect(JSON.stringify(error)).not.toContain('private');
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('starts a deferred-input command before its input and times its request from that input', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const marker = join(yield* fs.makeTempDirectoryScoped({prefix: 'tn-deferred-input-'}), 'started');
+      const script = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, ""); process.stdin.pipe(process.stdout);`;
+      const deferredInput = yield* Deferred.make<CommandDeferredInput>();
+      const started = yield* runCommandEffect(process.execPath, ['-e', script], {
+        deferredInput,
+        timeoutMs: 10_000,
+      }).pipe(Effect.forkScoped);
+      while (!(yield* fs.exists(marker))) yield* Effect.sleep(10);
+      // The process waited longer than its request timeout before the request; only the request is timed.
+      yield* Effect.sleep(600);
+      yield* Deferred.succeed(deferredInput, {input: new TextEncoder().encode('request'), timeoutMs: 400});
+      expect((yield* Fiber.join(started)).stdout).toBe('request');
+      const unused = yield* runCommandEffect(process.execPath, ['-e', script], {
+        deferredInput: yield* Deferred.make<CommandDeferredInput>(),
+        timeoutMs: 300,
+      }).pipe(Effect.flip);
+      expect(unused._tag).toBe('CommandTimedOut');
+      // Once the request arrives, its own timeout bounds it, not the longer wait limit.
+      const stalled = yield* Deferred.make<CommandDeferredInput>();
+      yield* Deferred.succeed(stalled, {input: new TextEncoder().encode('request'), timeoutMs: 300});
+      const slow = yield* runCommandEffect(
+        process.execPath,
+        ['-e', 'process.stdin.on("data", () => setTimeout(() => process.exit(0), 5000));'],
+        {deferredInput: stalled, timeoutMs: 10_000},
+      ).pipe(Effect.flip);
+      expect(slow).toMatchObject({_tag: 'CommandTimedOut', timeoutMs: 300});
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 

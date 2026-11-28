@@ -1,0 +1,321 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "root": {
+      "uri": "threadnote://user/denyskashkovskyi/memories/durable/projects/threadnote/workflow-threadnote-6-semantic-intelligence-specification-spec.md",
+      "memoryId": "tn_be3f78ceaa071c7e2694",
+      "revision": "24f086b9e99aa662ccd9c862d16e7dc70e5cfa50f21bf42abaff13a6ea25367a"
+    },
+    "documentHash": "23ceef694706b6fd93d5228e8b50f8791efb27ccd895d6bd2ecc4fd512a51353",
+    "intentHash": "8be99e774b98608767b5796f71d08c849f466686ffe2d09c5c5a1a3bc188ef0c"
+  },
+  "scenarios": [
+    {
+      "id": "S01",
+      "requirementIds": ["R01", "R02", "R30"],
+      "given": "each selected language on a supported platform with a declared project fixture",
+      "when": "the supported provider is configured",
+      "then": "status identifies exact versions and prerequisites; core symbol/definition/reference/hover/diagnostic/rename fixtures pass and a representative edit-based action is qualified."
+    },
+    {
+      "id": "S02",
+      "requirementIds": ["R01", "R02", "R26"],
+      "given": "a missing, incompatible or unlicensed provider",
+      "when": "semantic setup or a query is requested",
+      "then": "the cause and actionable setup path appear; no unsupported feature is advertised and structural graph/memory remain usable."
+    },
+    {
+      "id": "S03",
+      "requirementIds": ["R02", "R13"],
+      "given": "an installed provider and an interrupted upgrade",
+      "when": "setup is resumed",
+      "then": "the exact configured version is usable or a recoverable failure is shown; no surprise download, shell hook or duplicate installation occurs."
+    },
+    {
+      "id": "S04",
+      "requirementIds": ["R03"],
+      "given": "two classes expose the same method name, with aliases and typed call sites",
+      "when": "definition and references are requested for one occurrence",
+      "then": "the qualified provider resolves the correct declaration and references without including the unrelated method merely by name."
+    },
+    {
+      "id": "S05",
+      "requirementIds": ["R03", "R11"],
+      "given": "an ambiguous locator or a stale graph handle",
+      "when": "navigation is requested",
+      "then": "candidates or a stale/unresolved result are returned; no arbitrary symbol is presented as exact."
+    },
+    {
+      "id": "S06",
+      "requirementIds": ["R04"],
+      "given": "a provider supports completion and hierarchy but lacks one requested feature",
+      "when": "each operation is invoked",
+      "then": "supported results retain their observation identity; the unsupported operation is explicit rather than an empty successful result."
+    },
+    {
+      "id": "S07",
+      "requirementIds": ["R05", "R09"],
+      "given": "existing diagnostics and a new edit",
+      "when": "diagnostics are refreshed",
+      "then": "new/resolved/remaining items refer to the requested view and version; delayed older diagnostics cannot replace them."
+    },
+    {
+      "id": "S08",
+      "requirementIds": ["R06"],
+      "given": "a task targets a symbol with one current constraint, one stale decision and unrelated memory",
+      "when": "context is requested within a budget",
+      "then": "current relevant evidence and its applicable constraint are included; stale evidence is labeled, unrelated material omitted, and omissions are visible."
+    },
+    {
+      "id": "S09",
+      "requirementIds": ["R06", "R07"],
+      "given": "no applicable memory or an unreviewed proposal is linked to a symbol",
+      "when": "context is requested",
+      "then": "code evidence remains useful; no fabricated constraint appears and proposals retain their unapproved status."
+    },
+    {
+      "id": "S10",
+      "requirementIds": ["R08"],
+      "given": "two worktrees have the same paths and different code",
+      "when": "two agents query concurrently",
+      "then": "each receives evidence from its own worktree/configuration without buffer, cache or memory-scope contamination."
+    },
+    {
+      "id": "S11",
+      "requirementIds": ["R08", "R16"],
+      "given": "two clients hold different unsaved text for the same file",
+      "when": "they query or propose an edit",
+      "then": "their explicit views stay distinct; conflicting edit ownership is rejected without choosing the last writer silently."
+    },
+    {
+      "id": "S12",
+      "requirementIds": ["R09"],
+      "given": "a document changes after a request starts",
+      "when": "the old provider response arrives",
+      "then": "it cannot be labeled current for the new version; the response exposes stale/conflict status or a bounded retry."
+    },
+    {
+      "id": "S13",
+      "requirementIds": ["R09", "R24"],
+      "given": "project configuration, dependency version or branch changes",
+      "when": "a later query runs",
+      "then": "the obsolete analysis basis is invalidated; current project identity is used or readiness is reported explicitly."
+    },
+    {
+      "id": "S14",
+      "requirementIds": ["R10", "R32"],
+      "given": "a cold provider, a hung request and another healthy workspace",
+      "when": "deadline expiry or cancellation occurs",
+      "then": "the request finishes within the exposed budget semantics, resources are released, and the healthy workspace continues without unlimited retry or spawning."
+    },
+    {
+      "id": "S15",
+      "requirementIds": ["R10", "R30"],
+      "given": "a provider crashes repeatedly or fails graceful shutdown",
+      "when": "recovery is attempted",
+      "then": "bounded restart/escalation, cause and next action are visible; abandoned processes do not remain as unbounded resource leaks."
+    },
+    {
+      "id": "S16",
+      "requirementIds": ["R11"],
+      "given": "separate cases of zero references, incomplete project load, unsupported feature and timeout",
+      "when": "the caller examines results",
+      "then": "the four outcomes are distinguishable in machine-readable and compact forms; none falsely proves repository-wide absence."
+    },
+    {
+      "id": "S17",
+      "requirementIds": ["R12"],
+      "given": "a large reference set with a fixed observation",
+      "when": "bounded pages or compact output are requested",
+      "then": "each page obeys its limits and retains source/coverage metadata; continuation retrieves the same set without duplicates or unexplained loss."
+    },
+    {
+      "id": "S18",
+      "requirementIds": ["R12", "R09"],
+      "given": "a continuation cursor refers to an earlier observation",
+      "when": "source or scope changes before the next page",
+      "then": "the cursor is rejected or explicitly rebound by a new query, never used to mix snapshots."
+    },
+    {
+      "id": "S19",
+      "requirementIds": ["R13", "R25"],
+      "given": "a repository requests build import, macro execution or dependency download outside the granted policy",
+      "when": "analysis starts",
+      "then": "the operation is blocked or routed through existing authorization; limited analysis is labeled and no repository text grants itself permission."
+    },
+    {
+      "id": "S20",
+      "requirementIds": ["R14"],
+      "given": "a selected symbol has references across several files",
+      "when": "rename is prepared",
+      "then": "the proposal identifies every provider-returned change and precondition with a full retrievable diff; all source bytes remain unchanged."
+    },
+    {
+      "id": "S21",
+      "requirementIds": ["R14", "R18"],
+      "given": "a code action changes text and renames or deletes a resource",
+      "when": "the action is prepared",
+      "then": "the complete ordered operation set and effects are visible; unsupported resource operations are rejected before application."
+    },
+    {
+      "id": "S22",
+      "requirementIds": ["R15"],
+      "given": "a complete proposal covered by the task authorization and matching current preconditions",
+      "when": "the caller applies it",
+      "then": "only the specified targets change and a result receipt identifies the proposal and resulting observations; no redundant permission request is required."
+    },
+    {
+      "id": "S23",
+      "requirementIds": ["R15"],
+      "given": "one target changes, becomes read-only, escapes the authorized root through a symlink, or loses authorization before apply",
+      "when": "preflight runs",
+      "then": "the whole preflight is rejected with a concrete conflict and no target is changed."
+    },
+    {
+      "id": "S24",
+      "requirementIds": ["R16"],
+      "given": "an edit targets an unsaved editor-owned buffer",
+      "when": "the proposal is applied",
+      "then": "the owner acknowledges the versioned edit or rejects it; Threadnote never bypasses the buffer by blindly rewriting disk."
+    },
+    {
+      "id": "S25",
+      "requirementIds": ["R17"],
+      "given": "an application acknowledgement is lost after some or all writes",
+      "when": "the caller retries the same operation",
+      "then": "the operation is reconciled against recorded intent and actual versions; it is not applied twice and an unknown outcome is not labeled success."
+    },
+    {
+      "id": "S26",
+      "requirementIds": ["R17"],
+      "given": "a process interruption or disk failure occurs mid-application and the user later edits one target",
+      "when": "recovery runs",
+      "then": "changed and unchanged targets are reported, recovery is reviewable, and later edits are preserved; partial/indeterminate status persists until reconciled."
+    },
+    {
+      "id": "S27",
+      "requirementIds": ["R18", "R13"],
+      "given": "a provider returns an opaque shell command or unqualified command identifier",
+      "when": "the caller asks for that code action",
+      "then": "the command is rejected with supported alternatives; no arbitrary process execution occurs."
+    },
+    {
+      "id": "S28",
+      "requirementIds": ["R19", "R07"],
+      "given": "a successful rename moves a previously cited symbol",
+      "when": "context and diagnostics are requested again",
+      "then": "old results are invalidated; verified relocation or explicit unresolved status is shown and durable memory is not silently rewritten."
+    },
+    {
+      "id": "S29",
+      "requirementIds": ["R20"],
+      "given": "a standard client negotiates UTF-8 or UTF-16 and opens Unicode/CRLF documents",
+      "when": "sync, navigation and cancellation are exercised",
+      "then": "ranges round-trip correctly, synchronization is ordered, unsupported capabilities are not advertised and stdout remains valid LSP framing."
+    },
+    {
+      "id": "S30",
+      "requirementIds": ["R21", "R22"],
+      "given": "VS Code or Cursor already has a native language extension",
+      "when": "Threadnote is installed in default coexistence mode",
+      "then": "Threadnote knowledge is available without duplicate completion/diagnostic/refactoring providers; semantic ownership changes only through explicit setup."
+    },
+    {
+      "id": "S31",
+      "requirementIds": ["R20", "R21"],
+      "given": "a generic LSP client with no Threadnote-specific UI extension",
+      "when": "the documented stdio configuration is used",
+      "then": "standard advertised navigation/hover features work; custom knowledge affordances are clearly optional and unsupported methods fail coherently."
+    },
+    {
+      "id": "S32",
+      "requirementIds": ["R22", "R25"],
+      "given": "a symbol has private, shared and out-of-scope memories",
+      "when": "an editor renders knowledge hover or CodeLens",
+      "then": "only authorized relevant records appear with freshness and navigable links; rendering does not publish them or expose unrelated private data."
+    },
+    {
+      "id": "S33",
+      "requirementIds": ["R23"],
+      "given": "the same project/view/request is submitted through CLI JSON and MCP without an editor",
+      "when": "results or an edit proposal are retrieved",
+      "then": "evidence, capability/error meaning and guarded-edit preconditions agree; transport presentation may differ without semantic loss."
+    },
+    {
+      "id": "S34",
+      "requirementIds": ["R24"],
+      "given": "a monorepo has multiple roots and two versions of a dependency",
+      "when": "navigation or impact is requested",
+      "then": "the correct project/version is identified; references and graph impact expose their respective scope and do not claim exhaustive cross-repository runtime impact."
+    },
+    {
+      "id": "S35",
+      "requirementIds": ["R25"],
+      "given": "source or provider diagnostics contain credentials or private text",
+      "when": "status, logs or telemetry are exported by default",
+      "then": "content and secrets are omitted/redacted; intended source-bearing responses remain confined to the authorized caller."
+    },
+    {
+      "id": "S36",
+      "requirementIds": ["R26", "R27"],
+      "given": "an existing Threadnote 5 workspace with memories, citations and offline graph use",
+      "when": "6.0 is installed and semantic analysis stays disabled or is later disabled",
+      "then": "existing context remains accessible; no semantic runtime or permanent daemon is required and configuration removal does not delete user content."
+    },
+    {
+      "id": "S37",
+      "requirementIds": ["R27"],
+      "given": "a previous client or incompatible cache/version accesses the upgraded service",
+      "when": "a request or rollback is attempted",
+      "then": "supported contracts remain available or a precise incompatibility/recovery path is returned; no memory loss or unsafe data downgrade occurs."
+    },
+    {
+      "id": "S38",
+      "requirementIds": ["R28", "R30"],
+      "given": "the complete selected-language/platform/client fixture matrix includes semantic and fault cases",
+      "when": "release qualification runs",
+      "then": "every mandatory cell has a reproducible passing receipt; missing capabilities, licensing or recovery evidence block the claimed GA matrix."
+    },
+    {
+      "id": "S40",
+      "requirementIds": ["R31", "R06"],
+      "given": "a warm agent session already holds the relevant context",
+      "when": "a small follow-up occurs",
+      "then": "routing requests only needed new evidence; it does not reload all skills, memories or full symbol bodies solely because a turn started."
+    },
+    {
+      "id": "S41",
+      "requirementIds": ["R32", "R10"],
+      "given": "many clients and a project exceed configured resource/concurrency limits",
+      "when": "work is admitted",
+      "then": "requests queue, reject or degrade with explicit policy/coverage while limits remain bounded; unrelated ready work is not starved indefinitely."
+    },
+    {
+      "id": "S42",
+      "requirementIds": ["R01", "R24", "R28"],
+      "given": "qualified Java Gradle/Maven fixtures plus a deferred mixed Java/Kotlin fixture and unqualified Android/KMP fixtures",
+      "when": "semantic operations run",
+      "then": "qualified Java cases pass across source boundaries; deferred Kotlin and unqualified project types are labeled and cannot silently count as production support or complete mixed-language references."
+    },
+    {
+      "id": "S43",
+      "requirementIds": ["R14", "R16", "R17", "R20", "R21"],
+      "given": "an ordinary LSP client advertises standard WorkspaceEdit support but lacks the qualified guarded-application integration",
+      "when": "it initializes and requests rename or a mutating code action",
+      "then": "Threadnote does not advertise or return an immediately applicable mutation; navigation remains available and a preview/integration requirement is explained. A qualified first-party client exposes the action only through proposal checks, authoritative application, acknowledgement and observed-state reconciliation."
+    },
+    {
+      "id": "S44",
+      "requirementIds": ["R15", "R16", "R17"],
+      "given": "a qualified multi-file operation has written its first target, then the next target text or owner changes before its conditional mutation",
+      "when": "application continues",
+      "then": "the changed target is preserved, remaining writes stop, and the receipt reports the written target and conflict/partial outcome; recovery never duplicates the first change or overwrites the concurrent edit."
+    }
+  ],
+  "excluded": [
+    {
+      "id": "S39",
+      "reason": "P12 benchmark study; not P11 functional qualification"
+    }
+  ]
+}

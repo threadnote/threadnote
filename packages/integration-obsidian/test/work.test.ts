@@ -89,18 +89,20 @@ describe('Obsidian bounded source work', () => {
         expect(first.more).toBe(true);
         expect(EffectRecord.keys((yield* readState).files)).toHaveLength(64);
         const firstState = yield* readState;
-        const firstNoteId = firstState.files[names[0]]?.noteId;
+        // Track a file of the first quantum: the scan follows directory order, which is not sorted on every filesystem.
+        const tracked = EffectRecord.keys(firstState.files).sort()[0];
+        const firstNoteId = firstState.files[tracked]?.noteId;
         expect(firstNoteId).toBeDefined();
         expect(firstState.sourceInstanceId).toBeDefined();
         const second = yield* obsidianSourceWork.run(config, 'vault', options);
         expect(second.more).toBe(false);
         expect(EffectRecord.keys((yield* readState).files).sort()).toEqual(names);
-        expect((yield* readState).files[names[0]]?.noteId).toBe(firstNoteId);
+        expect((yield* readState).files[tracked]?.noteId).toBe(firstNoteId);
         expect((yield* readState).sourceInstanceId).toBe(firstState.sourceInstanceId);
         const repeated = yield* obsidianSourceWork.run(config, 'vault', options);
         expect(repeated.syncedDocuments).toEqual([]);
         expect(EffectRecord.keys((yield* readState).files)).toHaveLength(count);
-        expect((yield* readState).files[names[0]]?.noteId).toBe(firstNoteId);
+        expect((yield* readState).files[tracked]?.noteId).toBe(firstNoteId);
         if (repeated.more) yield* obsidianSourceWork.run(config, 'vault', options);
         yield* fs.remove(path.join(vault, names[0]));
         yield* obsidianSourceWork.run(config, 'vault', options);

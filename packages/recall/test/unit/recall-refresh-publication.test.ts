@@ -21,6 +21,7 @@ import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {ApplicationError} from '@threadnote/platform/errors';
+import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -269,6 +270,43 @@ effectIt.effect('keeps a later client WAL after activating a recovered generatio
         {value: 'durable'},
       ]);
     }).pipe(Effect.ensuring(Effect.sync(() => later?.close())));
+  }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect('defers recovery activation when a canonical writer takes the publication lock', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(1);
+    const lexical = f.path.join(f.home, 'indexes', 'lexical');
+    const database = f.path.join(lexical, recallIndexDatabaseFilename(false));
+    yield* f.fs.writeFileString(database, 'not SQLite');
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const recovery = yield* f
+      .refresh(progress =>
+        progress.phase === 'writing' && progress.completed === 0
+          ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+          : Effect.void,
+      )
+      .pipe(Effect.flip, Effect.forkScoped);
+    yield* Deferred.await(entered).pipe(Effect.timeout('3 seconds'));
+    yield* withExclusiveFileLock(
+      f.fs,
+      resourceAccountMutationLockPath(f.path, f.home, f.config.account),
+      {
+        category: 'canonical-account',
+        retryIntervalMilliseconds: 25,
+        staleAfterMilliseconds: 30_000,
+        waitTimeoutMilliseconds: 0,
+      },
+      Effect.gen(function* () {
+        yield* Deferred.succeed(release, undefined);
+        expect(yield* Fiber.join(recovery)).toMatchObject({_tag: 'RecallIndexSourceChanged'});
+      }),
+    );
+    expect(yield* f.fs.exists(EffectString.replace(/\.sqlite$/, '.pointer.json')(database))).toBe(false);
+    expect(yield* f.fs.readDirectory(f.path.join(lexical, 'generations'))).toEqual([]);
+    yield* f.refresh();
+    expect((yield* recallIndexStatus(f.config)).ready).toBe(true);
   }).pipe(provide, TestClock.withLive),
 );
 

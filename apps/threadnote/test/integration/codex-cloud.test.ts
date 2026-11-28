@@ -7,6 +7,7 @@ import {promisify} from '@threadnote/testing/node-util';
 import {TestError} from '@threadnote/testing/test-error';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {describe, expect, it} from 'vitest';
+import {skipWithoutNativeTypeScript} from '@threadnote/graph/test/helpers/native-typescript-session';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
@@ -170,7 +171,8 @@ describe('Codex Cloud CLI integration', () => {
     30_000,
   );
 
-  it('prepares a reusable structural graph, detects source changes, and refreshes it at startup', async () => {
+  it('prepares a reusable structural graph, detects source changes, and refreshes it at startup', async context => {
+    skipWithoutNativeTypeScript(context);
     const f = await fixture();
     const repo = join(f.root, 'source');
     try {

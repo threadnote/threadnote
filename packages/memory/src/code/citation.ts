@@ -159,8 +159,9 @@ const CITATION_ERROR_MESSAGES: Readonly<Record<MemoryCodeCitationErrorReason, st
 const encoder = new TextEncoder();
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
-const SNAPSHOT_ID = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/u;
-const GRAPH_CONTENT_ID = /^(?:cgc_[0-9a-f]{40}|cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?)$/u;
+// Syntax only: graph/source receipts, not the physical suffix, establish citation authority.
+const SNAPSHOT_ID = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16}|-lx2)?$/u;
+const GRAPH_CONTENT_ID = /^(?:cgc_[0-9a-f]{40}|cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16}|-lx2)?)$/u;
 const NODE_ID = /^cgs_(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const CITATION_ID = /^tncc_[0-9a-f]{40}$/u;
 const CODE_CITATION_PREFIX = `${MEMORY_CODE_CITATION_HEADER}: `;
