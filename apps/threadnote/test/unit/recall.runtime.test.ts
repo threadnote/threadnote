@@ -7,7 +7,7 @@ import {mkdir, mkdtemp, rm, utimes, writeFile} from '@threadnote/testing/node-fs
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, DateTime, Effect, Exit, Fiber, Layer, Option, Semaphore} from 'effect';
+import {Cause, DateTime, Effect, Exit, Fiber, FileSystem, Layer, Option, Semaphore} from 'effect';
 import * as FC from 'fast-check';
 import {TestClock} from 'effect/testing';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
@@ -42,6 +42,7 @@ import {
   mergeRecallIndexCandidates,
   mergePrioritizedRecallIndexCandidates,
   prepareRecallSections,
+  prepareRecallSectionsWithoutInference,
   prioritizeCrossScopeRecallCandidates,
   prioritizeWorkspaceRecallCandidates,
   recallCrossScopeFallbackRequired,
@@ -49,7 +50,9 @@ import {
 } from '@threadnote/recall/runtime';
 import {
   boundedRecallSemanticRetrieval,
+  emptyRecallSemanticScoresResult,
   MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS,
+  type RecallSemanticScoresResult,
 } from '@threadnote/recall/semantic_scores';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {buildRecallSections, exactRecallTerms} from '@threadnote/recall/results';
@@ -368,6 +371,60 @@ describe('recall runtime orchestration', () => {
       ),
     ).toBeGreaterThan(0);
   });
+  it('promotes only the strongest eligible semantic overflow after other lane reserves', () => {
+    const candidate = (name: string, semantic?: number) => ({
+      semantic,
+      text: name,
+      uri: `threadnote://user/test/memories/durable/${name}.md`,
+    });
+    const excluded = candidate('excluded-semantic', 0.99);
+    const topical = [
+      candidate('first-lexical'),
+      candidate('second-lexical'),
+      candidate('third-lexical'),
+      candidate('weaker-semantic', 0.8),
+      candidate('first-tied-semantic', 0.9),
+      candidate('strongest-semantic', 0.95),
+      candidate('second-tied-semantic', 0.9),
+      excluded,
+    ];
+    const merged = mergeRecallCandidateLanes([topical], [[candidate('protected')]], [[candidate('cross-scope')]], {
+      admissionLimit: 6,
+      crossScopeReserve: 1,
+      protectedReserve: 1,
+      recencyCandidateSets: [[candidate('recent')]],
+      recencyReserve: 1,
+      semanticReserve: {limit: 2, isEligible: row => row.uri !== excluded.uri},
+    });
+    expect(EffectArray.map(merged.slice(0, 6), row => row.text)).toEqual([
+      'first-lexical',
+      'recent',
+      'protected',
+      'cross-scope',
+      'strongest-semantic',
+      'first-tied-semantic',
+    ]);
+    expect(merged).toHaveLength(topical.length + 3);
+  });
+  it('keeps a stronger in-window semantic candidate ahead of weaker overflow', () => {
+    const candidate = (name: string, semantic?: number) => ({
+      semantic,
+      text: name,
+      uri: `threadnote://user/test/memories/durable/${name}.md`,
+    });
+    const lexical = candidate('lexical');
+    const boundary = candidate('boundary', 0.99);
+    const merge = (overflow: number) =>
+      mergeRecallCandidateLanes([[lexical, boundary, candidate('overflow', overflow)]], [], [], {
+        admissionLimit: 2,
+        crossScopeReserve: 0,
+        protectedReserve: 0,
+        semanticReserve: {limit: 1, isEligible: () => true},
+      });
+    expect(EffectArray.map(merge(0.8), row => row.text)).toEqual(['lexical', 'boundary', 'overflow']);
+    expect(EffectArray.map(merge(0.99), row => row.text)).toEqual(['lexical', 'boundary', 'overflow']);
+    expect(EffectArray.map(merge(1), row => row.text)).toEqual(['lexical', 'overflow', 'boundary']);
+  });
   fcEffectProp(
     effectIt,
     'keeps protected and cross-scope reserves independent throughout the bounded admission window',
@@ -606,6 +663,197 @@ describe('recall runtime orchestration', () => {
       expect(inference.rerank).toHaveBeenCalledTimes(1);
       expect(cache).toEqual({scores: new Map([[cachedKey, 0.75]]), unavailable: false});
     }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+  effectIt.effect('admits a semantic-only memory beyond the lexical preselection window', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-semantic-window-'});
+      const config = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'tester',
+        manifestPath: join(home, 'manifest.yaml'),
+        user: 'tester',
+      };
+      const query = 'Does reducing an invoice with a voucher change what portion incurs duty?';
+      const root = join(home, 'data/local/user/tester/memories/durable');
+      const scope = 'threadnote://user/tester/memories/durable';
+      const semanticUri = `${scope}/tax-order.md`;
+      const timestamp = (yield* DateTime.nowAsDate).toISOString();
+      const document = (topic: string, body: string) =>
+        formatMemoryDocument(
+          'MEMORY',
+          {
+            kind: 'durable',
+            memoryId: `tn_semantic_window_${topic}`,
+            sourceAgentClient: 'test',
+            status: 'active',
+            timestamp,
+            topic,
+          },
+          body,
+        );
+      yield* fs.makeDirectory(root, {recursive: true});
+      yield* fs.writeFileString(
+        join(root, 'tax-order.md'),
+        document('tax-order', 'For online orders, apply coupons to merchandise before calculating sales tax.'),
+      );
+      const projects = ['probe-a', 'probe-b', 'probe-c', 'probe-d', 'probe-e'];
+      const distractors = [
+        {topic: 'invoice-export', body: 'Each invoice export lists monthly totals for accounting.'},
+        {topic: 'voucher-ledger', body: 'A voucher is reconciled against the original invoice for audit.'},
+      ];
+      const distractorUris = EffectArray.map(distractors, ({topic}) => `${scope}/projects/${projects[0]}/${topic}.md`);
+      for (const project of projects) {
+        const directory = join(root, 'projects', project);
+        yield* fs.makeDirectory(directory, {recursive: true});
+        yield* Effect.forEach(
+          Array.from({length: 25}, (_, index) => index),
+          index => {
+            const distractor = project === projects[0] ? distractors[index] : undefined;
+            const topic = distractor?.topic ?? `${project}-${index}`;
+            const body = distractor?.body ?? `Invoice tracking sheet ${topic} refers to database migration.`;
+            return fs.writeFileString(join(directory, `${topic}.md`), document(topic, body));
+          },
+          {concurrency: 8, discard: true},
+        );
+      }
+      const snapshot = yield* loadRecallIndexData(config, {includeInactive: false});
+      const exactScopes = EffectArray.map(projects, project => `${scope}/projects/${project}`);
+      const exactMatches = yield* readRecallExactMatches(config, {
+        includeInactive: false,
+        limitPerTerm: 25,
+        terms: ['invoice'],
+        uriScopes: exactScopes,
+      });
+      expect(exactMatches).toHaveLength(125);
+      expect(exactMatches).not.toContainEqual(expect.objectContaining({uri: semanticUri}));
+      const semantic = {
+        corpusGeneration: Option.some(snapshot.generation),
+        scores: Option.some(new Map([[semanticUri, 0.88]])),
+        warning: Option.none(),
+      };
+      const prepare = (
+        matches = exactMatches,
+        evidence: RecallSemanticScoresResult = semantic,
+        allowedUriScopes = [scope],
+      ) =>
+        prepareRecallSectionsWithoutInference(
+          config,
+          {
+            allowExactRescue: true,
+            allowSemanticRescue: true,
+            allowedUriScopes,
+            exactMatches: matches,
+            feedbackQuery: query,
+            includeInactive: false,
+            limit: 12,
+            passes: [],
+            query,
+            readRecords: uris => readMemoryRecordsByUri(config, uris),
+          },
+          evidence,
+          candidates => candidates,
+        );
+      const small = yield* prepare(exactMatches.slice(0, 4));
+      expect(small.ranked).toContainEqual(
+        expect.objectContaining({uri: semanticUri, rankSignals: expect.objectContaining({semantic: 0.88})}),
+      );
+      const lexical = yield* prepare(exactMatches, emptyRecallSemanticScoresResult());
+      expect(lexical.ranked).not.toContainEqual(expect.objectContaining({uri: semanticUri}));
+      const excluded = yield* prepare(exactMatches, semantic, exactScopes);
+      expect(excluded.ranked).not.toContainEqual(expect.objectContaining({uri: semanticUri}));
+      const refined = yield* prepare();
+      expect(refined.ranked).toContainEqual(
+        expect.objectContaining({uri: semanticUri, rankSignals: expect.objectContaining({semantic: 0.88})}),
+      );
+      const compared = EffectArray.filter(
+        refined.ranked,
+        hit => hit.uri === semanticUri || distractorUris.includes(hit.uri),
+      );
+      expect(compared[0]?.uri).toBe(semanticUri);
+      expect(compared.slice(1)).toEqual(
+        expect.arrayContaining(
+          EffectArray.map(distractorUris, uri =>
+            expect.objectContaining({uri, rankSignals: expect.objectContaining({semantic: 0})}),
+          ),
+        ),
+      );
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+  effectIt.effect('ranks an exact identifier above a semantic lookalike', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-identifier-rank-'});
+      const config: RuntimeConfig = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'tester',
+        manifestPath: join(home, 'manifest.yaml'),
+        user: 'tester',
+      };
+      const root = join(home, 'data/local/user/tester/memories/durable');
+      const scope = 'threadnote://user/tester/memories/durable';
+      const exactUri = `${scope}/pay-431.md`;
+      const lookalikeUri = `${scope}/pay-413.md`;
+      const query = 'PAY-431';
+      const timestamp = (yield* DateTime.nowAsDate).toISOString();
+      yield* fs.makeDirectory(root, {recursive: true});
+      for (const {id, attempts} of [
+        {id: 'PAY-431', attempts: 'three'},
+        {id: 'PAY-413', attempts: 'two'},
+      ]) {
+        const topic = EffectString.toLowerCase(id);
+        yield* fs.writeFileString(
+          join(root, `${topic}.md`),
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              memoryId: `tn_identifier_rank_${topic}`,
+              sourceAgentClient: 'test',
+              status: 'active',
+              timestamp,
+              topic,
+            },
+            `${id} allows ${attempts} checkout retries before it returns a payment error.`,
+          ),
+        );
+      }
+      const snapshot = yield* loadRecallIndexData(config, {includeInactive: false});
+      const exactMatches = yield* readRecallExactMatches(config, {
+        includeInactive: false,
+        terms: exactRecallTerms(query),
+        uriScopes: [scope],
+      });
+      expect(EffectArray.map(exactMatches, match => match.uri)).toEqual([exactUri]);
+      const prepared = yield* prepareRecallSectionsWithoutInference(
+        config,
+        {
+          allowExactRescue: true,
+          allowSemanticRescue: true,
+          allowedUriScopes: [scope],
+          exactMatches,
+          feedbackQuery: query,
+          includeInactive: false,
+          limit: 2,
+          passes: [],
+          query,
+          readRecords: uris => readMemoryRecordsByUri(config, uris),
+        },
+        {
+          corpusGeneration: Option.some(snapshot.generation),
+          scores: Option.some(new Map([[lookalikeUri, 0.95]])),
+          warning: Option.none(),
+        },
+        candidates => candidates,
+      );
+      expect(prepared.ranked).toMatchObject([
+        {uri: exactUri, rankSignals: {semantic: 0}},
+        {uri: lookalikeUri, rankSignals: {exact: 0, semantic: 0.95}},
+      ]);
+      expect(prepared.ranked[0]?.rankSignals?.exact).toBeGreaterThan(0);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
   effectIt.effect('drops stale semantic scores when the ranked lexical snapshot has advanced', () =>
     Effect.gen(function* () {
