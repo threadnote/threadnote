@@ -51,6 +51,14 @@ receipt_diagnosis() {
       "cancelling", "ready", "cancelled", "stale", "timeout", "unavailable", "unsupported", "conflict",
       "invalid-request", "budget-exceeded", "unknown"]);
     def compact: with_entries(select(.value != null));
+    def context_attempt:
+      {
+        subcase: (field(["contextAttempt", "subcase"]) |
+          closed(["no-applicable-memory", "current-and-stale-citations", "graph-source-drift-refusal"])),
+        attempt: (field(["contextAttempt", "attempt"]) | closed(["initial", "stale-retry"])),
+        previousGraphReady: (field(["contextAttempt", "previousGraphReady"]) |
+          if type == "boolean" then . else null end)
+      } | if .subcase == null or .attempt == null then null else compact end;
     def asset_refusal:
       . as $message | first(
         ["missing-asset", "missing-manifest", "non-canonical-path", "no-reviewed-pin", "unsafe-asset", "pin-mismatch",
@@ -95,7 +103,8 @@ receipt_diagnosis() {
             result: ((field(["canonical", "status"]) // field(["result", "status"]) //
               field(["observations", -1, "progress", "state"]) // field(["observations", -1, "status"]) //
               field(["cleanup"]) // field(["status"])) | state),
-            mcpResult: (field(["mcp", "canonical", "status"]) | state)
+            mcpResult: (field(["mcp", "canonical", "status"]) | state),
+            contextAttempt: (if $operation == "semantic-context-graph-memory-join" then context_attempt else null end)
           } | compact) // null),
         cleanup: ({
           mcpCloseCompleted: field(["cleanup", "mcpCloseCompleted"]),

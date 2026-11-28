@@ -34,6 +34,7 @@ import {join, dirname} from 'node:path';
 import {createHash} from 'node:crypto';
 import {Ledger, qualificationInventory} from './inventory.js';
 import {candidateTargetMatchesHost, runCandidateChecks, settleProviderShutdown} from './candidate.js';
+import {runContextFixture} from './context-fixture.js';
 import {checkMissingProfileTransportParity, checkProposalStatusTransportParity} from './transport-oracle.js';
 
 const ledger = Schema.decodeUnknownSync(Ledger)(
@@ -261,6 +262,58 @@ describe('final combined qualification preparation', () => {
       }
     }
   });
+  it('records the context attempt and prior graph readiness when a stale retry fails before a response', async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'tn11-context-attempt-')));
+    const sources = {
+      'a.ts': 'export const UnsavedName = 1;\r\n',
+      'b.ts': 'export {UnsavedName} from "./a";\r\n',
+    };
+    const input = Schema.decodeSync(ProviderInputs)({
+      version: 1,
+      language: 'typescript',
+      providerVersion: nativeTypeScriptAssetPins.version,
+      assetDirectory: '/inert',
+      notices: [{component: 'inert', file: '/inert', sha256: EffectString.repeat(64)('a')}],
+    });
+    try {
+      for (const [file, text] of EffectRecord.toEntries(sources)) await writeFile(join(directory, file), text);
+      const results: unknown[] = [];
+      let contextCalls = 0;
+      const run: QualificationCli = async (args, request) => {
+        if (args[0] === 'graph') {
+          expect(args).toEqual(['graph', 'index', '--cwd', directory, '--no-vectors', '--json']);
+          return {
+            pid: 1,
+            code: 0,
+            stdout: '',
+            stderr: '',
+            value: {type: 'code-graph-index', version: 1, snapshot: {state: 'ready'}},
+          };
+        }
+        expect(args).toEqual(['semantic', 'query', '--json']);
+        expect(request).toMatchObject({operation: 'context', milliseconds: 10000});
+        contextCalls++;
+        expect(results[0]).toMatchObject({
+          contextAttempt: {
+            subcase: 'no-applicable-memory',
+            attempt: contextCalls === 1 ? 'initial' : 'stale-retry',
+            previousGraphReady: true,
+          },
+        });
+        if (contextCalls === 2) throw new Error('Inert context transport failed');
+        return {pid: 1, code: 0, stdout: '', stderr: '', value: {status: 'stale', evidence: null}};
+      };
+      await expect(runContextFixture(input, directory, sources, run, results)).rejects.toThrow(
+        'Inert context transport failed',
+      );
+      expect(contextCalls).toBe(2);
+      expect(results[0]).toMatchObject({status: 'observing', fullScenarioQualified: false});
+      expect(await readFile(join(directory, 'a.ts'), 'utf8')).toBe(sources['a.ts']);
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
   it('authors finite actions and refuses invalid or unsafe public listings', () => {
     const expected = {
       python: ['action_case.py', 'def selected() -> int:\n    return 1\n\n_ = selected()\n'],

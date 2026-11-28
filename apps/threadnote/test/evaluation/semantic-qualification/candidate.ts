@@ -663,6 +663,36 @@ export async function runCandidateChecks(
       THREADNOTE_MODEL_SETUP: 'off',
       THREADNOTE_EFFECT_AI: 'off',
     };
+    if (provider && !writerFixture) {
+      // Seal the repository identity before the provider binds its configuration to this worktree.
+      const initializeRepository = async () => {
+        const gitOptions = {
+          cwd: project,
+          timeout: 5000,
+          env: {...environment, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null'},
+        };
+        await execute('git', ['init', '--quiet', '--object-format=sha1'], gitOptions);
+        await execute('git', ['add', '--', ...EffectRecord.keys(files)], gitOptions);
+        await execute(
+          'git',
+          [
+            '-c',
+            'core.hooksPath=/dev/null',
+            '-c',
+            'commit.gpgsign=false',
+            '-c',
+            'user.name=Threadnote Fixture',
+            '-c',
+            'user.email=fixture@example.invalid',
+            'commit',
+            '-qm',
+            'P11 authored fixture',
+          ],
+          gitOptions,
+        );
+      };
+      await within(initializeRepository(), deadline - Date.now());
+    }
     const sdk = Schema.decodeUnknownSync(Schema.Struct({version: Schema.String}))(
       JSON.parse(
         await readFile(
@@ -841,33 +871,7 @@ export async function runCandidateChecks(
             branches,
           )
         : await runProviderPreview(provider.input, project, fixture.sources, run, client, within, deadline, branches);
-      if (!writerFixture)
-        await runContextFixture(provider.input, project, fixture.sources, run, within, deadline, branches, async () => {
-          const gitOptions = {
-            cwd: project,
-            timeout: 5000,
-            env: {...environment, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null'},
-          };
-          await execute('git', ['init', '--quiet', '--object-format=sha1'], gitOptions);
-          await execute('git', ['add', '--', ...EffectRecord.keys(files)], gitOptions);
-          await execute(
-            'git',
-            [
-              '-c',
-              'core.hooksPath=/dev/null',
-              '-c',
-              'commit.gpgsign=false',
-              '-c',
-              'user.name=Threadnote Fixture',
-              '-c',
-              'user.email=fixture@example.invalid',
-              'commit',
-              '-qm',
-              'P11 authored fixture',
-            ],
-            gitOptions,
-          );
-        });
+      if (!writerFixture) await runContextFixture(provider.input, project, fixture.sources, run, branches);
       if (writerFixture) {
         branches.push({
           operation: 'semantic-context-graph-memory-join',

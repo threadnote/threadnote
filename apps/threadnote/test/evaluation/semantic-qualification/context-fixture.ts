@@ -16,6 +16,7 @@ const graphHash = (text: string) => {
 const currentConstraint = 'P11_CURRENT_CONSTRAINT: preserve UnsavedName.';
 const staleDecision = 'P11_STALE_DECISION: preserve original bytes.';
 const unrelated = 'P11_UNRELATED_CONSTRAINT: dependent only.';
+type ContextCase = 'no-applicable-memory' | 'current-and-stale-citations' | 'graph-source-drift-refusal';
 
 /** S08/S09 partial: real private memory, source-only graph and semantic source binding; no inferred keywords/models. */
 export async function runContextFixture(
@@ -23,10 +24,7 @@ export async function runContextFixture(
   project: string,
   sources: Record<string, string>,
   run: QualificationCli,
-  within: <A>(promise: Promise<A>, milliseconds: number) => Promise<A>,
-  deadline: number,
   results: unknown[],
-  initializeRepository: () => Promise<void>,
 ) {
   const [declaration, dependent] = EffectRecord.keys(sources);
   const original = sources[declaration];
@@ -50,15 +48,34 @@ export async function runContextFixture(
     maxItems: 32,
     budgetTokens: 1500,
   };
+  const contextAttempt: {
+    subcase: ContextCase | null;
+    attempt: 'initial' | 'stale-retry' | null;
+    previousGraphReady: boolean | null;
+  } = {subcase: null, attempt: null, previousGraphReady: null};
   const record = {
     operation: 'semantic-context-graph-memory-join',
     status: 'observing',
     fullScenarioQualified: false,
     checks: [] as unknown[],
+    contextAttempt,
   };
   results.push(record);
-  await within(initializeRepository(), deadline - Date.now());
-  const index = () => run(['graph', 'index', '--cwd', project, '--no-vectors', '--json'], {});
+  let previousGraphReady: boolean | null = null;
+  const index = async () => {
+    previousGraphReady = null;
+    const {value} = await run(['graph', 'index', '--cwd', project, '--no-vectors', '--json'], {});
+    if (
+      isJsonObject(value) &&
+      value.type === 'code-graph-index' &&
+      value.version === 1 &&
+      isJsonObject(value.snapshot)
+    ) {
+      const {state} = value.snapshot;
+      if (state === 'ready' || state === 'building' || state === 'failed' || state === 'retired')
+        previousGraphReady = state === 'ready';
+    }
+  };
   const remember = async (topic: string, file: string, text: string) => {
     const stored = await run(
       [
@@ -84,12 +101,16 @@ export async function runContextFixture(
       'Own isolated memory actually stored',
     );
   };
-  const context = async (label: string, text: string, bound: boolean) => {
+  const context = async (label: ContextCase, text: string, bound: boolean) => {
+    contextAttempt.subcase = label;
+    contextAttempt.attempt = 'initial';
+    contextAttempt.previousGraphReady = previousGraphReady;
     const response = await run(['semantic', 'query', '--json'], request);
     let canonical = response.value;
     if (isJsonObject(canonical) && canonical.status === 'stale') {
       record.checks.push({label: label + '-prerequisite-invalidation', canonical});
       assert.equal(canonical.evidence, null, 'Changed analysis prerequisites refuse evidence');
+      contextAttempt.attempt = 'stale-retry';
       canonical = (await run(['semantic', 'query', '--json'], request)).value;
     }
     record.checks.push({label, file: declaration, sha256: hash(text), canonical});
