@@ -19,7 +19,10 @@ import * as Effect from 'effect';
 
 /**
  * Version of the text that `indexCandidate` stores: redaction, external body parsing and memory text selection.
- * Change it with that derivation; each vector build then reads every body once again.
+ * Change it with that derivation. A change drops the `candidate_text_derivation` record on the next publication
+ * that does not derive every source, and full vector walks then read every body until a forced full lexical
+ * publication writes the record again. So ship a change with a forced lexical refresh: the stale marker with
+ * `forceRefresh`, which `expireRecallIndexValidation` writes when it gets no invalidated URIs.
  */
 export const RECALL_CANDIDATE_TEXT_VERSION: number = 1;
 /** The text version of every publication that does not record one; binaries before the record derive it so. */
