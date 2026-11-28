@@ -1466,7 +1466,7 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
 });
 effectIt.layer(CoordinatorTestLayer, {buildPerTest: true})(layerIt => {
   layerIt.effect.skipIf(process.platform === 'win32')(
-    'checks native saved-disk context closing once and retires on configuration drift',
+    'checks native saved-disk context closing once and retires on configuration drift or owner loss',
     () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -1476,8 +1476,12 @@ effectIt.layer(CoordinatorTestLayer, {buildPerTest: true})(layerIt => {
         );
         const project = path.join(root, 'project');
         const home = path.join(root, 'home');
+        const executable = path.join(root, 'tsc');
+        const sdkDirectory = path.join(root, 'sdk');
         yield* fs.makeDirectory(project, {mode: 0o700});
         yield* fs.makeDirectory(home, {mode: 0o700});
+        yield* fs.makeDirectory(sdkDirectory, {mode: 0o700});
+        yield* fs.writeFileString(executable, 'fixture compiler');
         const file = path.join(project, 'a.ts');
         const text = 'export const example = 1;\n';
         yield* fs.writeFileString(file, text);
@@ -1485,15 +1489,20 @@ effectIt.layer(CoordinatorTestLayer, {buildPerTest: true})(layerIt => {
         const uri = (yield* path.toFileUrl(file)).href;
         const events: string[] = [];
         let configuration = sha256HexSync('original configuration');
-        const {wire} = yield* fakeWire;
+        let ownerCurrent = true;
         const assertOriginalCurrent = () => {
           events.push('owner');
+          if (!ownerCurrent) throw new Error('Original provider owner lost');
         };
         const mocks = [
           vi.spyOn(nativeTypeScriptRuntime, 'recheckNativeTypeScriptExecutable').mockResolvedValue(undefined),
           vi
             .spyOn(semanticTransport, 'spawnLspWire')
-            .mockReturnValue(Effect.succeed({...wire, identity: 'fixture-native-owner', assertOriginalCurrent})),
+            .mockReturnValue(
+              fakeWire.pipe(
+                Effect.map(({wire}) => ({...wire, identity: 'fixture-native-owner', assertOriginalCurrent})),
+              ),
+            ),
           vi.spyOn(typescriptProvider, 'makeTypeScriptSession').mockImplementation((client, options) =>
             Effect.sync(() => {
               expect(options.native?.assertOriginalCurrent).toBe(assertOriginalCurrent);
@@ -1505,7 +1514,7 @@ effectIt.layer(CoordinatorTestLayer, {buildPerTest: true})(layerIt => {
                 diagnostics: unsupported,
                 prepare: unsupported,
                 actions: unsupported,
-                verifyPolicy: options.verifyPolicy.pipe(Effect.andThen(Effect.sync(assertOriginalCurrent))),
+                verifyPolicy: options.verifyPolicy,
                 available: Effect.sync(() => observation !== undefined),
                 project: () =>
                   Effect.succeed({configuration: options.basis.configuration, fileCount: 1, files: [file]}),
@@ -1532,10 +1541,10 @@ effectIt.layer(CoordinatorTestLayer, {buildPerTest: true})(layerIt => {
           dataHome: home,
           worktree,
           nativeCandidate: {
-            executable: path.join(root, 'tsc'),
+            executable,
             executableDigest: sha256HexSync('fixture compiler'),
             version: nativeTypeScriptAssetPins.version,
-            sdkDirectory: path.join(root, 'sdk'),
+            sdkDirectory,
             sdkTreeDigest: sha256HexSync('fixture SDK'),
             sourceCommit: nativeTypeScriptAssetPins.provenance.sourceCommit,
             sourceTree: nativeTypeScriptAssetPins.provenance.sourceTree,
@@ -1548,51 +1557,54 @@ effectIt.layer(CoordinatorTestLayer, {buildPerTest: true})(layerIt => {
             }),
         });
         const disk = yield* makeSemanticAgentDiskQueries(coordinator, worktree, sha256HexSync('fixture runtime'));
-        const attached = yield* disk.attachDisk(
-          {
-            version: 1,
-            repository: 'fixture',
-            worktree,
-            project: worktree,
-            configuration,
-            toolchain: sha256HexSync('fixture toolchain'),
-            provider: {id: 'typescript-native', version: nativeTypeScriptAssetPins.version, generation: 0},
-            view: {kind: 'disk', id: 'fixture', owner: 'fixture owner', epoch: 0},
-            uri,
-            content: sha256HexSync(text),
-            documentVersion: null,
-            projectEpoch: 0,
-          },
-          text,
-          'typescript',
-        );
-        const {observation} = attached;
+        const seed: Observation = {
+          version: 1,
+          repository: 'fixture',
+          worktree,
+          project: worktree,
+          configuration,
+          toolchain: sha256HexSync('fixture toolchain'),
+          provider: {id: 'typescript-native', version: nativeTypeScriptAssetPins.version, generation: 0},
+          view: {kind: 'disk', id: 'fixture', owner: 'fixture owner', epoch: 0},
+          uri,
+          content: sha256HexSync(text),
+          documentVersion: null,
+          projectEpoch: 0,
+        };
+        const {observation} = yield* disk.attachDisk(seed, text, 'typescript');
 
         events.length = 0;
         expect(yield* disk.observe(observation, 1000, 'context-close')).toEqual(observation);
-        expect(events).toEqual(['candidate', 'candidate', 'owner', 'configuration', 'observation']);
+        expect(events).toEqual(['candidate', 'configuration', 'owner', 'observation']);
 
         events.length = 0;
         expect(yield* disk.observe(observation, 1000)).toEqual(observation);
-        expect(events).toEqual([
-          'configuration',
-          'candidate',
-          'candidate',
-          'owner',
-          'candidate',
-          'candidate',
-          'owner',
-          'configuration',
-          'observation',
-        ]);
+        expect(events).toEqual(['configuration', 'candidate', 'candidate', 'configuration', 'observation']);
 
         events.length = 0;
         configuration = sha256HexSync('changed configuration');
         expect(yield* disk.observe(observation, 1000, 'context-close').pipe(Effect.flip)).toMatchObject({
           code: 'rejected',
         });
-        expect(events).toEqual(['candidate', 'candidate', 'owner', 'configuration']);
+        expect(events).toEqual(['candidate', 'configuration']);
         expect(yield* coordinator.status).toMatchObject({sessions: 0, providers: 0});
+
+        configuration = seed.configuration;
+        const reattached = yield* disk.attachDisk(seed, text, 'typescript');
+        events.length = 0;
+        ownerCurrent = false;
+        expect(yield* disk.observe(reattached.observation, 1000, 'context-close').pipe(Effect.flip)).toMatchObject({
+          code: 'exit',
+        });
+        expect(events).toEqual(['candidate', 'configuration', 'owner']);
+        const retired = yield* coordinator.status.pipe(
+          Effect.repeat({
+            until: status => status.sessions === 0 && status.providers === 0,
+            schedule: Schedule.spaced(10),
+          }),
+          Effect.timeout(1000),
+        );
+        expect(retired).toMatchObject({sessions: 0, providers: 0});
       }).pipe(TestClock.withLive),
   );
 });

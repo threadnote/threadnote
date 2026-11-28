@@ -12,9 +12,11 @@ the lock's schema version. Generate a fresh inventory to inspect every selected 
 A release cell needs exact-candidate application, provider artifact and runtime, environment and fixture version/hash
 receipts from runner-owned operations and assertions. License/headless-use/distribution evidence, complete selected
 capabilities, isolation, authoritative mutation and recovery evidence are mandatory. Missing, failed, unsupported,
-unavailable, experimental, partial or skipped evidence blocks GA. The runner can execute explicit already-available pinned TypeScript/JavaScript and Python inputs. Metadata
-URLs/hashes alone do not establish provider availability or qualification; Go, Rust and Java fixture execution and
-complete dependency/legal inventories remain missing.
+unavailable, experimental, partial or skipped evidence blocks GA.
+The runner accepts explicit pinned inputs for TypeScript, JavaScript, Python, Go, Rust, and Java.
+On Darwin arm64, candidate `e64457c7067b79aecf02041a86f33b669bd0f5b5` passed partial S33 writer fixtures for Go, Rust, Java, and Java with Gradle.
+On the same target, candidate `e7bc64d473eb12d8e1cad97bd7b6ab1844e98d53` passed partial S33 read fixtures for Go and Rust.
+Metadata URLs and hashes alone do not establish provider availability or qualification. Complete dependency and legal inventories remain open.
 
 The provider-free S33 branch checks unavailable-profile CLI/MCP parity, unchanged source, absent semantic state and
 observed owned-process cleanup. Further Darwin arm64 development cases used the actual compiled b29 candidate with

@@ -250,6 +250,7 @@ interface AnalysisSession {
   readonly scope: Scope.Closeable;
   readonly api: SemanticSession;
   readonly verify: Effect.Effect<void, unknown>;
+  readonly verifyNativeOwner?: Effect.Effect<void, LspFault>;
   readonly basis: Observation;
   readonly diskBasis: string;
   readonly reservation: SemanticReservation;
@@ -686,13 +687,18 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               },
               projectEpoch: reservation.generation,
             };
-            let providerGuard: Effect.Effect<void, unknown> = Effect.void;
+            const nativeGuard: {
+              current?: {readonly policy: Effect.Effect<void, unknown>; readonly owner: Effect.Effect<void, LspFault>};
+            } = {};
             // Later requests compare metadata from around the last complete verification.
             const candidateCurrent = Effect.suspend(() => {
+              const policy = nativeGuard.current?.policy;
+              if (providerId === 'typescript-native' && !policy)
+                return Effect.fail(LspFault.make({code: 'prerequisite'}));
               const before = candidateMetadata();
-              if (before !== undefined && before === fence) return Effect.void;
+              if (before !== undefined && before === fence) return policy ?? Effect.void;
               fence = undefined;
-              return verifyCandidate(candidate, providerId).pipe(
+              return (policy ?? verifyCandidate(candidate, providerId)).pipe(
                 Effect.andThen(
                   Effect.suspend(() => {
                     if (before === undefined) return Effect.void;
@@ -706,7 +712,6 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
             });
             const verify = candidateCurrent.pipe(
               Effect.andThen(projectOptions?.verify ?? Effect.void),
-              Effect.andThen(Effect.suspend(() => providerGuard)),
               Effect.onError(startupBinding.failed),
               Effect.provideService(FileSystem.FileSystem, fs),
               Effect.provideService(Path.Path, path),
@@ -836,7 +841,10 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                     startupMilliseconds: control ? yield* control.remaining : 10000,
                     native: {sdkRoot: candidate.sdkDirectory, assertOriginalCurrent},
                   });
-                  providerGuard = ts.verifyPolicy;
+                  nativeGuard.current = {
+                    policy: ts.verifyPolicy,
+                    owner: Effect.try({try: assertOriginalCurrent, catch: () => LspFault.make({code: 'exit'})}),
+                  };
                   api = semanticTypeScriptCoordinatorSession(ts);
                 } else return yield* LspFault.make({code: 'prerequisite'});
               }
@@ -851,6 +859,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               sources,
               api,
               verify,
+              verifyNativeOwner: nativeGuard.current?.owner,
               basis: fixed,
               diskBasis,
               reservation,
@@ -999,8 +1008,10 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
             // A verified observation is published after the last asynchronous host fence.
             if (observationPurpose) {
               yield* closing;
-              if (nativeContextClose && session.sources?.poisoned())
-                return yield* SemanticSessionFault.make({reason: 'stale'});
+              if (nativeContextClose) {
+                if (session.sources?.poisoned()) return yield* SemanticSessionFault.make({reason: 'stale'});
+                yield* session.verifyNativeOwner ?? Effect.fail(LspFault.make({code: 'exit'}));
+              }
               return yield* f(session.api);
             }
             const result = yield* f(session.api);
