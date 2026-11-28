@@ -4,11 +4,14 @@ import {succeedUndefined} from '@threadnote/platform/optional';
 import fc from 'fast-check';
 import {Effect, Exit, Tracer} from 'effect';
 import {describe, expect, it} from 'vitest';
-import {anonymousTelemetryTestLayer, withAnonymousTelemetry} from '@threadnote/threadnote/effect/telemetry';
+import {
+  anonymousTelemetryTestLayer,
+  telemetryQuantityBucket,
+  withAnonymousTelemetry,
+} from '@threadnote/threadnote/effect/telemetry';
 import type {SystemInfoShape} from '@threadnote/platform/system';
 import {
   codeAnchorFinalizationTelemetryFields,
-  telemetryQuantityBucket,
   withCodeAnchorFinalizationAnonymousTelemetry,
 } from '@threadnote/threadnote/telemetry/code_anchor_finalization';
 import {provideTestLayer} from '../helpers/effect-layer.js';

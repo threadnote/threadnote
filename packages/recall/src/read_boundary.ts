@@ -1,4 +1,4 @@
-import {Context, Schema} from 'effect';
+import {Array as EffectArray, Context, Schema} from 'effect';
 import type {Effect} from 'effect';
 import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {MEMORY_RELATION_TYPES} from '@threadnote/memory/document';
@@ -69,17 +69,44 @@ export const recallSemanticPreflightSchema = Schema.Struct({
   readiness: Schema.Literals(['missing', 'stale', 'current', 'unknown']),
 });
 export type RecallSemanticPreflight = typeof recallSemanticPreflightSchema.Type;
+/** Readiness of the active vector generation for one lexical generation. Only these two serve scores. */
+export const RECALL_SERVABLE_VECTOR_READINESS = ['current', 'serving-older'] as const;
+const RECALL_UNSERVABLE_VECTOR_READINESS = ['missing', 'stale', 'corrupt'] as const;
+export const RECALL_VECTOR_READINESS = [
+  ...RECALL_SERVABLE_VECTOR_READINESS,
+  ...RECALL_UNSERVABLE_VECTOR_READINESS,
+] as const;
+export type RecallVectorReadiness = (typeof RECALL_VECTOR_READINESS)[number];
+export const recallVectorReadinessSchema = Schema.Literals(RECALL_VECTOR_READINESS);
+export function isServableVectorReadiness(
+  readiness: string,
+): readiness is (typeof RECALL_SERVABLE_VECTOR_READINESS)[number] {
+  return EffectArray.some(RECALL_SERVABLE_VECTOR_READINESS, servable => servable === readiness);
+}
+/** Maximum masked URIs of a `serving-older` read after group extension; a larger mask is `stale`. */
+export const RECALL_MASKED_READ_MAX_URIS = 256;
 export const recallVectorReadStateSchema = Schema.Struct({
   chunkCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   generation: text,
   authorizationKey: text,
   corpusGeneration: optional(text),
+  /** Present only when an older generation serves: URIs it must not score, bound to a lexical generation. */
+  mask: optional(
+    Schema.Struct({
+      contentGeneration: text,
+      uris: Schema.Array(text).check(Schema.isMaxLength(RECALL_MASKED_READ_MAX_URIS)),
+    }),
+  ),
 });
 export type RecallVectorReadState = typeof recallVectorReadStateSchema.Type;
 export const recallVectorQueryStateSchema = Schema.Union([
-  Schema.Struct({readiness: Schema.Literal('current'), corpusGeneration: text, state: recallVectorReadStateSchema}),
   Schema.Struct({
-    readiness: Schema.Literals(['missing', 'stale', 'corrupt', 'lexical-unavailable']),
+    readiness: Schema.Literals(RECALL_SERVABLE_VECTOR_READINESS),
+    corpusGeneration: text,
+    state: recallVectorReadStateSchema,
+  }),
+  Schema.Struct({
+    readiness: Schema.Literals([...RECALL_UNSERVABLE_VECTOR_READINESS, 'lexical-unavailable']),
     corpusGeneration: optional(text),
   }),
 ]);

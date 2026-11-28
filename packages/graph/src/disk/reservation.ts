@@ -5,6 +5,7 @@ import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {syncDirectoryBestEffort} from '@threadnote/platform/file/durability';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {sqliteTemporaryDirectory} from '@threadnote/platform/sqlite_temporary_directory';
 import {runtimeTextDirectoryNamePage, SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {withCodeGraphIndexTiming, type CodeGraphIndexTimingObserver} from '../indexer/types.js';
 import {
@@ -36,7 +37,7 @@ export const CODE_GRAPH_DISK_RESERVATION_LIMITS = {
   releaseRetryMilliseconds: 25,
 } as const;
 
-/** Follow SQLite's Unix VFS search order for sorter spill files only. */
+/** Follow SQLite's temporary-directory order for sorter spill files only. */
 export function codeGraphCapacityTemporaryDirectory(
   input: {
     readonly boundary: CodeGraphDirectPersistentCapacityBoundary;
@@ -48,29 +49,11 @@ export function codeGraphCapacityTemporaryDirectory(
 ): Effect.Effect<string | undefined> {
   if (
     input.boundary.operation !== 'sort persistent code graph materialization spool' ||
-    input.boundary.transientFilesystem !== 'temporary' ||
-    input.platform === 'win32'
+    input.boundary.transientFilesystem !== 'temporary'
   ) {
     return Effect.succeed(input.temporaryDirectory);
   }
-  return Effect.gen(function* () {
-    const candidates = [input.environment.SQLITE_TMPDIR, input.environment.TMPDIR, '/var/tmp', '/usr/tmp', '/tmp', '.'];
-    for (const directory of candidates) {
-      if (directory && (yield* usable(directory))) return directory;
-    }
-    return undefined;
-  });
-}
-
-export function codeGraphSqliteTemporaryDirectoryUsable(fs: FileSystem.FileSystem, directory: string) {
-  return Effect.gen(function* () {
-    const info = yield* fs.stat(directory).pipe(Effect.option);
-    if (Option.isNone(info) || info.value.type !== 'Directory') return false;
-    // Looking up "/." requires search permission on the directory itself.
-    const searchable = yield* fs.stat(`${directory}/.`).pipe(Effect.option);
-    const writable = yield* fs.access(directory, {writable: true}).pipe(Effect.option);
-    return Option.isSome(searchable) && Option.isSome(writable);
-  });
+  return sqliteTemporaryDirectory(input, usable);
 }
 
 const RECEIPT_NAME = /^v1-([0-9a-f]{64})\.json$/;

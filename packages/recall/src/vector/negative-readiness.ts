@@ -2,10 +2,12 @@ import {Effect, FileSystem, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import type {LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {RECALL_CHUNKER_VERSION} from '../chunker.js';
+import {recallMaskedReadMayServe} from './masked-read.js';
+import {VECTOR_SCOPE_MAPPING_VERSION} from './generation-compatibility.js';
 import {readRecallPublishedGenerationHint, type RecallIndexConfig} from '../index.js';
 import type {recallVectorStorage} from '../vector-index.js';
+import type {RecallSemanticPreflight, RecallVectorReadModel} from '../read_boundary.js';
 
-export const VECTOR_SCOPE_MAPPING_VERSION = 1;
 type VectorReadModel = Pick<LocalModelManifest, 'id' | 'sha256' | 'dimensions' | 'promptPrefixes'>;
 type NegativeMetadataAccess = Pick<typeof recallVectorStorage, 'databasePath' | 'read' | 'validate' | 'recipe'>;
 
@@ -89,7 +91,26 @@ export const negativeSemanticReadinessHint = Effect.fn('vectorIndex.negativeRead
         active.state !== 'ready'
       )
         return 'unknown' as const;
-      return active.corpus_generation === corpus ? ('unknown' as const) : ('stale' as const);
+      if (active.corpus_generation === corpus) return 'unknown' as const;
+      // An older generation that may serve a masked read is no definitive negative: the full decision decides.
+      return recallMaskedReadMayServe(active) ? ('unknown' as const) : ('stale' as const);
     }),
   );
 });
+
+/** A negative hint skips only optional vector probing, never a final content proof. */
+export function recallPreflightSkipsSemanticRead(
+  model: RecallVectorReadModel | undefined,
+  hint: RecallSemanticPreflight | undefined,
+): boolean {
+  return (
+    model !== undefined &&
+    hint !== undefined &&
+    (hint.readiness === 'missing' || hint.readiness === 'stale') &&
+    model.id === hint.model.id &&
+    model.sha256 === hint.model.sha256 &&
+    model.dimensions === hint.model.dimensions &&
+    model.promptPrefixes?.document === hint.model.promptPrefixes?.document &&
+    model.promptPrefixes?.query === hint.model.promptPrefixes?.query
+  );
+}

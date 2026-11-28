@@ -26,14 +26,9 @@ import {
   loadRecallIndexData,
 } from '@threadnote/recall/index';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
-import {loadMcpRecallSemanticScoresResult} from '@threadnote/recall/runtime';
-import {
-  ensureVectorIndex,
-  selectedSemanticScores,
-  vectorIndexDatabaseFilename,
-  vectorIndexGenerationReadiness,
-  vectorIndexStatus,
-} from '@threadnote/recall/vector-index';
+import {loadMcpRecallSemanticScoresResult} from '@threadnote/recall/semantic_scores';
+import {ensureVectorIndex, vectorIndexDatabaseFilename, vectorIndexStatus} from '@threadnote/recall/vector-index';
+import {selectedSemanticScores, vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
 import {TestError} from '@threadnote/testing/test-error';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';

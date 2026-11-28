@@ -4,12 +4,17 @@ import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promise
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Option, Path} from 'effect';
 import {Base64Url} from 'effect/encoding';
 import {afterEach, describe, expect, it} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {writeModelSelection} from '@threadnote/inference/models/selection';
+import {LocalModelStore} from '@threadnote/inference/models/store';
+import {loadRecallIndexData} from '@threadnote/recall/index';
+import {rebuildVectorIndex} from '@threadnote/recall/vector-index';
 import {memoryProjectConsistencyCheck, runDoctor, telemetryDoctorCheck} from '@threadnote/threadnote/lifecycle';
 import {
   imageProjectionConfiguration,
@@ -149,7 +154,7 @@ describe('doctor report resilience', () => {
         yield* fs.writeFileString(
           path.join(home, 'telemetry', 'config.json'),
           `${JSON.stringify({
-            consentVersion: 5,
+            consentVersion: 6,
             enabled: true,
             endpoint: DEFAULT_TELEMETRY_ENDPOINT,
             sessionSalt: Base64Url.encode(new Uint8Array(32).fill(9)),
@@ -158,7 +163,7 @@ describe('doctor report resilience', () => {
         );
         expect(yield* telemetryDoctorCheck(config)).toEqual({
           detail:
-            'disabled; consent v5 needs explicit renewal for v6; run `threadnote telemetry enable`, then `threadnote telemetry enable --apply` after review',
+            'disabled; consent v6 needs explicit renewal for v7; run `threadnote telemetry enable`, then `threadnote telemetry enable --apply` after review',
           name: 'anonymous telemetry',
           status: 'warn',
         });
@@ -167,7 +172,7 @@ describe('doctor report resilience', () => {
           path.join(home, 'telemetry', 'config.json'),
           `${JSON.stringify({
             autoAccept: true,
-            consentVersion: 5,
+            consentVersion: 6,
             enabled: true,
             endpoint: DEFAULT_TELEMETRY_ENDPOINT,
             sessionSalt: Base64Url.encode(new Uint8Array(32).fill(9)),
@@ -269,10 +274,57 @@ describe('doctor report resilience', () => {
         expect(report.output).not.toMatch(/WARN (?:codex|claude|cursor|copilot) agent integration:/);
         expect(report.output).toContain('FAIL embedding model:');
         expect(report.output).toContain('FAIL vector recall index:');
+        expect(report.output).toContain(
+          'read state structurally-unavailable; waiting unknown; lexical-only reason no embedding model selected; last refresh none',
+        );
         expect(report.output).toContain('FAIL lexical recall index:');
         expect(report.output).toContain('FAIL native vector reader:');
         expect(report.output).toContain('Summary: 5 failure(s)');
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('reports the durable refresh with the current read state', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const system = yield* SystemInfo;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-doctor-refresh-'});
+      const config: RuntimeConfig = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'threadnote',
+        manifestPath: path.join(home, 'manifest.yaml'),
+        user: 'tester',
+      };
+      const catalog = yield* LocalModelCatalog;
+      const manifest = Option.getOrThrow(EffectArray.head(yield* catalog.list('embedding')));
+      yield* writeModelSelection(home, {version: 1, roles: {embedding: manifest.id}});
+      const lexical = yield* loadRecallIndexData(config, {includeInactive: false});
+      const store = yield* LocalModelStore;
+      yield* rebuildVectorIndex(config, manifest, lexical.candidates, {corpusGeneration: lexical.generation}).pipe(
+        Effect.provideService(
+          LocalModelStore,
+          LocalModelStore.of({
+            ...store,
+            verify: () =>
+              Effect.succeed({
+                bytes: manifest.size,
+                installed: true,
+                modelId: manifest.id,
+                partialBytes: 0,
+                path: path.join(home, 'test-model.gguf'),
+                verified: true,
+              }),
+          }),
+        ),
+      );
+      const report = yield* captureConsole(runDoctor(config, {dryRun: true})).pipe(
+        Effect.provideService(SystemInfo, SystemInfo.of({...system, homeDirectory: home})),
+      );
+      expect(report.output).toMatch(
+        /OK\s+vector recall index: [^\n]+\n {2}read state current; waiting 0; last refresh full, changed 0, copied chunks 0, reused chunks 0, embedded chunks 0, build \d+ ms, stale unknown/u,
+      );
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
 });

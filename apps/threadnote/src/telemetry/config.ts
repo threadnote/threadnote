@@ -11,8 +11,7 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 export const TELEMETRY_CONFIGURATION_VERSION = 1 as const;
-export const TELEMETRY_CONSENT_VERSION = 6 as const;
-export const TELEMETRY_RENEWABLE_CONSENT_VERSION = 5 as const;
+export const TELEMETRY_CONSENT_VERSION = 7 as const;
 export const DEFAULT_TELEMETRY_ENDPOINT = 'https://telemetry.threadnote.io/v1/traces';
 
 export interface DisabledTelemetryConfiguration {
@@ -40,7 +39,7 @@ export type TelemetryConfiguration = DisabledTelemetryConfiguration | EnabledTel
  * an exporter until the user applies the current consent explicitly.
  */
 export interface TelemetryConsentRenewal {
-  readonly consentVersion: typeof TELEMETRY_RENEWABLE_CONSENT_VERSION;
+  readonly consentVersion: 5 | 6;
   readonly endpoint: string;
 }
 
@@ -89,9 +88,8 @@ export const readTelemetryConfiguration = Effect.fn('telemetry.readConfiguration
 });
 
 /**
- * Recognizes only the exact enabled v5 shape so update/status UX can explain
- * why telemetry stopped. Malformed, disabled, older, newer, and current
- * configurations are not renewal candidates and continue to fail closed.
+ * Recognizes valid enabled v5 and v6 consent that requires explicit renewal.
+ * Update and status can explain why telemetry stopped.
  */
 export const readTelemetryConsentRenewal = Effect.fn('telemetry.readConsentRenewal')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
@@ -204,7 +202,7 @@ export function parseTelemetryConsentRenewal(
   if (
     !isJsonObject(value) ||
     value.version !== TELEMETRY_CONFIGURATION_VERSION ||
-    value.consentVersion !== TELEMETRY_RENEWABLE_CONSENT_VERSION ||
+    (value.consentVersion !== 5 && value.consentVersion !== 6) ||
     value.enabled !== true ||
     value.autoAccept === true ||
     (value.autoAccept !== undefined && typeof value.autoAccept !== 'boolean') ||
@@ -228,7 +226,7 @@ export function parseTelemetryConsentRenewal(
     );
     normalizeTelemetrySessionSalt(value.sessionSalt);
     return {
-      consentVersion: TELEMETRY_RENEWABLE_CONSENT_VERSION,
+      consentVersion: value.consentVersion,
       endpoint: normalizeTelemetryEndpoint(value.endpoint),
     };
   } catch {

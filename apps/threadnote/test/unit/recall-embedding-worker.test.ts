@@ -1,7 +1,7 @@
 import {SecureRandom} from 'effect/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError} from 'effect';
+import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError, Tracer} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
@@ -17,7 +17,14 @@ import {
   requestRecallEmbeddings,
 } from '@threadnote/recall/background/demand';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
-import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector-index';
+import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
+import {writeFileSync} from 'node:fs';
+import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
+import {readRecallVectorCompactionState} from '@threadnote/recall/vector/compaction';
+import {RecallVectorCompactionThresholds} from '@threadnote/recall/vector/sqlite-pages';
+import {selectedSemanticScores} from '@threadnote/recall/vector/semantic-read';
+import {vectorIndexDatabaseFilename} from '@threadnote/recall/vector-index';
+import {Database} from 'bun:sqlite';
 import {scheduleMcpRecallBackgroundRefresh} from '@threadnote/recall/mcp/refresh';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -109,6 +116,71 @@ const fixture = Effect.gen(function* () {
   };
 });
 describe('recall embedding worker', () => {
+  effectIt.effect('compacts a file above the threshold after one recall, with no vector demand or write', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      const provideModels = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+        program.pipe(
+          Effect.provideService(LocalModelStore, f.store),
+          Effect.provideService(LocalModelRuntime, f.runtime),
+        );
+      expect(yield* f.run.pipe(Effect.provideService(BackgroundInferenceAdmission, immediate))).toEqual({
+        state: 'complete',
+      });
+      expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
+      const home = yield* f.fs.realPath(f.config.agentContextHome);
+      const database = path.join(home, 'indexes/vectors', manifest.id, vectorIndexDatabaseFilename());
+      yield* Effect.sync(() => {
+        const db = new Database(database);
+        try {
+          db.exec('CREATE TABLE padding (body BLOB); BEGIN');
+          for (let row = 0; row < 256; row++) db.query('INSERT INTO padding VALUES (?)').run(new Uint8Array(16 * 1024));
+          db.exec('COMMIT; DROP TABLE padding; PRAGMA wal_checkpoint(TRUNCATE)');
+        } finally {
+          db.close();
+        }
+      });
+      const before = Number((yield* f.fs.stat(database)).size);
+      const canonicalBefore = yield* f.fs.readFileString(f.resource);
+
+      // One recall, and no write, queues the maintenance.
+      yield* provideModels(selectedSemanticScores(f.config, 'synthetic worker document')).pipe(Effect.ignore);
+      let nonce: string | undefined;
+      yield* wakeBackgroundWorker({
+        home,
+        ...recallEmbeddingWorkerPaths(path, home),
+        version: yield* getThreadnoteVersion(),
+        protocol: RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION,
+        launch: value =>
+          Effect.sync(() => {
+            nonce = value;
+            return true;
+          }),
+      });
+      expect(nonce).toBeDefined();
+      yield* provideModels(recallEmbeddingWorkerHomeProgram(home, nonce!)).pipe(
+        Effect.provideService(BackgroundInferenceAdmission, immediate),
+        Effect.timeout('10 seconds'),
+      );
+      expect(yield* readRecallVectorCompactionState(home, manifest.id)).toMatchObject({state: 'complete'});
+      expect(Number((yield* f.fs.stat(database)).size)).toBeLessThan(before / 2);
+      expect(yield* f.fs.exists(path.join(home, 'recall/vector-compaction-demand-v1', manifest.id + '.json'))).toBe(
+        false,
+      );
+      expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
+      expect(yield* f.fs.readFileString(f.resource)).toBe(canonicalBefore);
+    }).pipe(
+      Effect.provideService(RecallVectorCompactionThresholds, {
+        minimumReclaimableBytes: 1024 * 1024,
+        minimumReclaimableRatio: 0.2,
+        safetyMarginBytes: 0,
+      }),
+      TestClock.withLive,
+      provideTestLayer(Layer.merge(base, TestCommandExecutorLayer.pipe(Layer.provide(base)))),
+    ),
+  );
+
   effectIt.effect('resumes a persisted request in an independent worker and clears only verified current demand', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -277,6 +349,122 @@ describe('recall embedding worker', () => {
       expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
       expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
     }).pipe(TestClock.withLive, provideTestLayer(base)),
+  );
+
+  effectIt.effect('keeps embedding demand queued after lexical publication is superseded', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      const accountLock = resourceAccountMutationLockPath(
+        path,
+        yield* f.fs.realPath(f.config.agentContextHome),
+        f.config.account,
+      );
+      const owner = JSON.stringify({processId: process.pid, token: 'synthetic-embedding-account-owner', version: 1});
+      const delegate = yield* Effect.tracer;
+      const tracer = Tracer.make({
+        span(options) {
+          if (options.name === 'recall.publishPreparedDatabase') writeFileSync(accountLock, owner, {flag: 'wx'});
+          return delegate.span(options);
+        },
+      });
+      const unit = yield* makeRecallEmbeddingWorker().pipe(
+        Effect.provideService(BackgroundInferenceAdmission, immediate),
+        Effect.provideService(LocalModelStore, f.store),
+        Effect.provideService(LocalModelRuntime, f.runtime),
+      );
+      expect(
+        yield* unit(f.config).pipe(
+          Effect.withTracer(tracer),
+          Effect.ensuring(f.fs.remove(accountLock, {force: true}).pipe(Effect.ignore)),
+        ),
+      ).toEqual({state: 'checkpointed', reason: 'source-changed', delay: 50});
+      expect((yield* readRecallEmbeddingDemand(f.config))?.observation).toMatchObject({
+        state: 'queued',
+        reason: 'source-changed',
+        failures: 0,
+      });
+    }).pipe(provideTestLayer(base), TestClock.withLive),
+  );
+  effectIt.effect('keeps an in-flight build across ten stale reads and publishes it', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const initial = (yield* readRecallEmbeddingDemand(f.config))!.desired!;
+      const context = yield* Effect.context<
+        FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+      >().pipe(Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, SecureRandom.SecureRandom)));
+      let reads = 0;
+      const runtime = LocalModelRuntime.of({
+        ...f.runtime,
+        embedMany: request =>
+          Effect.gen(function* () {
+            for (; reads < 10; reads++)
+              expect(yield* scheduleMcpRecallBackgroundRefresh(f.config, manifest)).toBe('coalesced');
+            const demand = (yield* readRecallEmbeddingDemand(f.config))!;
+            expect(demand.desired).toEqual(initial);
+            expect(demand.observation).toMatchObject({revision: initial.revision, state: 'running', failures: 0});
+            return yield* f.runtime.embedMany(request);
+          }).pipe(Effect.provide(context), Effect.orDie),
+      });
+      expect(
+        yield* runRecallEmbeddingWorker(f.config).pipe(
+          Effect.provideService(LocalModelStore, f.store),
+          Effect.provideService(LocalModelRuntime, runtime),
+          Effect.provideService(BackgroundInferenceAdmission, immediate),
+        ),
+      ).toEqual({state: 'complete'});
+      expect(reads).toBe(10);
+      expect(f.calls()).toBe(1);
+      expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
+      expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
+    }).pipe(TestClock.withLive, provideTestLayer(base)),
+  );
+  effectIt.effect('keeps a block reached after eight failures across a read and retries after a write', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      let attempts = 0;
+      const runtime = LocalModelRuntime.of({
+        ...f.runtime,
+        embedMany: () =>
+          Effect.suspend(() => {
+            attempts++;
+            return EmbeddingFailed.make({
+              modelId: manifest.id,
+              message: 'Synthetic inference failure.',
+              cause: undefined,
+            });
+          }),
+      });
+      const unit = yield* makeRecallEmbeddingWorker().pipe(
+        Effect.provideService(LocalModelStore, f.store),
+        Effect.provideService(LocalModelRuntime, runtime),
+        Effect.provideService(BackgroundInferenceAdmission, immediate),
+      );
+      for (let step = 0; step < 32; step++) {
+        const result = yield* unit(f.config);
+        if (result.state === 'blocked') break;
+        yield* TestClock.adjust(result.delay);
+      }
+      expect((yield* readRecallEmbeddingDemand(f.config))?.observation).toMatchObject({
+        state: 'blocked',
+        reason: 'embedding-preparation-failed',
+        failures: 8,
+        corpusGeneration: (yield* recallIndexStatus(f.config, false)).generation,
+      });
+      expect(attempts).toBe(8);
+      expect(yield* scheduleMcpRecallBackgroundRefresh(f.config, manifest)).toBe('coalesced');
+      expect((yield* unit(f.config)).state).toBe('blocked');
+      expect(attempts).toBe(8);
+      // A corpus change that reaches only the lexical index releases the block on the next read.
+      yield* f.fs.writeFileString(f.resource, 'Changed synthetic body without a write-triggered enqueue.');
+      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      yield* scheduleMcpRecallBackgroundRefresh(f.config, manifest);
+      expect((yield* unit(f.config)).state).not.toBe('blocked');
+      expect(attempts).toBe(9);
+      yield* requestRecallEmbeddings(f.config, true);
+      expect((yield* unit(f.config)).state).not.toBe('blocked');
+      expect(attempts).toBe(10);
+    }).pipe(provideTestLayer(base)),
   );
   effectIt.effect('keeps native authority deferrals outside the eight-failure retry budget', () =>
     Effect.gen(function* () {

@@ -581,11 +581,28 @@ describe('owned fixture cooperative drain', () => {
             expect(yield* lifecycle.activate(owner)).toBe(true);
             yield* lifecycle.beforeScan;
             if (releaseFirst) yield* lifecycle.afterRelease(false);
+            const controlLockPath = f.options.receiptPath + '.launch-v2.lock';
+            const closed = yield* Deferred.make<void>();
+            const observedFs = FileSystem.FileSystem.of({
+              ...f.fs,
+              remove: (target, options) => {
+                const remove = f.fs.remove(target, options);
+                return target === controlLockPath
+                  ? remove.pipe(Effect.tap(() => Deferred.succeed(closed, undefined)))
+                  : remove;
+              },
+            });
             const drain = yield* drainBackgroundWorkerFixture(
               f.capability,
               (yield* Clock.currentTimeMillis) + 1000,
-            ).pipe(Effect.forkScoped);
-            yield* f.closed;
+            ).pipe(Effect.provideService(FileSystem.FileSystem, observedFs), Effect.forkScoped);
+            yield* Effect.raceFirst(
+              Deferred.await(closed),
+              Fiber.join(drain).pipe(Effect.andThen(Effect.die('Drain completed before it closed launch admission'))),
+            );
+            expect(yield* f.fs.readFileString(f.options.receiptPath + '.launch-v2.json')).toContain(
+              '"phase":"closing"',
+            );
             for (let i = 0; i < wakes; i++)
               expect(yield* wakeBackgroundWorker(f.options)).toMatchObject({state: 'deferred'});
             expect(yield* lifecycle.activate(owner)).toBe(false);

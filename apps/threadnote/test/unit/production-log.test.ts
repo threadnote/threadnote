@@ -31,6 +31,7 @@ import {
 } from '@threadnote/threadnote/effect/production_log';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {RecallReadyReadBoundaryError} from '@threadnote/recall/read_boundary';
+import {emitRecallDiagnostic} from '@threadnote/recall/diagnostics';
 import {lexicalReadFailureWarning, recallReadPhaseClassification} from '@threadnote/recall/warning';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
@@ -619,6 +620,31 @@ describe('recall production diagnostics', () => {
       for (const secret of [privateBody, privateQuery, 'threadnote://', home]) expect(content).not.toContain(secret);
       const excerpt = yield* productionLogSupportExcerpt(home, 100_000);
       expect(excerpt).toMatchObject({discardedEntries: 0, includedEntries: 3});
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('records a vector build kind with its chunk counts in a decodable info record', () =>
+    Effect.gen(function* () {
+      const {fs, home, path} = yield* ownedTestHome('recall-vector-build');
+      const build = {
+        kind: 'delta',
+        changedCount: 3,
+        copiedChunkCount: 140,
+        reusedChunkCount: 2,
+        embeddedChunkCount: 4,
+        durationMilliseconds: 12,
+        staleDurationMilliseconds: 69,
+      } as const;
+      yield* emitRecallDiagnostic(home, {event: 'recall.vector-build', scope: 'active', ...build});
+      const content = yield* fs.readFileString(productionLogPath(path, home));
+      expect(records(content, 'recall.vector-build')).toEqual([
+        expect.objectContaining({...build, level: 'info', scope: 'active'}),
+      ]);
+      // The support excerpt decodes records back through the same schema.
+      expect(yield* productionLogSupportExcerpt(home, 100_000)).toMatchObject({
+        discardedEntries: 0,
+        includedEntries: 1,
+      });
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 

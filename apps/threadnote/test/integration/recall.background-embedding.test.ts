@@ -14,7 +14,7 @@ import {
   RecallLexicalDemandUnavailable,
 } from '@threadnote/recall/background/lexical-demand';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
-import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector-index';
+import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
 import {SystemInfo} from '@threadnote/platform/system';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {fixtureLayer, lanes, manifest, seed} from '../fixtures/code-graph-embedding-worker-child.js';

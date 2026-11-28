@@ -26,20 +26,14 @@ threadnote telemetry disable --apply
 unsupported telemetry configuration always fails closed. Install, update, repair, doctor, help, and telemetry consent
 commands never enable telemetry implicitly.
 
-Consent is versioned independently from the configuration-file shape. Schema v6's Context Brief code-anchor and
-deferred-finalization surface requires consent version 6. A version 1, version 2, version 3, version 4, or version 5
-opt-in fails closed under a v6 producer: telemetry remains off until the user reviews the current preview and explicitly runs
-`threadnote telemetry enable --apply` again.
-Threadnote never migrates an earlier opt-in silently, even though the gateway continues to admit the frozen v1, v2,
-v3, v4, and v5 wire contracts for older supported producers. The exception is an opt-in that explicitly stored
-`autoAccept: true`: Threadnote treats that as advance acceptance of later data-contract versions, keeps telemetry
-enabled, and lets newly started processes use the current contract. A consent version created by a newer Threadnote
-release still fails closed when read by an older release.
+Consent has a version independent of the configuration format. Schema v7 requires consent version 7. It adds buckets for semantic recall states and vector refresh durations.
+An earlier consent fails closed until the user reviews the current preview and runs `threadnote telemetry enable --apply`.
+If earlier consent includes `autoAccept: true`, telemetry stays enabled and new processes use the current contract.
+An older release rejects consent from a newer release.
 
-When an upgrade finds an exact enabled v5 consent, its post-update action prints the complete current preview before
-asking interactively whether to apply v6 consent. `--yes` never answers this privacy prompt, and non-interactive or
-automatic updates leave telemetry off and print the manual `threadnote telemetry enable --apply` action. The preview
-reuses the previously selected endpoint unless `--endpoint` is supplied. A non-interactive post-update action also
+When an upgrade finds valid enabled v5 or v6 consent, it shows the complete preview before it asks to apply v7 consent.
+The `--yes` flag does not answer the consent prompt. Non-interactive and automatic updates leave telemetry off and show the manual renewal command.
+The preview reuses the previously selected endpoint unless `--endpoint` is supplied. A non-interactive post-update action also
 sends a best-effort local desktop reminder. `threadnote telemetry status` and `threadnote doctor` distinguish this
 renewal state from malformed configuration and show the same explicit remedy.
 
@@ -66,6 +60,8 @@ The current versioned allowlist is limited to:
   diagnose out-of-memory and growth regressions without a process identifier;
 - allowlisted phase durations and states for recall, indexing, graph scanning/materialization/resolution/activation,
   embedding, model work, storage waits, and other explicitly instrumented subsystems;
+- a recall completion can include four power-of-two count buckets for `current`, `serving-older`, `refreshable`, and `compaction` reads.
+  Each completion reports its own counts. If a refresh record exists, the completion adds its build and known stale durations as power-of-two millisecond buckets;
 - an automatic-update worker completion includes one closed result: `busy`, `current`, `disabled`, `failed`, or
   `updated`. An `updated` result also includes a boolean saying whether post-update local setup repair still requires
   attention. A `failed` result also retains the existing bounded failure outcome and safe typed failure class; it does
@@ -170,21 +166,20 @@ Tempo-compatible trace storage
 ```
 
 The gateway, rather than the open-source binary, owns vendor credentials. It rejects logs and metrics, admits the
-immutable v1, v2, v3, v4, v5, and v6 trace contracts, validates the complete versioned resource/span envelope before
+immutable v1 through v7 trace contracts, validates the complete versioned resource/span envelope before
 forwarding, caps bodies and rates, rejects unknown fields, avoids forwarding client IP headers, and emits no application access
 logs. V1 and v2 are frozen, v3 adds only the closed automatic-update result and repair-required flag, v4 adds only
-the closed, bucketed graph-query surface, v5 adds only the closed Context Brief citation surface, and v6 adds only the
-closed Context Brief code-anchor and deferred-finalization surface described above.
+the closed, bucketed graph-query surface, v5 adds only the closed Context Brief citation surface, v6 adds the
+closed Context Brief code-anchor and deferred-finalization surface, and v7 adds the recall buckets.
 Accepted traces are stored in Grafana Cloud EU with
 the 14-day retention of its Always Free plan. The gateway's fixed accepted-byte budget keeps the required two-Machine
 deployment below 3 GB of canonical input per month, leaving headroom within the plan's 50 GB allowance for bounded
 retries. The static Threadnote GitHub Pages site cannot receive OTLP and public GitHub issues are not an appropriate
 telemetry sink.
 
-The first-party gateway is separate deployment infrastructure. Its public storage canary verifies TLS, all six
-immutable schemas, every new Context Brief/finalization phase, forwarding, and Grafana query visibility independently
-of the application release. Schema v6 is rolled out gateway and canary first, then the v6-capable dashboard, and only
-then the consent-v6 producer.
+The first-party gateway is separate deployment infrastructure. Its public storage canary verifies TLS, all seven
+immutable schemas, forwarding, and Grafana query visibility. Deploy the schema v7 gateway first and verify the canary.
+Deploy the compatible dashboard before you release the consent-v7 producer.
 
 ## Local Jaeger dogfooding
 

@@ -1,4 +1,5 @@
 import {Database} from 'bun:sqlite';
+import {existsSync, writeFileSync} from 'node:fs';
 import * as EffectString from 'effect/String';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -14,6 +15,7 @@ import {
   Layer,
   Option,
   Path,
+  Tracer,
 } from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
@@ -23,6 +25,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {resourceAccountMutationGenerationPath, resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
 import {
   loadRecallIndexData,
@@ -30,6 +33,7 @@ import {
   recallIndexDatabaseFilename,
   recallIndexStatus,
   expireRecallIndexValidation,
+  withRecallIdentityAdmission,
   type RecallIndexProgress,
 } from '@threadnote/recall/index';
 import {recallLogicalScope, RECALL_INVENTORY_POLICY_CHANGED_REASON} from '../../src/index/freshness.js';
@@ -379,7 +383,7 @@ effectIt.effect('reconciles legacy inactive inventory before admitting current w
         logicalScope: recallLogicalScope({...f.config, user: 'other'}, false),
       }).pipe(Effect.flip),
     ).toMatchObject({_tag: 'RecallIdentityAdmissionBusy'});
-  }).pipe(provide, TestClock.withLive),
+  }).pipe(provide),
 );
 
 effectIt.effect('rejects an older writer generation that inherited a newer inventory stamp', () =>
@@ -443,14 +447,16 @@ effectIt.effect('refreshes one managed URI without walking 2000 unrelated canoni
 const childScript = `
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Database} from 'bun:sqlite';
-import {Effect, Layer} from 'effect';
+import {existsSync, writeFileSync} from 'node:fs';
+import {Effect, Layer, Tracer} from 'effect';
 import {cryptoLayer} from '@threadnote/platform/crypto';
+import {withNativeFileLockWaitBudget} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
-import {withRecallIdentityAdmission, recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import {loadRecallIndexData, withRecallIdentityAdmission, recallIndexDatabaseFilename} from '@threadnote/recall/index';
 const [home, mode] = process.argv.slice(-2);
 const config = {account:'local', user:'me', agentContextHome:home, manifestPath:home+'/manifest.json'};
 if (mode==='sqlite') {
@@ -465,8 +471,46 @@ if (mode==='sqlite') {
  )));
  const platform=Layer.mergeAll(BunServices.layer,cryptoLayer,system,recallResourceInvalidationLayer);
  const layers=ResourceStore.layer.pipe(Layer.provideMerge(platform));
- await Effect.runPromise(Effect.gen(function*(){
+ if(mode==='refresh-sqlite' || mode==='refresh-staged') {
+  const marker=home+'/publication-entered';
+  let publishing=false;
+  const tracer=Tracer.make({
+   span(options) {
+    const span=Tracer.nativeTracer.span(options);
+    if(mode==='refresh-sqlite' && publishing && options.name==='BEGIN') writeFileSync(marker, '');
+    if(mode==='refresh-sqlite' && options.name==='recall.publishPreparedDatabase')
+     writeFileSync(home+'/publication-applied', '');
+    if(mode==='refresh-staged' && options.name==='recall.publishPreparedDatabase') {
+     const end=span.end.bind(span);
+     span.end=(time, exit)=>{
+      end(time, exit);
+      writeFileSync(marker, '');
+      const release=home+'/publication-release';
+      const signal=new Int32Array(new SharedArrayBuffer(4));
+      while(!existsSync(release)) Atomics.wait(signal,0,0,10);
+     };
+    }
+    return span;
+   }
+  });
+  const outcome=await Effect.runPromise(loadRecallIndexData(config,{
+   includeInactive:false, memoryIds:[], forceRefresh:mode==='refresh-staged',
+   onProgress:progress=>{
+    if(mode!=='refresh-sqlite' || publishing || progress.phase!=='writing' || progress.completed!==0) return Effect.void;
+    return Effect.promise(async ()=>{
+     writeFileSync(home+'/publication-prepared','');
+     await Bun.stdin.text();
+     publishing=true;
+    });
+   },
+  }).pipe(Effect.withTracer(tracer),Effect.result,Effect.provide(layers)));
+  if(outcome._tag!=='Failure' || outcome.failure._tag!=='RecallIndexSourceChanged') throw Error('Expected source drift');
+ } else await Effect.runPromise(withNativeFileLockWaitBudget(Effect.gen(function*(){
   const store=yield* ResourceStore;
+  if(mode==='canonical-gated') yield* Effect.promise(async ()=>{
+   writeFileSync(home+'/canonical-prepared', '');
+   await Bun.stdin.text();
+  });
   const write=check=>store.mutateChecked({home,account:'local',user:'me'},[{
    type:'write',uri:'threadnote://user/me/memories/durable/1.md',
    content:'MEMORY\\nkind: durable\\nstatus: active\\nmemory_id: tn_1\\nsource_agent_client: test\\ntimestamp: 2026-11-03T00:00:00.000Z\\n\\nalpha child '+mode,
@@ -474,32 +518,256 @@ if (mode==='sqlite') {
   }],check);
   if(mode==='strict') yield* withRecallIdentityAdmission(config,Effect.void,write);
   else yield* write(Effect.void);
- }).pipe(Effect.provide(layers)));
+ })).pipe(Effect.provide(layers)));
 }
 `;
 
-function runChild(home: string, mode: string) {
+const spawnRecallChild = (home: string, mode: string) => {
+  const processHandle = Bun.spawn([process.execPath, '--eval', childScript, home, mode], {
+    stdin: 'pipe',
+    stdout: 'ignore',
+    stderr: 'pipe',
+  });
+  const stderr = new Response(processHandle.stderr).text().catch(() => 'Cannot read the recall child error stream.');
+  return {processHandle, stderr};
+};
+
+function withRecallChild<A, E, R>(
+  home: string,
+  mode: string,
+  use: (child: ReturnType<typeof spawnRecallChild>) => Effect.Effect<A, E, R>,
+) {
   return Effect.acquireUseRelease(
-    Effect.sync(() =>
-      Bun.spawn([process.execPath, '--eval', childScript, home, mode], {
-        stdin: 'ignore',
-        stdout: 'ignore',
-        stderr: 'pipe',
-      }),
-    ),
-    child =>
-      Effect.gen(function* () {
-        const code = yield* Effect.promise(() => child.exited);
-        const stderr = yield* Effect.promise(() => new Response(child.stderr).text());
-        expect(code, stderr).toBe(0);
-      }).pipe(Effect.timeout('8 seconds')),
-    child =>
+    Effect.sync(() => spawnRecallChild(home, mode)),
+    child => use(child).pipe(Effect.timeout('8 seconds')),
+    ({processHandle, stderr}) =>
       Effect.promise(async () => {
-        if (child.exitCode === null) child.kill();
-        await child.exited;
+        if (processHandle.exitCode === null) processHandle.kill();
+        await processHandle.exited;
+        await stderr;
       }),
   );
 }
+
+const awaitRecallChild = ({processHandle, stderr}: ReturnType<typeof spawnRecallChild>) =>
+  Effect.gen(function* () {
+    const code = yield* Effect.promise(() => processHandle.exited);
+    expect(code, yield* Effect.promise(() => stderr)).toBe(0);
+  });
+
+const runChild = (home: string, mode: string) => withRecallChild(home, mode, awaitRecallChild);
+
+const awaitPublication = (
+  fs: FileSystem.FileSystem,
+  file: string,
+  {processHandle, stderr}: ReturnType<typeof spawnRecallChild>,
+) =>
+  Effect.raceFirst(
+    Effect.gen(function* () {
+      while (!(yield* fs.exists(file))) yield* Effect.sleep(10);
+    }),
+    Effect.gen(function* () {
+      const code = yield* Effect.promise(() => processHandle.exited);
+      return yield* ApplicationError.make({
+        operation: 'recall-publication-test',
+        message: `Recall child exited with code ${code} before ${file}.`,
+        cause: yield* Effect.promise(() => stderr),
+      });
+    }),
+  );
+
+effectIt.effect('permits a canonical write while publication waits for the SQLite writer', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(2);
+    yield* f.write(0, 'alpha prepared');
+    const filename = f.path.join(f.home, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
+    yield* withRecallChild(f.home, 'refresh-sqlite', child =>
+      Effect.gen(function* () {
+        yield* awaitPublication(f.fs, f.path.join(f.home, 'publication-prepared'), child);
+        const applied = f.path.join(f.home, 'publication-applied');
+        yield* withRecallChild(f.home, 'canonical-gated', writer =>
+          Effect.gen(function* () {
+            yield* awaitPublication(f.fs, f.path.join(f.home, 'canonical-prepared'), writer);
+            yield* Effect.acquireUseRelease(
+              Effect.sync(() => {
+                const database = new Database(filename, {create: false});
+                database.exec('BEGIN IMMEDIATE');
+                return database;
+              }),
+              () =>
+                Effect.gen(function* () {
+                  yield* Effect.promise(() => Promise.resolve(child.processHandle.stdin.end()));
+                  yield* awaitPublication(f.fs, f.path.join(f.home, 'publication-entered'), child);
+                  yield* Effect.promise(() => Promise.resolve(writer.processHandle.stdin.end()));
+                  yield* awaitRecallChild(writer);
+                  expect(yield* f.fs.exists(applied)).toBe(false);
+                }),
+              database =>
+                Effect.sync(() => {
+                  database.exec('ROLLBACK');
+                  database.close();
+                }),
+            );
+          }),
+        );
+        yield* awaitRecallChild(child);
+        expect(yield* f.fs.exists(applied)).toBe(true);
+      }),
+    );
+    expect((yield* recallIndexStatus(f.config)).ready).toBe(false);
+  }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect('permits strict admission against the current WAL cut during bulk publication', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(2);
+    yield* withRecallChild(f.home, 'refresh-staged', child =>
+      Effect.gen(function* () {
+        yield* awaitPublication(f.fs, f.path.join(f.home, 'publication-entered'), child);
+        yield* runChild(f.home, 'strict');
+        yield* f.fs.writeFileString(f.path.join(f.home, 'publication-release'), '');
+        yield* awaitRecallChild(child);
+      }),
+    );
+    expect((yield* recallIndexStatus(f.config)).ready).toBe(false);
+    yield* f.refresh();
+    const data = yield* readRecallIndexData(f.config, {includeInactive: false, memoryIds: ['tn_1']});
+    expect(data.candidates[0]?.text).toContain('alpha child strict');
+  }).pipe(provide, TestClock.withLive),
+);
+
+const publicationPaths = (path: Path.Path, home: string) => {
+  const database = recallIndexDatabaseFilename(false);
+  return {
+    account: resourceAccountMutationLockPath(path, home, 'local'),
+    generation: resourceAccountMutationGenerationPath(path, home, 'local'),
+    recall: path.join(home, 'locks', 'indexes', 'lexical', `${database}.lock`),
+    database: path.join(home, 'indexes', 'lexical', database),
+  };
+};
+
+effectIt.effect('holds both publication locks through the SQLite commit', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(2);
+    yield* f.write(0, 'alpha committed');
+    const paths = publicationPaths(f.path, f.home);
+    const delegate = yield* Effect.tracer;
+    let writing = false;
+    let ownedAtStart = false;
+    let ownedAtEnd = false;
+    const tracer = Tracer.make({
+      span(options) {
+        const span = delegate.span(options);
+        if (writing && options.name === 'COMMIT') {
+          writing = false;
+          ownedAtStart = existsSync(paths.account) && existsSync(paths.recall);
+          const end = span.end.bind(span);
+          span.end = (time, exit) => {
+            ownedAtEnd = Exit.isSuccess(exit) && existsSync(paths.account) && existsSync(paths.recall);
+            end(time, exit);
+          };
+        }
+        return span;
+      },
+    });
+    yield* f
+      .refresh(progress =>
+        Effect.sync(() => {
+          if (progress.phase === 'writing' && progress.completed === 0) writing = true;
+        }),
+      )
+      .pipe(Effect.withTracer(tracer));
+    expect(ownedAtStart).toBe(true);
+    expect(ownedAtEnd).toBe(true);
+    expect(yield* f.fs.exists(paths.account)).toBe(false);
+    expect(yield* f.fs.exists(paths.recall)).toBe(false);
+  }).pipe(provide, TestClock.withLive),
+);
+
+for (const race of ['busy account lock', 'changed account generation'] as const)
+  effectIt.effect(`returns identity admission busy after a ${race}`, () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(2);
+      yield* f.write(0, 'alpha prepared');
+      const paths = publicationPaths(f.path, f.home);
+      const owner = JSON.stringify({processId: process.pid, token: 'synthetic-final-fence-owner', version: 1});
+      const delegate = yield* Effect.tracer;
+      const tracer = Tracer.make({
+        span(options) {
+          if (options.name === 'recall.publishPreparedDatabase') {
+            if (race === 'busy account lock') writeFileSync(paths.account, owner, {flag: 'wx'});
+            else writeFileSync(paths.generation, 'v1:8d13a584-2eb5-4e66-9aa3-974bfee9bec3\n');
+          }
+          return delegate.span(options);
+        },
+      });
+      yield* Effect.gen(function* () {
+        const result = yield* withRecallIdentityAdmission(f.config, Effect.void, () =>
+          Effect.die('Identity admission must not approve a staged cut'),
+        ).pipe(Effect.withTracer(tracer), Effect.result);
+        expect(result).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallIdentityAdmissionBusy'}});
+        if (race === 'busy account lock') expect(yield* f.fs.readFileString(paths.account)).toBe(owner);
+      }).pipe(Effect.ensuring(f.fs.remove(paths.account, {force: true}).pipe(Effect.ignore)));
+      expect(yield* f.fs.exists(paths.recall)).toBe(false);
+      expect((yield* recallIndexStatus(f.config)).ready).toBe(false);
+      yield* f.refresh();
+      expect((yield* recallIndexStatus(f.config)).ready).toBe(true);
+    }).pipe(provide, TestClock.withLive),
+  );
+
+effectIt.effect('does not retain recall admission while the initial account lock is occupied', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(2);
+    yield* f.write(0, 'alpha retry');
+    const paths = publicationPaths(f.path, f.home);
+    const owner = JSON.stringify({processId: process.pid, token: 'synthetic-initial-fence-owner', version: 1});
+    yield* f.fs.writeFileString(paths.account, owner, {flag: 'wx'});
+    yield* Effect.gen(function* () {
+      const result = yield* f.refresh().pipe(Effect.result, Effect.timeout('1 second'));
+      expect(result).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallIndexSourceChanged'}});
+      expect(yield* f.fs.exists(paths.recall)).toBe(false);
+      expect(yield* f.fs.readFileString(paths.account)).toBe(owner);
+    }).pipe(Effect.ensuring(f.fs.remove(paths.account, {force: true}).pipe(Effect.ignore)));
+    yield* f.refresh();
+    expect((yield* recallIndexStatus(f.config)).ready).toBe(true);
+  }).pipe(provide, TestClock.withLive),
+);
+
+effectIt.effect('rolls back and releases both locks when the final publication is interrupted', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(2);
+    yield* f.write(0, 'alpha uncommitted');
+    const paths = publicationPaths(f.path, f.home);
+    let writing = false;
+    const entered = yield* Deferred.make<void>();
+    const observedFs = FileSystem.FileSystem.of({
+      ...f.fs,
+      readFileString: (file, encoding) =>
+        file === paths.generation && writing
+          ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+          : f.fs.readFileString(file, encoding),
+    });
+    const refresh = yield* f
+      .refresh(progress =>
+        Effect.sync(() => {
+          if (progress.phase === 'writing' && progress.completed === 0) writing = true;
+        }),
+      )
+      .pipe(Effect.provideService(FileSystem.FileSystem, observedFs), Effect.forkScoped);
+    yield* Deferred.await(entered).pipe(Effect.timeout('3 seconds'));
+    expect(yield* f.fs.exists(paths.account)).toBe(true);
+    expect(yield* f.fs.exists(paths.recall)).toBe(true);
+    yield* Fiber.interrupt(refresh);
+    expect(yield* f.fs.exists(paths.account)).toBe(false);
+    expect(yield* f.fs.exists(paths.recall)).toBe(false);
+    const stored = yield* useDatabase(paths.database, db =>
+      db.query<{candidate_json: string}, []>("SELECT candidate_json FROM documents WHERE memory_id = 'tn_0'").get(),
+    );
+    expect(stored?.candidate_json).toContain('alpha old 0');
+    yield* f.refresh();
+    expect((yield* recallIndexStatus(f.config)).ready).toBe(true);
+  }).pipe(provide, TestClock.withLive),
+);
 
 for (const race of [
   'writers',
@@ -567,8 +835,10 @@ for (const race of [
           expect(Cause.squash(result.cause)).toMatchObject({_tag: 'RecallIndexSourceChanged'});
         expect((yield* recallIndexStatus(f.config)).ready).toBe(false);
       }
-      if (race === 'recovery')
+      if (race === 'recovery') {
         expect(yield* f.fs.exists(EffectString.replace(/\.sqlite$/, '.pointer.json')(database))).toBe(false);
+        expect(yield* f.fs.readDirectory(f.path.join(f.home, 'indexes', 'lexical', 'generations'))).toEqual([]);
+      }
       yield* f.refresh();
       expect((yield* recallIndexStatus(f.config)).ready).toBe(true);
       const data = yield* readRecallIndexData(f.config, {includeInactive: false, memoryIds: ['tn_1']});

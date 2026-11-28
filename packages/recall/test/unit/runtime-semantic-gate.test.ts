@@ -8,7 +8,7 @@ import {
   createMcpRecallSemanticRetrievalGate,
   MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS,
   MCP_RECALL_SEMANTIC_TIMEOUT_COOLDOWN_MILLISECONDS,
-} from '../../src/runtime.js';
+} from '../../src/semantic_scores.js';
 
 describe('MCP semantic retrieval cooldown', () => {
   effectIt.effect('preserves typed failures when a cause also carries an interruption', () =>
@@ -24,6 +24,18 @@ describe('MCP semantic retrieval cooldown', () => {
         expect(Cause.hasInterrupts(exit.cause)).toBe(true);
         expect(EffectArray.map(exit.cause.reasons, reason => reason._tag)).toEqual(['Fail', 'Interrupt']);
       }
+    }),
+  );
+
+  effectIt.effect('reports a timeout during a compaction as the compaction and starts no cooldown', () =>
+    Effect.gen(function* () {
+      const gate = createMcpRecallSemanticRetrievalGate();
+      const runtime = {};
+      const late = gate(runtime, Effect.never, Effect.succeed(true)).pipe(Effect.forkChild);
+      const first = yield* late;
+      yield* TestClock.adjust(MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS);
+      expect(yield* Fiber.join(first)).toEqual({status: 'compaction'});
+      expect(yield* gate(runtime, Effect.succeed('next read'))).toEqual({status: 'completed', value: 'next read'});
     }),
   );
 

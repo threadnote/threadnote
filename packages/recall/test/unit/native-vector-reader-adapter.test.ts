@@ -1,17 +1,43 @@
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Fiber, FileSystem, Layer, Option, Path, Result, Schema, String as EffectString} from 'effect';
+import {
+  Cause,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  FileSystem,
+  Layer,
+  Option,
+  Path,
+  Result,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {SystemInfo} from '@threadnote/platform/system';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {VectorIndexOperationError} from '../../src/vector/scoring.js';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
+import * as SqlClient from 'effect/sql/SqlClient';
+import {RECALL_CHUNKER_VERSION} from '../../src/chunker.js';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
+import {TestClock} from 'effect/testing';
+import * as VectorIndex from '../../src/vector-index.js';
+import {loadRecallIndexData} from '../../src/index.js';
+import {VECTOR_SCOPE_MAPPING_VERSION} from '../../src/vector/generation-compatibility.js';
 import {
-  readSelectedSemanticVectorScores,
+  recallVectorStorage,
   VectorCorpusGenerationChanged,
   vectorIndexDatabaseFilename,
 } from '../../src/vector-index.js';
-import {recallVectorAuthorizationKey} from '../../src/vector/preparation-identity.js';
+import {openSelectedSemanticVectorRead, readSelectedSemanticVectorScores} from '../../src/vector/semantic-read.js';
+import {
+  recallVectorAuthorizationKey,
+  recallVectorPreparationIdentity,
+  recallVectorPreparationJobId,
+} from '../../src/vector/preparation-identity.js';
 import {loadNativeVectorReader} from '../../src/vector/native-reader-payload.js';
 import {describe, expect, vi} from 'vitest';
 vi.mock('../../src/vector/native-reader-payload.js', () => ({loadNativeVectorReader: vi.fn()}));
@@ -293,5 +319,231 @@ describe('one-shot lexical corpus adaptation', () => {
         Result.isFailure(result) && Schema.is(VectorIndexOperationError)(result.failure) && result.failure.message,
       ).toContain('Required native vector reader');
     }).pipe(provide),
+  );
+});
+
+// A masked state reaches the native reader only with its URI exclusions; no native addon is needed here.
+const maskedScoreFixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const home = yield* fs.makeTempDirectoryScoped({prefix: 'native-adapter-masked-'});
+  const model = {id: 'test-model', sha256: EffectString.repeat(64)('a'), dimensions: 1};
+  const authorizationKey = recallVectorAuthorizationKey({});
+  const recipe = recallVectorStorage.recipe(model);
+  const db = recallVectorStorage.databasePath(path, home, model.id);
+  yield* fs.makeDirectory(path.dirname(db), {recursive: true});
+  const job = recallVectorPreparationJobId(recallVectorPreparationIdentity('old', authorizationKey, model.id, recipe));
+  yield* recallVectorStorage.use(
+    db,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* recallVectorStorage.initialize(sql);
+      yield* sql`INSERT INTO vector_generations
+        (generation, job_id, corpus_generation, model_id, model_sha256, dimensions, embedding_recipe,
+         chunker_version, normalized, chunk_count, state, created_at, scope_mapping_version)
+        VALUES ('1-abcdef', ${job}, 'old', ${model.id}, ${model.sha256}, 1, ${recipe}, ${RECALL_CHUNKER_VERSION},
+         'l2', 0, 'ready', 'now', ${VECTOR_SCOPE_MAPPING_VERSION})`;
+      yield* sql`INSERT INTO vector_pointer VALUES (1, '1-abcdef')`;
+    }),
+  );
+  const state = {
+    chunkCount: 0,
+    generation: '1-abcdef',
+    authorizationKey,
+    corpusGeneration: 'old',
+    mask: {contentGeneration: 'g2', uris: ['u']},
+  };
+  const setJobId = (authorization: string) =>
+    recallVectorStorage.use(
+      db,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const other = recallVectorPreparationJobId(
+          recallVectorPreparationIdentity('old', authorization, model.id, recipe),
+        );
+        yield* sql`UPDATE vector_generations SET job_id = ${other}`;
+      }),
+    );
+  return {config: {agentContextHome: home}, model, state, setJobId};
+});
+
+const neverNative = () => {
+  let calls = 0;
+  vi.mocked(loadNativeVectorReader).mockResolvedValue({
+    CancellationToken: class {
+      cancel() {}
+    },
+    readSelected: () => {
+      calls += 1;
+      return Promise.resolve(absent);
+    },
+  });
+  return () => calls;
+};
+
+describe('masked native vector request', () => {
+  effectIt.effect('rechecks masked compatibility with the current key before any native read', () =>
+    Effect.gen(function* () {
+      const f = yield* maskedScoreFixture;
+      const calls = neverNative();
+      // The active identity now binds another authorization key; the caller's masked state must not serve it.
+      yield* f.setJobId(EffectString.repeat(64)('f'));
+      expect(
+        yield* readSelectedSemanticVectorScores(f.config, f.model, f.state, Option.some([1]), {
+          corpusGeneration: 'g2',
+          currentCorpusGeneration: () => Effect.succeedSome('g2'),
+        }),
+      ).toBeUndefined();
+      expect(calls()).toBe(0);
+    }).pipe(provide),
+  );
+
+  effectIt.effect('refuses a masked state for another lexical generation before any read', () =>
+    Effect.gen(function* () {
+      const f = yield* maskedScoreFixture;
+      const calls = neverNative();
+      const result = yield* readSelectedSemanticVectorScores(f.config, f.model, f.state, Option.some([1]), {
+        corpusGeneration: 'g1',
+      }).pipe(Effect.result);
+      expect(Result.isFailure(result) && Schema.is(VectorCorpusGenerationChanged)(result.failure)).toBe(true);
+      expect(calls()).toBe(0);
+    }).pipe(provide),
+  );
+
+  effectIt.effect('excludes masked URIs in the chunk selection and the alias scope', () =>
+    Effect.gen(function* () {
+      const f = yield* maskedScoreFixture;
+      const seen: NativeVectorReadRequest[] = [];
+      vi.mocked(loadNativeVectorReader).mockResolvedValue({
+        CancellationToken: class {
+          cancel() {}
+        },
+        readSelected: request => {
+          seen.push(request);
+          return Promise.resolve(absent);
+        },
+      });
+      expect(
+        yield* readSelectedSemanticVectorScores(f.config, f.model, f.state, Option.some([1]), {
+          corpusGeneration: 'g2',
+          currentCorpusGeneration: () => Effect.succeedSome('g2'),
+        }),
+      ).toBeUndefined();
+      expect(seen).toHaveLength(1);
+      const [sent] = seen;
+      if (sent === undefined) return yield* Effect.die('Expected one native request.');
+      // The native reader checks the served generation's own corpus, never the mask generation.
+      expect(sent.corpusGeneration).toBe('old');
+      expect(EffectString.endsWith('AND chunk.uri NOT IN (?)')(sent.selection.sql)).toBe(true);
+      expect(EffectString.includes('alias.uri NOT IN (?)')(sent.aliasScope.sql)).toBe(true);
+      expect(sent.selection.params.at(-1)).toBe('u');
+      expect(sent.aliasScope.params.at(-1)).toBe('u');
+    }).pipe(provide),
+  );
+});
+
+// A real older generation: built for one lexical publication, opened after the next one.
+const servableOlderFixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const store = yield* ResourceStore;
+  const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'native-adapter-older-'}));
+  const config = {account: 'local', user: 'me', agentContextHome: home, manifestPath: path.join(home, 'm.json')};
+  yield* fs.writeFileString(config.manifestPath, JSON.stringify({version: 1, projects: []}));
+  const uri = (name: string) => `threadnote://user/me/memories/durable/${name}.md`;
+  const write = (name: string, body: string) =>
+    store.mutateChecked(
+      {account: config.account, user: config.user, home},
+      [
+        {
+          type: 'write',
+          uri: uri(name),
+          content: `MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_${name}\nsource_agent_client: test\ntimestamp: 2026-11-03T00:00:00.000Z\n\n${body}`,
+          options: {mode: 'upsert'},
+        },
+      ],
+      Effect.void,
+    );
+  const publish = loadRecallIndexData(config, {includeInactive: false, memoryIds: []}).pipe(
+    Effect.map(data => data.generation),
+  );
+  yield* write('keep', 'alpha keep body');
+  yield* write('edit', 'alpha edit body');
+  const served = yield* publish;
+  const model = {id: 'test-model', sha256: EffectString.repeat(64)('a'), dimensions: 1};
+  const recipe = recallVectorStorage.recipe(model);
+  const db = recallVectorStorage.databasePath(path, home, model.id);
+  yield* fs.makeDirectory(path.dirname(db), {recursive: true});
+  const job = recallVectorPreparationJobId(
+    recallVectorPreparationIdentity(served, recallVectorAuthorizationKey({}), model.id, recipe),
+  );
+  yield* recallVectorStorage.use(
+    db,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* recallVectorStorage.initialize(sql);
+      yield* sql`INSERT INTO vector_generations
+        (generation, job_id, corpus_generation, model_id, model_sha256, dimensions, embedding_recipe,
+         chunker_version, normalized, chunk_count, state, created_at, scope_mapping_version)
+        VALUES ('1-abcdef', ${job}, ${served}, ${model.id}, ${model.sha256}, 1, ${recipe}, ${RECALL_CHUNKER_VERSION},
+         'l2', 0, 'ready', 'now', ${VECTOR_SCOPE_MAPPING_VERSION})`;
+      yield* sql`INSERT INTO vector_pointer VALUES (1, '1-abcdef')`;
+    }),
+  );
+  yield* write('edit', 'alpha edit body, revised');
+  return {config, model, current: yield* publish, editUri: uri('edit')};
+});
+const provideLexical = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.scoped(
+    Layer.build(
+      ResourceStore.layer.pipe(Layer.provideMerge(Layer.merge(platform, recallResourceInvalidationLayer))),
+    ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
+  ).pipe(TestClock.withLive);
+
+/**
+ * Opens the older generation with the state read's active-row read replaced by `second`. The external-access
+ * loader cannot fail with a typed error (its error channel is `never`), so the typed seam is the row read.
+ */
+const openWithSecondLoad = (
+  f: Effect.Success<typeof servableOlderFixture>,
+  second: ReturnType<typeof VectorIndex.readActiveVectorGeneration>,
+) => {
+  const original = VectorIndex.readActiveVectorGeneration;
+  let loads = 0;
+  return Effect.acquireUseRelease(
+    Effect.sync(() =>
+      // The readiness check reads the row first; the state read's row read is the second call.
+      vi
+        .spyOn(VectorIndex, 'readActiveVectorGeneration')
+        .mockImplementation((home, manifest) => (++loads === 1 ? original(home, manifest) : second)),
+    ),
+    () => openSelectedSemanticVectorRead(f.config, f.model, {corpusGeneration: f.current}).pipe(Effect.exit),
+    spy => Effect.sync(() => spy.mockRestore()),
+  ).pipe(Effect.tap(() => Effect.sync(() => expect(loads).toBe(2))));
+};
+
+describe('masked opening failure rule', () => {
+  effectIt.effect('serves the older generation, and a typed state-read failure opens it as stale', () =>
+    Effect.gen(function* () {
+      const f = yield* servableOlderFixture;
+      const baseline = yield* openSelectedSemanticVectorRead(f.config, f.model, {corpusGeneration: f.current});
+      expect(baseline).toMatchObject({
+        readiness: 'serving-older',
+        state: {mask: {contentGeneration: f.current, uris: [f.editUri]}},
+      });
+      const typed: ReturnType<typeof VectorIndex.readActiveVectorGeneration> = Effect.fail(
+        VectorIndexOperationError.make({message: 'The vector database is busy.'}),
+      );
+      const exit = yield* openWithSecondLoad(f, typed);
+      expect(Exit.isSuccess(exit) && exit.value).toEqual({readiness: 'stale', corpusGeneration: f.current});
+    }).pipe(provideLexical),
+  );
+
+  effectIt.effect('propagates a defect in the state read instead of opening as stale', () =>
+    Effect.gen(function* () {
+      const f = yield* servableOlderFixture;
+      const exit = yield* openWithSecondLoad(f, Effect.die('programming error'));
+      expect(Exit.isFailure(exit) && Cause.hasDies(exit.cause)).toBe(true);
+    }).pipe(provideLexical),
   );
 });

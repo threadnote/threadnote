@@ -2,7 +2,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {recordDraftQueueDecision} from './maintenance_draft_queue.js';
 import {DateTime, Effect, FileSystem, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {loadRecallMemoryIdentities} from '@threadnote/recall/index';
+import {loadRecallMemoryIdentities, RecallIndexSourceChanged} from '@threadnote/recall/index';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {parseMemoryDocument, isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document';
 import {
@@ -38,6 +38,14 @@ const fail = (message: string) => TopicReviewError.make({message});
 const demonstratesSourceConflict = (error: unknown) =>
   Schema.is(MemoryRelationWriteError)(error) ||
   (Schema.is(TopicReviewSourceError)(error) && error.reason !== undefined && error.reason !== 'source-unavailable');
+
+function prepareTopicReviewRecallIdentities(config: RuntimeConfig) {
+  const prepare = Effect.suspend(() => loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []}));
+  return prepare.pipe(
+    Effect.catchIf(Schema.is(RecallIndexSourceChanged), () => prepare),
+    Effect.asVoid,
+  );
+}
 
 export interface TopicReviewDecisionInput {
   readonly reviewId: string;
@@ -98,7 +106,7 @@ export const prepareTopicMaintenanceReview = Effect.fn('topicMaintenance.prepare
         maintenanceContentHash(target.content) !== payload.basis.targetHash
       )
         return yield* fail('The accepted topic changed before approval preview.');
-      if (payload.version === 3) yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
+      if (payload.version === 3) yield* prepareTopicReviewRecallIdentities(config);
       yield* verifyTopicMaintenanceReviewSource(config, target, payload, input.sourceCwd);
       const approvedAt = DateTime.formatIso(yield* DateTime.now);
       const preview = yield* Effect.try({
@@ -168,7 +176,7 @@ export const applyTopicMaintenanceReview = Effect.fn('topicMaintenance.applyRevi
           'Use the authorized shared Git owner/publication flow for shared targets; personal approval applies only to your exact ordinary memory.',
         );
       const fs = yield* FileSystem.FileSystem;
-      if (payload.version === 3) yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
+      if (payload.version === 3) yield* prepareTopicReviewRecallIdentities(config);
       const prepared = yield* withMemoryUriLocks(
         fs,
         config.agentContextHome,
@@ -273,7 +281,7 @@ export const applyTopicMaintenanceReview = Effect.fn('topicMaintenance.applyRevi
       );
       const original = parseMemoryDocument(uri, approval.preview.beforeContent);
       if (!original) return yield* fail('The prepared target baseline is unavailable.');
-      if (payload.version === 3) yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
+      if (payload.version === 3) yield* prepareTopicReviewRecallIdentities(config);
       const complete = Effect.gen(function* () {
         if (approval.stage === 'written') return prepared;
         const applied = candidateReviewWithState(prepared, prepared.candidates[0].candidateId, 'applied', {

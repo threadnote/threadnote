@@ -181,7 +181,7 @@ Rotate without an ingestion gap:
    token or build a Basic header in shell output.
 3. Deploy/restart when rotating Fly ingest auth, then run the storage canary.
    For read auth, dispatch the canary directly after updating the secret.
-4. Confirm all sixteen stored canary traces and normal exporter logs, then
+4. Confirm all seventeen stored canary traces and normal exporter logs, then
    revoke the old token. Record policy/token IDs and dates, not values.
 5. A failed canary blocks revocation and release. Restore the old secret while
    it remains valid and investigate.
@@ -191,7 +191,7 @@ Rotate without an ingestion gap:
 [`telemetry-delivery-canary.yml`](../../.github/workflows/telemetry-delivery-canary.yml)
 runs every 15 minutes and on demand. It first pipes `flyctl machine list --json`
 into the budget verifier; no Machine identifiers are logged. It then generates
-sixteen random, schema-valid, content-free traces: one frozen schema-v1 completion;
+seventeen random, schema-valid, content-free traces: one frozen schema-v1 completion;
 one complete schema-v2 terminal graph-build lifecycle; equivalent schema-v3 and
 schema-v4 graph lifecycles; schema-v3 and schema-v4 automatic-update worker
 completions; one schema-v4 graph-query status checkpoint; and one schema-v4
@@ -199,9 +199,9 @@ graph-query completion carrying the execute-inherited snapshot surface; plus fou
 schema-v5 Context Brief phase checkpoints and one schema-v5 Context Brief
 completion carrying its full successful citation-quality surface; plus one schema-v6 Context Brief
 code-linked-memory checkpoint, one schema-v6 Context Brief completion carrying the closed code-anchor quality
-surface, and one schema-v6 deferred-code-anchor-finalization checkpoint. It posts
+surface, one schema-v6 deferred-code-anchor-finalization checkpoint, and one schema-v7 recall completion. It posts
 each through the public gateway and polls Grafana Tempo by the exact trace IDs
-until all sixteen stored protobufs contain the expected version-specific resource
+until all seventeen stored protobufs contain the expected version-specific resource
 and span identity. The synthetic version is `0.0.0-canary`, making it filterable
 from product telemetry and explicitly excluded by every operated dashboard
 query. Success proves the two-Machine budget, public TLS, six-version route and
@@ -275,11 +275,11 @@ cancellation and use the checked-in canary strategy with at most one unavailable
 Machine. The deploy is update-only, so unexpected process-group drift cannot
 create additional Machines. A successful rollout must end with exactly two
 healthy Machines running the reviewed digest, healthy production and canonical
-Fly endpoints, and all sixteen stored canaries: the frozen-v1 completion; v2, v3,
+Fly endpoints, and all seventeen stored canaries: the frozen-v1 completion; v2, v3,
 and v4 terminal graph builds; v3 and v4 automatic-update completions; and the v4
 graph-query status checkpoint and execute-inherited completion; plus all four v5
-Context Brief phase checkpoints and the complete v5 terminal result; and the v6 code-linked-memory checkpoint,
-code-anchor-quality terminal result, and deferred-finalization checkpoint. The rollout queue
+Context Brief phase checkpoints and the complete v5 terminal result; the v6 code-linked-memory checkpoint,
+code-anchor-quality terminal result, and deferred-finalization checkpoint, and the v7 recall completion. The rollout queue
 retains up to 100 pending `main` runs so a later non-runtime workflow cannot
 displace a queued deployment. The separately serialized scheduled canary
 boundedly retries its exact two-Machine check while Fly may be replacing a
@@ -315,32 +315,16 @@ is healthy; blindly changing the gateway image would hide that distinction. On
 failure, diagnose first, then use the previous immutable image recorded in the
 workflow summary and follow the rollback procedure below.
 
-For a telemetry schema rollout, deployment order is a hard compatibility gate.
-Schemas v1, v2, v3, v4, and v5 are immutable; v6 is additive and does not redefine
-any older contract:
+For a telemetry schema rollout, deployment order is a hard compatibility gate. Schema v7 adds the recall buckets and keeps earlier contracts.
 
-1. Deploy the gateway/Collector revision that accepts frozen schemas v1 through
-   v5 plus the new immutable schema v6. Do not release a v6 producer yet.
-2. Dispatch the production storage canary and require the frozen v1 completion;
-   v2/v3/v4 graph and automatic-update compatibility surfaces; both v4 graph-query
-   traces; all four v5 Context Brief phase checkpoints; the complete v5 Context
-   Brief completion; and all three v6 Context Brief/finalization traces to be accepted, stored, and queryable.
-3. Deploy the dashboard revision. Verify that generic panels admit v1/v2/v3/v4/v5/v6,
-   graph-build panels admit v2/v3/v4/v5/v6, automatic-update panels admit v3/v4/v5/v6,
-   graph-query panels select v4/v5/v6, Context Brief compatibility panels select v5/v6, and the new
-   code-anchor/finalization panels select v6 only. Exercise the new panels against the v6 Context Brief completion and
-   finalization checkpoint; verify the generic phase panels include the v6 code-linked-memory checkpoint.
-4. Only after the gateway, sixteen-trace/six-version canary, and dashboard gates
-   pass, release the consent-v6 producer. Existing consent-v1/v2/v3/v4/v5 configurations
-   must fail closed until the user reviews and explicitly reapplies consent; never
-   migrate opt-in silently.
-5. Keep v1/v2/v3/v4/v5 ingress and canary coverage until every supported older producer
-   is retired in a separately reviewed schema-removal change.
+1. Deploy the gateway and Collector revision that accepts schema v7 and frozen schemas v1 through v6.
+2. Run the production storage canary. Confirm that all seventeen traces are accepted, stored, and visible in queries.
+3. Deploy the dashboard revision. Confirm that every panel admits v7 and retains its earlier compatible versions.
+4. Only after the gateway, seventeen-trace/seven-version canary, and dashboard gates pass, release the consent-v7 producer.
+5. Keep v1/v2/v3/v4/v5/v6 ingress and canary coverage until every supported older producer retires.
 
-A v6 canary rejection or an unvalidated dashboard blocks the producer release
-even when `/healthz` and the v1/v2/v3/v4/v5 canaries pass. If a producer was released
-out of order, roll it back before debugging the gateway; telemetry remains
-best-effort and must not drive an unsafe compatibility exception.
+An earlier consent fails closed unless the user explicitly accepted future versions. The user can review the preview and apply current consent.
+If the v7 canary or dashboard fails, hold the producer release. If the producer was released first, roll it back before you inspect the gateway.
 
 ## DNS and TLS launch checklist
 

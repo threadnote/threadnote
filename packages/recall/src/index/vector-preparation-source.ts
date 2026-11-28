@@ -15,6 +15,8 @@ import type {RecallEmbeddingScope} from '../background/demand.js';
 import {recallIndexCandidateIsEligible} from './candidate.js';
 import {stripRecallAnchor} from './lexical.js';
 import {recallVectorAuthorizationKey} from '../vector/preparation-identity.js';
+import {readRecallMaskLexicalSnapshot} from './change_set.js';
+import {readRecallRefreshChanges} from './change_log.js';
 import {createRecallIdentityConflictLoader, markRecallIdentityConflicts} from './identity.js';
 
 export class RecallVectorSourceChanged extends Schema.TaggedError<
@@ -151,6 +153,74 @@ export const openRecallVectorPreparationSource = Effect.fn('recall.openVectorPre
             after: rows.at(-1)?.uri,
             done: rows.length < pageSize,
           };
+        }),
+      ),
+    readRefreshChanges: (fromGeneration: string) =>
+      read(
+        Effect.gen(function* () {
+          return yield* readRecallRefreshChanges(yield* SqlClient.SqlClient, fromGeneration);
+        }),
+      ),
+    /** The masked read's change set from `fromGeneration` to exactly this source generation. */
+    readMaskLexicalInputs: (fromGeneration: string, cap: number) =>
+      read(
+        Effect.gen(function* () {
+          return yield* readRecallMaskLexicalSnapshot(yield* SqlClient.SqlClient, fromGeneration, cap);
+        }),
+      ),
+    /**
+     * The stored lexical state of each representative document, keyed by candidate URI, without its body: the
+     * lexical schema, the text derivation of this publication, the stored size, modification time and content
+     * hash. A document without a stored time or content hash, or a publication without its own text derivation,
+     * has no stamp, so its body is always read.
+     */
+    readDocumentStamps: (metadata: readonly RecallCandidate[]) =>
+      read(
+        Effect.gen(function* () {
+          if (metadata.length > pageSize) return yield* corrupt();
+          const sql = yield* SqlClient.SqlClient;
+          const settings = new Map(
+            EffectArray.map(
+              yield* sql<{readonly key: string; readonly value: string}>`SELECT key, value FROM metadata
+                WHERE key IN ('schema_version', 'content_generation', 'candidate_text_derivation')`,
+              row => [row.key, row.value] as const,
+            ),
+          );
+          const stamps = new Map<string, string>();
+          // `[content generation, lexical schema, text version]`; only this publication's own record counts.
+          const derivation = yield* Effect.try({
+            try: () => {
+              const value: unknown = JSON.parse(settings.get('candidate_text_derivation') ?? 'null');
+              return EffectArray.isArray(value) && value[0] === settings.get('content_generation')
+                ? JSON.stringify(value.slice(1))
+                : undefined;
+            },
+            catch: () => undefined,
+          }).pipe(Effect.orElseSucceed(() => undefined));
+          for (const candidate of derivation === undefined ? [] : metadata) {
+            const rows = yield* sql<{
+              readonly source_size: number;
+              readonly source_modified_at: string | null;
+              readonly content_hash: string | null;
+            }>`SELECT source_size, source_modified_at, content_hash FROM documents
+              WHERE uri = ${stripRecallAnchor(candidate.uri)}`;
+            const row = rows[0];
+            if (!row) return yield* corrupt();
+            if (row.source_modified_at === null || row.content_hash === null) continue;
+            stamps.set(
+              candidate.uri,
+              JSON.stringify([
+                settings.get('schema_version') ?? null,
+                derivation,
+                candidate.uri,
+                row.source_size,
+                row.source_modified_at,
+                row.content_hash,
+              ]),
+            );
+          }
+          const result: ReadonlyMap<string, string> = stamps;
+          return result;
         }),
       ),
     authorize: (metadata: readonly RecallCandidate[]) =>

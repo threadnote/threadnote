@@ -13,11 +13,14 @@ const {semantic, sections, readBatches} = vi.hoisted(() => ({
   sections: vi.fn(),
   readBatches: [] as string[][],
 }));
+vi.mock('@threadnote/recall/semantic_scores', async importOriginal => ({
+  ...(await importOriginal<typeof import('@threadnote/recall/semantic_scores')>()),
+  loadMcpRecallSemanticScoresResult: semantic,
+}));
 vi.mock('@threadnote/recall/runtime', async importOriginal => {
   const original = await importOriginal<typeof import('@threadnote/recall/runtime')>();
   return {
     ...original,
-    loadMcpRecallSemanticScoresResult: semantic,
     prepareRecallSections: (...args: Parameters<typeof original.prepareRecallSections>) =>
       sections.getMockImplementation() ? sections(...args) : original.prepareRecallSections(...args),
   };

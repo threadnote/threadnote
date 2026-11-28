@@ -36,6 +36,7 @@ import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resou
 import {withAnonymousTelemetryPhase} from '../effect/telemetry.js';
 import {withProductionPhaseTiming} from '../effect/production_log.js';
 import {withCodeAnchorFinalizationAnonymousTelemetry} from '../telemetry/code_anchor_finalization.js';
+import {recordRecallVectorRefreshAnonymousTelemetry} from '../telemetry/recall_vector_refresh.js';
 import {parseResourceId, resourceIdIsManagedMemoryNamespace} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {resolveRecallScope} from './recall_scope.js';
@@ -115,14 +116,16 @@ import {
   createRecallRerankerCache,
   prepareRecallSemanticPreflight,
   warmRecallReranker,
-  emptyRecallSemanticScoresResult,
   loadRecallExpansionVocabulary,
-  loadRecallSemanticScoresResult,
   recallSelectionQueries,
   recallSelectionAnchorIds,
   selectedRecallCandidateUris,
-  type RecallSemanticScoresResult,
 } from '@threadnote/recall/runtime';
+import {
+  emptyRecallSemanticScoresResult,
+  loadRecallSemanticScoresResult,
+  type RecallSemanticScoresResult,
+} from '@threadnote/recall/semantic_scores';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import {
@@ -604,6 +607,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   let recallSections = yield* prepareSections();
   // Finish and retain the useful lexical baseline before querying optional models.
   const baselineSections = recallSections;
+  let observedReadState: RecallSemanticScoresResult['readState'];
   const refined = yield* optionalReadyRecallRead(
     Effect.gen(function* () {
       if (navigationOnly) return recallSections;
@@ -639,6 +643,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
                   Option.isSome(result.warning) ? 'failure' : Option.isSome(result.scores) ? 'success' : 'unavailable',
               ),
             );
+      observedReadState = Option.getOrUndefined(semanticResult)?.readState;
       yield* warmRecallReranker(config.agentContextHome, query, baselineSections.expansionCandidates, rerankerCache);
       if (
         (Option.isSome(semanticResult) && Option.isSome(semanticResult.value.scores)) ||
@@ -772,6 +777,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
         memoryConnections: undefined,
       };
   }
+  yield* recordRecallVectorRefreshAnonymousTelemetry(config.agentContextHome, observedReadState);
   const cliProjection = projectRecallCliResponse(recallSections, navigationOnly);
   for (const section of cliProjection.sections) {
     yield* Console.log(`\n${section}`);

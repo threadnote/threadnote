@@ -1,3 +1,4 @@
+import {sqliteTemporaryDirectoryUsable} from '@threadnote/platform/sqlite_temporary_directory';
 import {SecureRandom} from 'effect/crypto';
 import {degradedParserCacheIdentity, groupFilesByCacheIdentity} from './materialization_batch.js';
 export {cachedFactsMetadata} from './materialization_batch.js';
@@ -16,7 +17,6 @@ import {
 import {
   codeGraphCapacityTemporaryDirectory,
   codeGraphDiskReservationFilesystemKey,
-  codeGraphSqliteTemporaryDirectoryUsable,
   type CodeGraphDiskReservationOptions,
   withCodeGraphDiskReservation,
 } from '../disk/reservation.js';
@@ -961,7 +961,7 @@ const observeDirectPersistentCapacity = Effect.fn('codeGraph.observeDirectPersis
       platform: input.protection.system.platform,
       temporaryDirectory: input.protection.temporaryDirectory,
     },
-    directory => codeGraphSqliteTemporaryDirectoryUsable(input.fs, directory),
+    directory => sqliteTemporaryDirectoryUsable(input.fs, directory),
   );
   const [durableFilesystem, temporaryFilesystem] = yield* Effect.all(
     [

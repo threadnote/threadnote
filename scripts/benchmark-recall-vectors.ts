@@ -51,10 +51,10 @@ import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
 import {
   rebuildVectorIndex,
-  selectedSemanticScores,
   vectorIndexDatabaseFilename,
   type VectorIndexProgress,
 } from '@threadnote/recall/vector-index';
+import {selectedSemanticScores} from '@threadnote/recall/vector/semantic-read';
 import {assessRecallVectorPerformance} from './recall-vector-performance-budget.js';
 import {assessVectorDatabaseStorage, createCompactedSqliteSnapshot} from './recall-vector-storage-budget.js';
 import * as EffectRecord from 'effect/Record';

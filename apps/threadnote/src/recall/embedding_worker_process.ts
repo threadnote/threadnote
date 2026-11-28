@@ -23,10 +23,15 @@ import {
   readRecallLexicalScope,
   RECALL_LEXICAL_DEMAND_DIRECTORY,
 } from '@threadnote/recall/background/lexical-demand';
+import {
+  RECALL_VECTOR_COMPACTION_DEMAND_DIRECTORY,
+  recallVectorCompactionDemandModel,
+} from '@threadnote/recall/vector/compaction';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {
   makeRecallEmbeddingWorker,
   runRecallLexicalWorkerUnit,
+  runRecallVectorCompactionWorkerUnit,
   RecallEmbeddingWorkerControlUnavailable,
   type RecallEmbeddingWorkerUnitResult,
 } from './embedding_worker.js';
@@ -152,7 +157,18 @@ const openCatalog = Effect.fn('recall.openEmbeddingCatalog')(function* (
   );
 });
 
+/** Lexical, then vector demand, then maintenance-only compaction, so a pass compacts after its own builds. */
+const CATALOG_KINDS = [
+  RECALL_LEXICAL_DEMAND_DIRECTORY,
+  'embedding-demand-v1',
+  RECALL_VECTOR_COMPACTION_DEMAND_DIRECTORY,
+] as const;
+
 const readCatalogEntry = Effect.fn('recall.readCatalogEntry')(function* (home: string, filename: string, kind: string) {
+  if (kind === RECALL_VECTOR_COMPACTION_DEMAND_DIRECTORY) {
+    const modelId = recallVectorCompactionDemandModel(filename);
+    return modelId === undefined ? undefined : {kind: 'compaction' as const, modelId};
+  }
   if (kind === RECALL_LEXICAL_DEMAND_DIRECTORY) {
     const scope = yield* readRecallLexicalScope(home, filename).pipe(Effect.orElseSucceed(() => undefined));
     return scope ? {kind: 'lexical' as const, scope} : undefined;
@@ -207,7 +223,7 @@ export const recallEmbeddingWorkerHomeProgram = Effect.fn('recall.embeddingWorke
         yield* lifecycle.beforeScan;
         let pending = false;
         let progressed = false;
-        for (const kind of [RECALL_LEXICAL_DEMAND_DIRECTORY, 'embedding-demand-v1']) {
+        for (const kind of CATALOG_KINDS) {
           yield* Effect.acquireUseRelease(
             openCatalog(canonical, kind),
             directory =>
@@ -219,6 +235,13 @@ export const recallEmbeddingWorkerHomeProgram = Effect.fn('recall.embeddingWorke
                     if (yield* lifecycle.shouldDrain) return;
                     const entry = yield* readCatalogEntry(canonical, filename, kind);
                     if (!entry) continue;
+                    if (entry.kind === 'compaction') {
+                      const compaction = yield* runRecallVectorCompactionWorkerUnit(canonical, entry.modelId).pipe(
+                        Effect.result,
+                      );
+                      if (compaction._tag === 'Success' && compaction.success.state === 'deferred') pending = true;
+                      continue;
+                    }
                     const scope = entry.scope;
                     const result = yield* (
                       entry.kind === 'lexical' ? runRecallLexicalWorkerUnit(entry.scope) : unit(entry.scope)
@@ -265,7 +288,7 @@ export const resumeExistingRecallEmbeddingDemand = Effect.fn('recall.resumeExist
   const fs = yield* FileSystem.FileSystem;
   if (!(yield* fs.exists(home))) return;
   const canonical = yield* fs.realPath(home);
-  for (const kind of [RECALL_LEXICAL_DEMAND_DIRECTORY, 'embedding-demand-v1']) {
+  for (const kind of CATALOG_KINDS) {
     const pending = yield* Effect.acquireUseRelease(
       openCatalog(canonical, kind),
       directory =>

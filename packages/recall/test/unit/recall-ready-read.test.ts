@@ -257,7 +257,7 @@ effectIt.effect('reconciles a witnessed identity-less source retired before the 
     expect(freshness).toBe('stale');
     expect(yield* readRecallLexicalDemand({...f.config, includeInactive: false})).toMatchObject({reconcile: true});
     expect(yield* recallIndexStatus(f.config)).toEqual(before);
-  }).pipe(provide),
+  }).pipe(provideTestClock),
 );
 
 describe('ready lexical readers', () => {
@@ -457,11 +457,13 @@ describe('ready lexical readers', () => {
           filename,
           formatMemoryDocument('MEMORY', {...current.metadata, ...metadata}, current.body),
         );
+        // After the validTo date, so the projection check is proved to run before clock eligibility.
+        yield* TestClock.setTime(Date.parse('2026-11-03T00:00:00.000Z'));
         const result = yield* readRecallIndexData(config, {includeInactive: false, query: 'alpha'});
         expect(result.candidates).toEqual([]);
         expect(result.readState).toEqual({freshness: 'stale', maintenance: 'queued'});
         expect((yield* readRecallLexicalDemand({...config, includeInactive: false}))?.reconcile).toBe(true);
-      }).pipe(provide),
+      }).pipe(provideTestClock),
     );
   effectIt.effect('enqueues once with the strongest reason when a stale marker and source drift coexist', () =>
     Effect.gen(function* () {
@@ -478,7 +480,7 @@ describe('ready lexical readers', () => {
       );
       expect(wakes).toBe(1);
       expect((yield* readRecallLexicalDemand({...config, includeInactive: false}))?.reconcile).toBe(true);
-    }).pipe(provide),
+    }).pipe(provideTestClock),
   );
   effectIt.effect('does not schedule maintenance when selected hydration is interrupted', () =>
     Effect.gen(function* () {
@@ -521,7 +523,7 @@ describe('ready lexical readers', () => {
       );
       expect(result._tag).toBe('Failure');
       expect(wakes).toBe(1);
-    }).pipe(provide),
+    }).pipe(provideTestClock),
   );
   for (const stale of [false, true])
     effectIt.effect(
@@ -749,7 +751,7 @@ describe('ready lexical readers', () => {
       expect(yield* fs.readFile(filename)).toEqual(before);
       expect((yield* recallIndexStatus(config, false)).ready).toBe(false);
       expect((yield* readRecallLexicalDemand({...config, includeInactive: false}))?.revision).toBeDefined();
-    }).pipe(provide),
+    }).pipe(provideTestClock),
   );
   for (const change of ['delete', 'archive', 'project'] as const)
     effectIt.effect(`rejects live ${change} changes in ranking and exact lookup before maintenance`, () =>
@@ -818,7 +820,7 @@ describe('ready lexical readers', () => {
         if (corrupt) expect(yield* fs.readFileString(filename)).toBe('corrupt');
         else expect(yield* fs.exists(filename)).toBe(false);
         expect((yield* readRecallLexicalDemand({...config, includeInactive: false}))?.revision).toBeDefined();
-      }).pipe(provide),
+      }).pipe(provideTestClock),
     );
   effectIt.effect('revalidates every equivalent alias independently', () =>
     Effect.gen(function* () {
