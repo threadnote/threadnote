@@ -332,8 +332,8 @@ describe('resumable recall vector preparation', () => {
       const result = yield* rebuild(false);
       expect(inputs).toBe(alreadyEmbedded);
       expect(result).toMatchObject({
-        embeddedChunkCount: alreadyEmbedded,
-        reusedChunkCount: 0,
+        embeddedChunkCount: 0,
+        reusedChunkCount: alreadyEmbedded,
       });
       expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toMatchObject({
         kind: 'full',

@@ -517,7 +517,7 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
       yield* activateFull(building, finalChunkCount, embedded, building.created_at);
       yield* pruneVectorGenerations(sql, building.generation);
       yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
-      return vectorStatus(building, manifest.id, finalChunkCount, embedded, finalChunkCount - embedded);
+      return vectorStatus(building, manifest.id, finalChunkCount, embeddedChunkCount, reusableChunkCount);
     }),
   );
   yield* removeLegacyVectorSidecars(fs, path, root);
