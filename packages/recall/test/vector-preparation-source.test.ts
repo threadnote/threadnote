@@ -14,6 +14,7 @@ import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {
   recallVectorTarget,
+  type RecallVectorBuildPlan,
   prepareRecallVectorMetadata,
   resolveRecallVectorMetadata,
   hydrateRecallVectorDocuments,
@@ -31,6 +32,7 @@ import {
 import {loadRecallIndexData, recallIndexStatus, expireRecallIndexValidation} from '../src/index.js';
 import {openRecallVectorPreparationSource} from '../src/index/vector-preparation-source.js';
 import type {RecallCandidate} from '../src/rank.js';
+const fullPlan = Effect.succeed<RecallVectorBuildPlan>({kind: 'full'});
 const platform = Layer.mergeAll(
   Layer.merge(BunServices.layer, cryptoLayer),
   SystemInfo.layer.pipe(
@@ -246,11 +248,11 @@ describe('lexical vector preparation source', () => {
         expect(yield* source.hydrate(logical)).toEqual(full.candidates);
         if (change === 'hydration-race') {
           const manifest = {...BUILTIN_MODEL_MANIFESTS[0], role: 'embedding' as const, dimensions: 2};
-          let target = yield* recallVectorTarget(config, manifest, source);
+          let target = yield* recallVectorTarget(config, manifest, source, fullPlan);
           yield* prepareRecallVectorMetadata(config, manifest, source, target);
-          target = yield* recallVectorTarget(config, manifest, source);
+          target = yield* recallVectorTarget(config, manifest, source, fullPlan);
           yield* resolveRecallVectorMetadata(config, manifest, source, target, Effect.succeed(page.candidates));
-          target = yield* recallVectorTarget(config, manifest, source);
+          target = yield* recallVectorTarget(config, manifest, source, fullPlan);
           expect(target).toMatchObject({phase: 'hydrate', cursor: 0, chunk_cursor: 0, alias_cursor: 0});
           const racedSource = {
             ...source,
@@ -270,9 +272,12 @@ describe('lexical vector preparation source', () => {
             yield* hydrateRecallVectorDocuments(config, manifest, racedSource, target, logical).pipe(Effect.result),
           ).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallVectorSourceChanged'}});
           expect(yield* source.authorize(logical)).toBeUndefined();
-          expect(yield* recallVectorTarget(config, manifest, source)).toEqual(target);
+          expect(yield* recallVectorTarget(config, manifest, source, fullPlan)).toEqual(target);
           yield* hydrateRecallVectorDocuments(config, manifest, source, target, logical);
-          expect(yield* recallVectorTarget(config, manifest, source)).toMatchObject({phase: 'hydrate', cursor: 1});
+          expect(yield* recallVectorTarget(config, manifest, source, fullPlan)).toMatchObject({
+            phase: 'hydrate',
+            cursor: 1,
+          });
           return;
         }
         if (change === 'revoke') enabled = false;

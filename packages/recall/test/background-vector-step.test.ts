@@ -8,6 +8,7 @@ import {
   releasePreparedRecallDocument,
   releaseResolvedRecallMetadata,
   recallVectorTarget,
+  type RecallVectorBuildPlan,
   prepareRecallVectorMetadata,
 } from '../src/background/vector-preparation.js';
 import {openRecallVectorPreparationSource} from '../src/index/vector-preparation-source.js';
@@ -44,6 +45,7 @@ const manifest = {
   dimensions: 2,
   promptPrefixes: {document: 'document: ', query: 'query: '},
 };
+const fullPlan = Effect.succeed<RecallVectorBuildPlan>({kind: 'full'});
 const platform = Layer.mergeAll(
   Layer.merge(BunServices.layer, cryptoLayer),
   SystemInfo.layer.pipe(
@@ -131,6 +133,15 @@ const fixture = Effect.gen(function* () {
     }
     return yield* Effect.die('builder did not converge');
   });
+  /** Steps the current corpus's target until it reaches `phase`; build rows exist only before it is ready. */
+  const stepUntil = (phase: string) =>
+    Effect.gen(function* () {
+      for (let turn = 0; turn < 500; turn++) {
+        const result = yield* step();
+        if (result.phase === phase) return;
+      }
+      return yield* Effect.die('builder did not reach ' + phase);
+    });
   return {
     home,
     config,
@@ -140,6 +151,7 @@ const fixture = Effect.gen(function* () {
     fs,
     step,
     finish,
+    stepUntil,
     store,
     runtime,
     inputs: () => inputs,
@@ -189,13 +201,12 @@ describe('resumable recall vector preparation', () => {
       expect(f.inputs()).toBe(0);
       yield* f.fs.writeFileString(changing, 'After source change');
       yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      yield* f.stepUntil('embed');
+      expect(yield* reusedPreparations(f.filename)).toBe(1);
       yield* f.finish;
       yield* Effect.sync(() => {
         const db = new Database(f.filename, {readonly: true});
         try {
-          expect(db.query('SELECT SUM(reused) AS reused FROM idle_recall_document_preparations').get()).toEqual({
-            reused: 1,
-          });
           expect(db.query('SELECT COUNT(*) AS count FROM vector_generations').get()).toEqual({count: 1});
         } finally {
           db.close();
@@ -208,7 +219,7 @@ describe('resumable recall vector preparation', () => {
     effectIt.effect(`rebuilds a ${damage} cached preparation instead of copying it`, () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        yield* f.finish;
+        yield* f.stepUntil('embed');
         yield* Effect.sync(() => {
           const db = new Database(f.filename);
           try {
@@ -226,17 +237,8 @@ describe('resumable recall vector preparation', () => {
         const path = yield* Path.Path;
         yield* f.fs.writeFileString(path.join(path.dirname(f.resource), 'new.md'), 'New corpus member');
         yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
-        yield* f.finish;
-        yield* Effect.sync(() => {
-          const db = new Database(f.filename, {readonly: true});
-          try {
-            expect(db.query('SELECT SUM(reused) AS reused FROM idle_recall_document_preparations').get()).toEqual({
-              reused: 0,
-            });
-          } finally {
-            db.close();
-          }
-        });
+        yield* f.stepUntil('embed');
+        expect(yield* reusedPreparations(f.filename)).toBe(0);
       }).pipe(provideFixtureLayer(platform)),
     );
 
@@ -274,59 +276,13 @@ describe('resumable recall vector preparation', () => {
     }).pipe(provideFixtureLayer(platform)),
   );
 
-  // Vary chunk boundaries in the property below. This example proves reuse of
-  // the unchanged document across a Unicode mutation without repeating three
-  // complete real-SQLite builds under one aggregate property deadline.
-  effectIt.effect('preparation reused across corpus churn equals a clean build', () =>
-    Effect.gen(function* () {
-      const f = yield* fixture;
-      const path = yield* Path.Path;
-      const changed = path.join(path.dirname(f.resource), 'changing.md');
-      yield* f.fs.writeFileString(changed, 'Initial independent document');
-      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
-      yield* f.finish;
-      const mapping = yield* Effect.acquireRelease(
-        Effect.sync(() => vi.spyOn(recallVectorStorage, 'chunkMappings')),
-        value => Effect.sync(() => value.mockRestore()),
-      );
-      yield* f.fs.writeFileString(changed, '# Changed\n\n' + EffectString.repeat(40)('alpha βeta 😀 delta\n'));
-      const current = yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
-      yield* f.finish;
-      expect(EffectArray.filter(mapping.mock.calls, ([candidates]) => candidates.length > 0)).toHaveLength(1);
-      yield* Effect.sync(() => {
-        const db = new Database(f.filename, {readonly: true});
-        try {
-          expect(db.query('SELECT SUM(reused) AS reused FROM idle_recall_document_preparations').get()).toEqual({
-            reused: 1,
-          });
-          expect(db.query('SELECT COUNT(*) AS count FROM vector_generations').get()).toEqual({count: 1});
-        } finally {
-          db.close();
-        }
-      });
-      const cleanHome = yield* f.fs.makeTempDirectoryScoped({prefix: 'recall-churn-clean-'});
-      yield* ensureVectorIndex({agentContextHome: cleanHome}, manifest, current.candidates, {
-        corpusGeneration: current.generation,
-      }).pipe(
-        Effect.provideService(LocalModelStore, f.store),
-        Effect.provideService(LocalModelRuntime, {
-          ...f.runtime,
-          embedMany: ({inputs}) => Effect.succeed(EffectArray.map(inputs, embeddingForInput)),
-        }),
-      );
-      expect(yield* vectorSnapshot(f.filename)).toEqual(
-        yield* vectorSnapshot(path.join(cleanHome, 'indexes/vectors', manifest.id, vectorIndexDatabaseFilename())),
-      );
-    }).pipe(provideFixtureLayer(platform)),
-  );
-
   effectIt.effect('upgrades an exact legacy target identity without resetting its durable cursor', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
       const source = yield* openRecallVectorPreparationSource(f.config);
-      const first = yield* recallVectorTarget(f.config, manifest, source);
+      const first = yield* recallVectorTarget(f.config, manifest, source, fullPlan);
       yield* prepareRecallVectorMetadata(f.config, manifest, source, first);
-      const checkpoint = yield* recallVectorTarget(f.config, manifest, source);
+      const checkpoint = yield* recallVectorTarget(f.config, manifest, source, fullPlan);
       const legacyJob = sha256HexSync(
         JSON.stringify([
           'idle-recall-v1',
@@ -346,8 +302,10 @@ describe('resumable recall vector preparation', () => {
           ),
         db => Effect.sync(() => db.close()),
       );
-      expect(yield* recallVectorTarget(f.config, manifest, source)).toEqual(checkpoint);
-      expect(yield* recallVectorTarget({...f.config, user: 'another-user'}, manifest, source)).toEqual(checkpoint);
+      expect(yield* recallVectorTarget(f.config, manifest, source, fullPlan)).toEqual(checkpoint);
+      expect(yield* recallVectorTarget({...f.config, user: 'another-user'}, manifest, source, fullPlan)).toEqual(
+        checkpoint,
+      );
       expect(f.inputs()).toBe(0);
     }).pipe(provideFixtureLayer(platform)),
   );
@@ -359,21 +317,26 @@ describe('resumable recall vector preparation', () => {
         const source = yield* openRecallVectorPreparationSource(f.config);
         const otherScope = {...f.config, user: 'another-user'};
 
-        const first = yield* recallVectorTarget(f.config, manifest, source);
+        const first = yield* recallVectorTarget(f.config, manifest, source, fullPlan);
         yield* prepareRecallVectorMetadata(f.config, manifest, source, first);
-        const checkpoint = yield* recallVectorTarget(f.config, manifest, source);
+        const checkpoint = yield* recallVectorTarget(f.config, manifest, source, fullPlan);
         expect(checkpoint.phase).toBe('resolve');
         yield* loadRecallIndexData(otherScope, {includeInactive: false, memoryIds: []});
         const otherSource = yield* openRecallVectorPreparationSource(otherScope);
         expect(otherSource.generation).toBe(source.generation);
         expect(otherSource.authorizationKey).toBe(source.authorizationKey);
-        expect(yield* recallVectorTarget(otherScope, manifest, otherSource)).toEqual(checkpoint);
-        const distinct = yield* recallVectorTarget(otherScope, manifest, {
-          ...otherSource,
-          authorizationKey: 'distinct-authority',
-        });
+        expect(yield* recallVectorTarget(otherScope, manifest, otherSource, fullPlan)).toEqual(checkpoint);
+        const distinct = yield* recallVectorTarget(
+          otherScope,
+          manifest,
+          {
+            ...otherSource,
+            authorizationKey: 'distinct-authority',
+          },
+          fullPlan,
+        );
         expect(distinct.generation).not.toBe(checkpoint.generation);
-        expect(yield* recallVectorTarget(f.config, manifest, source)).toEqual(checkpoint);
+        expect(yield* recallVectorTarget(f.config, manifest, source, fullPlan)).toEqual(checkpoint);
         expect(f.inputs()).toBe(0);
       }).pipe(provideFixtureLayer(platform)),
   );
@@ -499,6 +462,7 @@ describe('resumable recall vector preparation', () => {
           f.config,
           manifest,
           yield* openRecallVectorPreparationSource(f.config),
+          fullPlan,
         );
         yield* Effect.acquireUseRelease(
           Effect.sync(() =>
@@ -558,8 +522,12 @@ describe('resumable recall vector preparation', () => {
                 ),
               ).toBe('current');
               expect(
-                (yield* recallVectorTarget(f.config, manifest, yield* openRecallVectorPreparationSource(f.config)))
-                  .phase,
+                (yield* recallVectorTarget(
+                  f.config,
+                  manifest,
+                  yield* openRecallVectorPreparationSource(f.config),
+                  fullPlan,
+                )).phase,
               ).toBe('ready');
             }),
           mock => Effect.sync(() => mock.mockRestore()),
@@ -572,9 +540,9 @@ describe('resumable recall vector preparation', () => {
       const f = yield* fixture;
       const source = yield* openRecallVectorPreparationSource(f.config);
       const otherSource = {...source, authorizationKey: 'other-live-authority'};
-      const other = yield* recallVectorTarget(f.config, manifest, otherSource);
+      const other = yield* recallVectorTarget(f.config, manifest, otherSource, fullPlan);
       yield* prepareRecallVectorMetadata(f.config, manifest, otherSource, other);
-      const checkpoint = yield* recallVectorTarget(f.config, manifest, otherSource);
+      const checkpoint = yield* recallVectorTarget(f.config, manifest, otherSource, fullPlan);
       const observe = Effect.acquireUseRelease(
         Effect.sync(() => new Database(f.filename, {readonly: true})),
         db =>
@@ -592,7 +560,7 @@ describe('resumable recall vector preparation', () => {
       expect(before.metadata).toBeGreaterThan(0);
       expect(before.state).toBe('building');
       yield* f.finish;
-      expect(yield* recallVectorTarget(f.config, manifest, otherSource)).toEqual(checkpoint);
+      expect(yield* recallVectorTarget(f.config, manifest, otherSource, fullPlan)).toEqual(checkpoint);
       expect(yield* observe).toEqual(before);
       expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation)).toBe('current');
     }).pipe(provideFixtureLayer(platform)),
@@ -737,7 +705,8 @@ describe('resumable recall vector preparation', () => {
         value => Effect.sync(() => value.mockRestore()),
       );
       const f = yield* fixture;
-      yield* f.finish;
+      yield* f.stepUntil('embed');
+      yield* f.step();
       const queries = EffectArray.map(spy.mock.calls, args => args[0]);
       const uriLookup = Option.getOrThrow(
         EffectArray.findFirst(queries, query =>
@@ -860,35 +829,35 @@ describe('resumable recall vector preparation', () => {
       expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation)).not.toBe('current');
     }).pipe(provideFixtureLayer(platform)),
   );
-  effectIt.effect(
-    'bounds retained generations and retains only current document preparation across canonical churn',
-    () =>
-      Effect.gen(function* () {
-        const f = yield* fixture;
-        for (let generation = 0; generation < 4; generation++) {
-          if (generation) {
-            yield* f.fs.writeFileString(f.resource, 'New canonical generation ' + String(generation));
-            yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
-          }
-          yield* f.finish;
-          yield* Effect.sync(() => {
-            const db = new Database(f.filename, {readonly: true});
-            try {
-              expect(db.query('SELECT COUNT(*) AS count FROM vector_generations').get()).toEqual({count: 1});
-              expect(db.query('SELECT COUNT(*) AS count FROM idle_recall_chunks').get()).toEqual(
-                db.query('SELECT COUNT(*) AS count FROM vector_chunks').get(),
-              );
-              expect(db.query('SELECT COUNT(*) AS count FROM idle_recall_metadata').get()).toEqual({count: 0});
-              expect(db.query('SELECT COUNT(*) AS count FROM idle_recall_documents').get()).toEqual({count: 1});
-              expect(db.query('SELECT COUNT(*) AS count FROM vector_values').get()).toEqual({
-                count: generation ? 1 : f.inputs(),
-              });
-            } finally {
-              db.close();
-            }
-          });
+  effectIt.effect('bounds retained generations and keeps no build rows after each ready generation', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      for (let generation = 0; generation < 4; generation++) {
+        if (generation) {
+          yield* f.fs.writeFileString(f.resource, 'New canonical generation ' + String(generation));
+          yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
         }
-      }).pipe(provideFixtureLayer(platform)),
+        yield* f.finish;
+        yield* Effect.sync(() => {
+          const db = new Database(f.filename, {readonly: true});
+          try {
+            expect(db.query('SELECT COUNT(*) AS count FROM vector_generations').get()).toEqual({count: 1});
+            for (const table of [
+              'idle_recall_chunks',
+              'idle_recall_metadata',
+              'idle_recall_documents',
+              'idle_recall_document_preparations',
+            ])
+              expect(db.query(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({count: 0});
+            expect(db.query('SELECT COUNT(*) AS count FROM vector_values').get()).toEqual({
+              count: generation ? 1 : f.inputs(),
+            });
+          } finally {
+            db.close();
+          }
+        });
+      }
+    }).pipe(provideFixtureLayer(platform)),
   );
   effectIt.effect('reactivates an authorized immutable ready target without repeating inference', () =>
     Effect.gen(function* () {
@@ -966,6 +935,17 @@ const vectorSnapshot = (filename: string) =>
           )
           .all(),
       };
+    } finally {
+      db.close();
+    }
+  });
+const reusedPreparations = (filename: string) =>
+  Effect.sync(() => {
+    const db = new Database(filename, {readonly: true});
+    try {
+      return db
+        .query<{reused: number | null}, []>('SELECT SUM(reused) AS reused FROM idle_recall_document_preparations')
+        .get()!.reused;
     } finally {
       db.close();
     }

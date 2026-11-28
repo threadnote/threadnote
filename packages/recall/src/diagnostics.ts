@@ -37,11 +37,28 @@ export interface RecallLexicalRefreshOutcome {
   readonly documentCount?: number;
 }
 
+export const RECALL_VECTOR_BUILD_KINDS = ['delta', 'full'] as const;
+
+/** One published vector generation: copied chunks came from the base, prepared ones were reused or embedded. */
+export interface RecallVectorBuildOutcome {
+  readonly kind: (typeof RECALL_VECTOR_BUILD_KINDS)[number];
+  readonly changedCount: number;
+  readonly copiedChunkCount: number;
+  readonly reusedChunkCount: number;
+  readonly embeddedChunkCount: number;
+}
+
 /** Counts, closed reasons and error values only; the log writer reduces `error` to a safe type label. */
 export type RecallDiagnostic =
   | (RecallLexicalRefreshOutcome & {
       readonly event: 'recall.lexical-refresh';
       readonly scope: RecallDiagnosticScope;
+      readonly durationMilliseconds: number;
+    })
+  | (RecallVectorBuildOutcome & {
+      readonly event: 'recall.vector-build';
+      readonly scope: RecallDiagnosticScope;
+      /** From target creation to activation; a build can span many steps and processes. */
       readonly durationMilliseconds: number;
     })
   | {

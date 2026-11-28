@@ -13,6 +13,21 @@ export class RecallVectorPreparationChanged extends Schema.TaggedError<
 export const preparationChanged = () =>
   RecallVectorPreparationChanged.make({message: 'Recall vector preparation ownership changed; retry current demand.'});
 
+/**
+ * Delta state of a target. `copy_stage` walks 'chunks' → 'aliases' → 'done'; the page cursor is the largest key
+ * the target holds, since copying precedes preparation. `copy_expected` and `alias_expected` are the base rows
+ * outside the changed set; `copied_chunks` is the durable count that activation adds to the prepared chunks.
+ * `purging` marks a delta reset to a full walk whose rows later steps delete in bounded batches.
+ */
+const RECALL_DELTA_TARGET_COLUMNS = [
+  ['base_generation', 'TEXT'],
+  ['copy_stage', "TEXT CHECK(copy_stage IN ('chunks','aliases','done'))"],
+  ['copy_expected', 'INTEGER NOT NULL DEFAULT 0 CHECK(copy_expected >= 0)'],
+  ['alias_expected', 'INTEGER NOT NULL DEFAULT 0 CHECK(alias_expected >= 0)'],
+  ['copied_chunks', 'INTEGER NOT NULL DEFAULT 0 CHECK(copied_chunks >= 0)'],
+  ['purging', 'INTEGER NOT NULL DEFAULT 0 CHECK(purging IN (0, 1))'],
+] as const;
+
 /** Same model writer as manual builds, held only around one bounded metadata/payload transaction. */
 export function withRecallVectorWrite<A, E, R>(
   config: RecallEmbeddingScope,
@@ -74,6 +89,17 @@ export function withRecallVectorWrite<A, E, R>(
             source_after TEXT, cursor INTEGER NOT NULL DEFAULT 0 CHECK(cursor >= 0),
             chunk_cursor INTEGER NOT NULL DEFAULT 0 CHECK(chunk_cursor >= 0), alias_cursor INTEGER NOT NULL DEFAULT 0 CHECK(alias_cursor >= 0)
           )`);
+                // Additive delta-build columns; a target without a base generation is a full walk.
+                const targetColumns = yield* sql.unsafe<{readonly name: string}>(
+                  'PRAGMA table_info(idle_recall_targets)',
+                );
+                for (const [name, definition] of RECALL_DELTA_TARGET_COLUMNS)
+                  if (!EffectArray.some(targetColumns, column => column.name === name))
+                    yield* sql.unsafe(`ALTER TABLE idle_recall_targets ADD COLUMN ${name} ${definition}`);
+                yield* sql.unsafe(`CREATE TABLE IF NOT EXISTS idle_recall_delta_uris (
+            generation TEXT NOT NULL REFERENCES idle_recall_targets(generation) ON DELETE CASCADE,
+            uri TEXT NOT NULL, PRIMARY KEY(generation, uri)
+          ) WITHOUT ROWID`);
                 yield* sql.unsafe(`CREATE TABLE IF NOT EXISTS idle_recall_metadata (
             generation TEXT NOT NULL REFERENCES idle_recall_targets(generation) ON DELETE CASCADE,
             ordinal INTEGER NOT NULL, candidate_json TEXT NOT NULL, candidate_sha256 TEXT NOT NULL, PRIMARY KEY(generation, ordinal)

@@ -34,6 +34,14 @@ export function recallVectorPreparationIdentity(
 export function recallVectorPreparationJobId(identity: ReturnType<typeof recallVectorPreparationIdentity>) {
   return RECALL_PREPARATION_PREFIX + sha256HexSync(JSON.stringify(['idle-recall-v2', ...identity]));
 }
+/**
+ * The job id a delta target holds until activation. Older binaries look targets up by the real job id and do
+ * not know the copy state, so they must never find an unfinished delta.
+ */
+export const RECALL_DELTA_JOB_PREFIX = 'delta:';
+export function recallVectorDeltaJobId(jobId: string) {
+  return RECALL_DELTA_JOB_PREFIX + jobId;
+}
 export function recallVectorPreparationMatches(
   jobId: string,
   identity: ReturnType<typeof recallVectorPreparationIdentity>,

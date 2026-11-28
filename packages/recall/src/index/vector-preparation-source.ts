@@ -15,6 +15,7 @@ import type {RecallEmbeddingScope} from '../background/demand.js';
 import {recallIndexCandidateIsEligible} from './candidate.js';
 import {stripRecallAnchor} from './lexical.js';
 import {recallVectorAuthorizationKey} from '../vector/preparation-identity.js';
+import {readRecallMaskLexicalSnapshot} from './change_set.js';
 import {createRecallIdentityConflictLoader, markRecallIdentityConflicts} from './identity.js';
 
 export class RecallVectorSourceChanged extends Schema.TaggedError<
@@ -151,6 +152,13 @@ export const openRecallVectorPreparationSource = Effect.fn('recall.openVectorPre
             after: rows.at(-1)?.uri,
             done: rows.length < pageSize,
           };
+        }),
+      ),
+    /** The masked read's change set from `fromGeneration` to exactly this source generation. */
+    readMaskLexicalInputs: (fromGeneration: string, cap: number) =>
+      read(
+        Effect.gen(function* () {
+          return yield* readRecallMaskLexicalSnapshot(yield* SqlClient.SqlClient, fromGeneration, cap);
         }),
       ),
     authorize: (metadata: readonly RecallCandidate[]) =>

@@ -32,6 +32,7 @@ import {
   RECALL_LEXICAL_REFRESH_DECISIONS,
   RECALL_LEXICAL_REFRESH_FAILURE_STAGES,
   RECALL_LEXICAL_REFRESH_REASONS,
+  RECALL_VECTOR_BUILD_KINDS,
   RecallDiagnosticsPort,
   type RecallDiagnostic,
 } from '@threadnote/recall/diagnostics';
@@ -206,6 +207,17 @@ const ProductionLogDiagnosticEntry = Schema.Union([
     changedSourceCount: Schema.optionalKey(diagnosticCount),
     removedSourceCount: Schema.optionalKey(diagnosticCount),
     documentCount: Schema.optionalKey(diagnosticCount),
+    durationMilliseconds: diagnosticCount,
+  }),
+  Schema.Struct({
+    ...diagnosticBase,
+    event: Schema.Literal('recall.vector-build'),
+    level: Schema.Literal('info'),
+    kind: Schema.Literals(RECALL_VECTOR_BUILD_KINDS),
+    changedCount: diagnosticCount,
+    copiedChunkCount: diagnosticCount,
+    reusedChunkCount: diagnosticCount,
+    embeddedChunkCount: diagnosticCount,
     durationMilliseconds: diagnosticCount,
   }),
   Schema.Struct({
@@ -469,6 +481,11 @@ export const productionLogSupportExcerpt = Effect.fn('productionLog.productionLo
   } satisfies ProductionLogSupportExcerpt;
 });
 
+const INFO_DIAGNOSTIC_EVENTS: ReadonlySet<RecallDiagnostic['event']> = new Set([
+  'recall.lexical-refresh',
+  'recall.vector-build',
+]);
+
 /** One best-effort record per recall diagnostic; like invocation entries it never fails the caller. */
 function appendRecallProductionDiagnostic(home: string, diagnostic: RecallDiagnostic) {
   return Effect.gen(function* () {
@@ -483,7 +500,7 @@ function appendRecallProductionDiagnostic(home: string, diagnostic: RecallDiagno
       timestamp: timestamp(yield* Clock.currentTimeMillis),
       version: yield* getThreadnoteVersion().pipe(Effect.orElseSucceed(() => 'unknown')),
       ...diagnostic,
-      level: diagnostic.event === 'recall.lexical-refresh' ? 'info' : 'warn',
+      level: INFO_DIAGNOSTIC_EVENTS.has(diagnostic.event) ? 'info' : 'warn',
       ...('error' in diagnostic && diagnostic.error !== undefined
         ? {errorType: diagnosticErrorType(diagnostic.error)}
         : {}),

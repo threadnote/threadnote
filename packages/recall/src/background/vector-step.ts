@@ -1,7 +1,7 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Array as EffectArray} from 'effect';
 import {recallCandidateIsValid} from '../candidate_validation.js';
-import {Clock, Effect, Exit, Path} from 'effect';
+import {Clock, DateTime, Effect, Exit, Option, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -12,13 +12,25 @@ import {openRecallVectorPreparationSource} from '../index/vector-preparation-sou
 export {RecallVectorSourceChanged} from '../index/vector-preparation-source.js';
 import type {RecallCandidate} from '../rank.js';
 import {recallVectorStorage, VectorIndexCorrupt} from '../vector-index.js';
-import {recallVectorPreparationIdentity, recallVectorPreparationJobId} from '../vector/preparation-identity.js';
+import {
+  recallVectorDeltaJobId,
+  recallVectorPreparationIdentity,
+  recallVectorPreparationJobId,
+} from '../vector/preparation-identity.js';
 import {preparationChanged, withRecallVectorWrite} from '../vector/storage.js';
 import type {RecallEmbeddingObservation, RecallEmbeddingScope} from './demand.js';
+import {emitRecallDiagnostic} from '../diagnostics.js';
+import {
+  authorizeRecallVectorCorpus,
+  copyRecallVectorDeltaRows,
+  planRecallVectorDelta,
+  readRecallVectorDeltaUris,
+} from './vector-delta.js';
 import {
   assertRecallVectorTarget,
   hydrateRecallVectorDocuments,
   prepareRecallVectorMetadata,
+  purgeRecallVectorTarget,
   recallVectorTarget,
   resolveRecallVectorMetadata,
   releaseResolvedRecallMetadata,
@@ -48,7 +60,15 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
   });
   yield* verify;
   const source = yield* openRecallVectorPreparationSource(config);
-  const target = yield* recallVectorTarget(config, manifest, source);
+  const target = yield* recallVectorTarget(config, manifest, source, planRecallVectorDelta(config, manifest, source));
+  const job = recallVectorPreparationJobId(
+    recallVectorPreparationIdentity(
+      source.generation,
+      source.authorizationKey,
+      manifest.id,
+      recallVectorStorage.recipe(manifest),
+    ),
+  );
   const path = yield* Path.Path;
   const filename = recallVectorStorage.databasePath(path, config.agentContextHome, manifest.id);
   const documents = (offset: number, limit = 100) =>
@@ -88,10 +108,17 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
         return candidates;
       }),
     );
-    yield* resolveRecallVectorMetadata(config, manifest, source, target, metadata);
+    const changed =
+      target.base_generation === null ? undefined : readRecallVectorDeltaUris(filename, target.generation);
+    yield* resolveRecallVectorMetadata(config, manifest, source, target, metadata, changed);
   } else if (target.phase === 'hydrate') {
     releaseResolvedRecallMetadata(target.generation);
-    yield* hydrateRecallVectorDocuments(config, manifest, source, target, yield* documents(target.cursor, 1));
+    // A delta copies the base rows of unchanged memories before it prepares the changed ones; a reset delta
+    // purges its rows before it resolves again as a full walk.
+    if (target.purging === 1) yield* purgeRecallVectorTarget(config, manifest, source, target);
+    else if (target.copy_stage === 'chunks' || target.copy_stage === 'aliases')
+      yield* copyRecallVectorDeltaRows(config, manifest, source, target);
+    else yield* hydrateRecallVectorDocuments(config, manifest, source, target, yield* documents(target.cursor, 1));
   } else if (target.phase === 'embed') {
     const pending = yield* recallVectorStorage.read(
       filename,
@@ -189,14 +216,10 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
       };
     }
     // Live external authorization is distinct from canonical corpus freshness.
-    for (let offset = 0; ; offset += 100) {
-      const page = yield* documents(offset);
-      yield* source.authorize(page);
-      if (page.length < 100) break;
-    }
+    yield* authorizeRecallVectorCorpus(source);
     yield* verify;
     yield* source.fence;
-    return yield* Effect.acquireUseRelease(
+    const activated = yield* Effect.acquireUseRelease(
       withRecallVectorWrite(
         config,
         manifest,
@@ -206,29 +229,57 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
           const previous = yield* sql<{
             readonly generation: string;
           }>`SELECT generation FROM vector_pointer WHERE singleton = 1`;
-          const counts = yield* sql<{readonly desired: number; readonly actual: number}>`SELECT
-        (SELECT COUNT(*) FROM idle_recall_chunks WHERE generation = ${target.generation}) AS desired,
-        (SELECT COUNT(*) FROM vector_chunks WHERE generation = ${target.generation}) AS actual`;
-          if (counts[0]?.desired !== counts[0]?.actual) return yield* preparationChanged();
+          // A delta adds the chunk rows it copied from its base to the chunks it prepared. A prepared chunk
+          // was embedded by this build when no other generation holds its vector.
+          const counts = yield* sql<{
+            readonly prepared: number;
+            readonly actual: number;
+            readonly changed: number;
+            readonly embedded: number;
+            readonly created_at: string;
+          }>`SELECT
+        (SELECT COUNT(*) FROM idle_recall_chunks WHERE generation = ${target.generation}) AS prepared,
+        (SELECT COUNT(*) FROM vector_chunks WHERE generation = ${target.generation}) AS actual,
+        (SELECT COUNT(*) FROM idle_recall_delta_uris WHERE generation = ${target.generation}) AS changed,
+        (SELECT COUNT(DISTINCT c.vector_id) FROM vector_chunks c
+          JOIN idle_recall_chunks p ON p.generation = c.generation AND p.chunk_id = c.chunk_id
+          WHERE c.generation = ${target.generation} AND NOT EXISTS (
+            SELECT 1 FROM vector_chunks o WHERE o.vector_id = c.vector_id AND o.generation <> c.generation)) AS embedded,
+        (SELECT created_at FROM vector_generations WHERE generation = ${target.generation}) AS created_at`;
+          const count = counts[0];
+          if (
+            !count ||
+            (target.copy_stage !== null && target.copy_stage !== 'done') ||
+            count.prepared + target.copied_chunks !== count.actual
+          )
+            return yield* preparationChanged();
           yield* verify;
           yield* source.fence;
-          yield* sql`UPDATE vector_generations SET state = 'ready', chunk_count = ${counts[0].actual} WHERE generation = ${target.generation}`;
+          // A delta takes its real job id only now; an older binary's full target of the same job wins.
+          const promoted =
+            yield* sql`UPDATE vector_generations SET job_id = ${job}, state = 'ready', chunk_count = ${count.actual}
+            WHERE generation = ${target.generation}
+            AND NOT EXISTS (SELECT 1 FROM vector_generations o WHERE o.job_id = ${job} AND o.generation <> ${target.generation})
+            RETURNING generation`;
+          if (!promoted.length) return yield* preparationChanged();
           yield* sql`INSERT INTO vector_pointer (singleton,generation) VALUES (1,${target.generation}) ON CONFLICT(singleton) DO UPDATE SET generation = excluded.generation`;
           yield* sql`UPDATE idle_recall_targets SET phase = 'retire' WHERE generation = ${target.generation}`;
-          return previous[0]?.generation;
+          const createdAt = DateTime.make(count.created_at);
+          return {
+            previous: previous[0]?.generation,
+            createdAt: Option.isSome(createdAt) ? DateTime.toEpochMillis(createdAt.value) : undefined,
+            build: {
+              kind: target.base_generation === null ? ('full' as const) : ('delta' as const),
+              changedCount: count.changed,
+              copiedChunkCount: target.copied_chunks,
+              reusedChunkCount: count.prepared - count.embedded,
+              embeddedChunkCount: count.embedded,
+            },
+          };
         }),
       ),
-      () =>
-        verify.pipe(
-          Effect.andThen(source.fence),
-          Effect.as({
-            state: 'pending' as const,
-            phase: 'retire' as const,
-            inferred: false,
-            generation: target.generation,
-          }),
-        ),
-      (previousPointer, exit) =>
+      activation => verify.pipe(Effect.andThen(source.fence), Effect.as(activation)),
+      ({previous: previousPointer}, exit) =>
         Exit.isSuccess(exit)
           ? Effect.void
           : withRecallVectorWrite(
@@ -245,11 +296,22 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
               AND EXISTS (SELECT 1 FROM vector_generations WHERE generation = ${previousPointer} AND state = 'ready')
             RETURNING generation`;
                 if (!restored.length) yield* sql`DELETE FROM vector_pointer WHERE generation = ${target.generation}`;
-                yield* sql`UPDATE vector_generations SET state = 'building' WHERE generation = ${target.generation}`;
+                yield* sql`UPDATE vector_generations SET state = 'building',
+                  job_id = ${target.base_generation === null ? job : recallVectorDeltaJobId(job)}
+                  WHERE generation = ${target.generation}`;
                 yield* sql`UPDATE idle_recall_targets SET phase = 'embed' WHERE generation = ${target.generation}`;
               }),
             ),
     );
+    // Logged after the pointer is final, so an interrupted log write cannot undo a publication.
+    const finished = yield* Clock.currentTimeMillis;
+    yield* emitRecallDiagnostic(config.agentContextHome, {
+      event: 'recall.vector-build',
+      scope: 'active',
+      ...activated.build,
+      durationMilliseconds: Math.max(0, finished - (activated.createdAt ?? finished)),
+    });
+    return {state: 'pending' as const, phase: 'retire' as const, inferred: false, generation: target.generation};
   } else if (target.phase === 'retire') {
     yield* verify;
     yield* source.fence;
@@ -263,11 +325,8 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
   } else {
     yield* verify;
     yield* source.fence;
-    for (let offset = 0; ; offset += 100) {
-      const page = yield* documents(offset);
-      yield* source.authorize(page);
-      if (page.length < 100) break;
-    }
+    // A ready target keeps no document rows; authorize the current corpus itself.
+    yield* authorizeRecallVectorCorpus(source);
     const pointer = yield* recallVectorStorage.read(
       filename,
       Effect.gen(function* () {
@@ -296,14 +355,6 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           yield* assertRecallVectorTarget(target);
-          const job = recallVectorPreparationJobId(
-            recallVectorPreparationIdentity(
-              source.generation,
-              source.authorizationKey,
-              manifest.id,
-              recallVectorStorage.recipe(manifest),
-            ),
-          );
           const ready = yield* sql`SELECT 1 FROM vector_generations g
           WHERE g.generation = ${target.generation} AND g.state = 'ready'
           AND g.job_id = ${job} AND g.corpus_generation = ${source.generation}
