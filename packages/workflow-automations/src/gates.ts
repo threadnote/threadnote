@@ -1,3 +1,4 @@
+import {shellQuote} from '@threadnote/platform/command';
 import {Array as EffectArray, Predicate, String as EffectString} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import {WorkflowAutomationError, type WorkflowNextCommand, type WorkflowRefusalDetail} from './contracts.js';
@@ -81,58 +82,66 @@ export function decideGate(
 }
 
 const cliFlag = (key: string) => '--' + EffectString.replaceAll('_', '-')(EffectString.camelToSnake(key));
-const cliValue = (value: string) => (/[\s"'$`\\]/u.test(value) ? JSON.stringify(value) : value);
+const placeholderKey = Symbol('workflow next placeholder');
+type NextPlaceholder = {readonly [placeholderKey]: string};
+type NextFlag = string | NextPlaceholder;
+type NextTemplate = {
+  readonly tool: WorkflowNextCommand['tool'];
+  readonly command: string;
+  readonly cli: {readonly command: string; readonly flags: Readonly<Record<string, NextFlag>>};
+  readonly arguments: Readonly<Record<string, unknown>>;
+};
+const nextTemplates = new WeakMap<WorkflowNextCommand, NextTemplate>();
 
-/**
- * One next command in both callable forms: MCP `arguments` shaped by the tool's input schema, and the CLI line. An
- * unknown value appears as a `<placeholder>`.
- */
-export function nativeNextCommand(
-  tool: WorkflowNextCommand['tool'],
-  command: string,
-  cli: {readonly command: string; readonly flags: Readonly<Record<string, string>>},
-  mcpArguments: Readonly<Record<string, unknown>>,
+export const nativeNextPlaceholder = (name: string): NextPlaceholder => ({[placeholderKey]: name});
+const placeholderName = (value: unknown) =>
+  Predicate.isObject(value) && placeholderKey in value && typeof value[placeholderKey] === 'string'
+    ? value[placeholderKey]
+    : undefined;
+
+function renderNativeNext(
+  template: NextTemplate,
+  values: Readonly<Record<string, string | undefined>> = {},
 ): WorkflowNextCommand {
-  const flags = EffectArray.map(
-    EffectRecord.toEntries(cli.flags),
-    ([key, value]) => `${cliFlag(key)} ${cliValue(value)}`,
-  );
-  return {
-    tool,
-    command,
-    cli: EffectArray.join(['threadnote workflow-automation', cli.command, ...flags], ' '),
-    arguments: mcpArguments,
+  const argument = (name: string) => values[name] ?? `<${name}>`;
+  const fill = (value: unknown): unknown => {
+    const name = placeholderName(value);
+    if (name !== undefined) return argument(name);
+    if (EffectArray.isArray(value)) return EffectArray.map(value, fill);
+    return Predicate.isObject(value) ? EffectRecord.map(value, fill) : value;
   };
+  const flags = EffectArray.map(
+    EffectRecord.toEntries(template.cli.flags),
+    ([key, value]) =>
+      `${cliFlag(key)} ${shellQuote(typeof value === 'string' ? value : argument(value[placeholderKey]))}`,
+  );
+  const next = {
+    tool: template.tool,
+    command: template.command,
+    cli: EffectArray.join(['threadnote workflow-automation', template.cli.command, ...flags], ' '),
+    arguments: EffectRecord.map(template.arguments, fill),
+  };
+  nextTemplates.set(next, template);
+  return next;
 }
 
-/** Fill each `<name>` placeholder of a next command whose value the caller already holds. */
+/** Render MCP and CLI forms from the same arguments. An unknown value appears as a `<placeholder>`. */
+export function nativeNextCommand(
+  tool: NextTemplate['tool'],
+  command: string,
+  cli: NextTemplate['cli'],
+  mcpArguments: NextTemplate['arguments'],
+): WorkflowNextCommand {
+  return renderNativeNext({tool, command, cli, arguments: mcpArguments});
+}
+
+/** Fill only authored placeholders. Never reinterpret a rendered command or a literal argument. */
 export function fillNativeNext(
   next: WorkflowNextCommand,
   values: Readonly<Record<string, string | undefined>>,
 ): WorkflowNextCommand {
-  const known = (value: string) => {
-    const name = /^<([A-Za-z]+)>$/u.exec(value)?.[1];
-    return name === undefined ? undefined : values[name];
-  };
-  const fill = (value: unknown): unknown =>
-    typeof value === 'string'
-      ? (known(value) ?? value)
-      : EffectArray.isArray(value)
-        ? EffectArray.map(value, fill)
-        : Predicate.isObject(value)
-          ? EffectRecord.map(value, fill)
-          : value;
-  return {
-    ...next,
-    cli: EffectArray.join(
-      EffectArray.map(EffectString.split(next.cli, ' '), token => {
-        const value = known(token);
-        return value === undefined ? token : cliValue(value);
-      }),
-      ' ',
-    ),
-    arguments: EffectRecord.map(next.arguments, fill),
-  };
+  const template = nextTemplates.get(next);
+  return template ? renderNativeNext(template, values) : next;
 }
 
 type NativeNextScope = {readonly runId: string; readonly callerCwd: string};
@@ -150,10 +159,10 @@ const sameShape = (
 export const nativeControlNext = (
   scope: NativeNextScope,
   command: string,
-  fields: Readonly<Record<string, string>>,
+  fields: Readonly<Record<string, NextFlag>>,
   cardBound = true,
 ) => {
-  const taskRef: Readonly<Record<string, string>> = cardBound ? {taskRef: '<taskRef>'} : {};
+  const taskRef: Readonly<Record<string, NextFlag>> = cardBound ? {taskRef: nativeNextPlaceholder('taskRef')} : {};
   return nativeNextCommand(
     'workflow_task_control',
     command,
@@ -177,20 +186,29 @@ export const nativeNext = {
       'workflow_task_work',
       'work',
       {command: 'task-action work', flags: scope},
-      {...scope, capacity: '<capacity>', anchors: '<anchors>', ownership: '<ownership>', checks: '<checks>'},
+      {
+        ...scope,
+        capacity: nativeNextPlaceholder('capacity'),
+        anchors: nativeNextPlaceholder('anchors'),
+        ownership: nativeNextPlaceholder('ownership'),
+        checks: nativeNextPlaceholder('checks'),
+      },
     ),
   review: (scope: NativeNextScope) =>
     nativeNextCommand(
       'workflow_task_record_review',
       'record-review',
-      {command: 'task-action record-review', flags: {...scope, snapshotRef: '<snapshotRef>', report: '<report>'}},
+      {
+        command: 'task-action record-review',
+        flags: {...scope, snapshotRef: nativeNextPlaceholder('snapshotRef'), report: nativeNextPlaceholder('report')},
+      },
       {
         ...scope,
-        snapshotRef: '<snapshotRef>',
-        mode: '<mode>',
-        selected: '<selected>',
-        lanes: '<lanes>',
-        findings: '<findings>',
+        snapshotRef: nativeNextPlaceholder('snapshotRef'),
+        mode: nativeNextPlaceholder('mode'),
+        selected: nativeNextPlaceholder('selected'),
+        lanes: nativeNextPlaceholder('lanes'),
+        findings: nativeNextPlaceholder('findings'),
       },
     ),
   validation: (scope: NativeNextScope) =>
@@ -199,15 +217,26 @@ export const nativeNext = {
       'record-validation',
       {
         command: 'task-action record-validation',
-        flags: {...scope, snapshotRef: '<snapshotRef>', validation: '<validation>'},
+        flags: {
+          ...scope,
+          snapshotRef: nativeNextPlaceholder('snapshotRef'),
+          validation: nativeNextPlaceholder('validation'),
+        },
       },
-      {...scope, snapshotRef: '<snapshotRef>', checks: '<checks>', acceptance: '<acceptance>'},
+      {
+        ...scope,
+        snapshotRef: nativeNextPlaceholder('snapshotRef'),
+        checks: nativeNextPlaceholder('checks'),
+        acceptance: nativeNextPlaceholder('acceptance'),
+      },
     ),
   deliver: (scope: NativeNextScope, delivery: 'local' | 'commit' | 'pr' = 'local') => {
     const fields = {
-      validationRef: '<validationRef>',
-      ...(delivery === 'local' ? {} : {commitEvidence: '<commitEvidence>'}),
-      ...(delivery === 'pr' ? {pr: '<pr>', userAuthority: '<userAuthority>'} : {}),
+      validationRef: nativeNextPlaceholder('validationRef'),
+      ...(delivery === 'local' ? {} : {commitEvidence: nativeNextPlaceholder('commitEvidence')}),
+      ...(delivery === 'pr'
+        ? {pr: nativeNextPlaceholder('pr'), userAuthority: nativeNextPlaceholder('userAuthority')}
+        : {}),
     };
     return nativeNextCommand(
       'workflow_task_deliver',
@@ -223,14 +252,29 @@ export const nativeNext = {
       'compact-confirm',
       {
         command: 'task-action compact-confirm',
-        flags: {...scope, intentHash: '<intentHash>', userDecision: '<userDecision>', userResponse: '<userResponse>'},
+        flags: {
+          ...scope,
+          intentHash: nativeNextPlaceholder('intentHash'),
+          userDecision: nativeNextPlaceholder('userDecision'),
+          userResponse: nativeNextPlaceholder('userResponse'),
+        },
       },
-      {...scope, presentedIntentHash: '<intentHash>', userDecision: '<userDecision>', userResponse: '<userResponse>'},
+      {
+        ...scope,
+        presentedIntentHash: nativeNextPlaceholder('intentHash'),
+        userDecision: nativeNextPlaceholder('userDecision'),
+        userResponse: nativeNextPlaceholder('userResponse'),
+      },
     ),
   reopen: (scope: NativeNextScope, phaseId: string) =>
-    nativeControlNext(scope, 'reopen', {phaseId, reason: '<reason>'}),
+    nativeControlNext(scope, 'reopen', {phaseId, reason: nativeNextPlaceholder('reason')}),
   waive: (scope: NativeNextScope, gate: NativeWaivableGateId) =>
-    nativeControlNext(scope, 'waive', {gate, reason: '<reason>', userAuthority: '<userAuthority>'}, false),
+    nativeControlNext(
+      scope,
+      'waive',
+      {gate, reason: nativeNextPlaceholder('reason'), userAuthority: nativeNextPlaceholder('userAuthority')},
+      false,
+    ),
   authoringRead: (callerCwd: string, authoringRef: string) =>
     nativeNextCommand(
       'workflow_task_author',
@@ -240,19 +284,73 @@ export const nativeNext = {
     ),
 } as const;
 
+/** Watch identity fields a watch next command repeats, in CLI order. */
+export const nativeWatchIdentityKeys = [
+  'runId',
+  'callerCwd',
+  'validationRef',
+  'deliveryRef',
+  'phaseId',
+  'prUrl',
+  'watchRef',
+  'snapshotRef',
+  'candidateWatchRef',
+  'pr',
+  'supplementalRef',
+] as const;
+
+export type NativeWatchIdentity = Readonly<Partial<Record<(typeof nativeWatchIdentityKeys)[number], string>>>;
+
+/** The watch identity and route proof fields of a caller's input, in CLI order. */
+export const nativeWatchIdentityOf = (input: Readonly<Record<string, unknown>>): NativeWatchIdentity => {
+  const fields: Partial<Record<(typeof nativeWatchIdentityKeys)[number], string>> = {};
+  for (const key of nativeWatchIdentityKeys) {
+    const value = input[key];
+    if (typeof value === 'string') fields[key] = value;
+  }
+  return fields;
+};
+
+/**
+ * A `workflow_task_watch_pr` operation over the caller's own watch identity and route proof; `work` restarts at
+ * offset zero and `relay` carries no delivery reference.
+ */
+export const nativeWatchNext = (
+  identity: NativeWatchIdentity,
+  operation: 'inspect' | 'renew' | 'work' | 'relay' | 'complete',
+): WorkflowNextCommand => {
+  const fields = nativeWatchIdentityOf(identity);
+  return nativeNextCommand(
+    'workflow_task_watch_pr',
+    operation,
+    {command: 'watch-pr', flags: {...fields, operation, ...(operation === 'work' ? {workOffset: '0'} : {})}},
+    {...fields, operation, ...(operation === 'work' ? {workOffset: 0} : {})},
+  );
+};
+
+const retainNextTemplate = (error: WorkflowAutomationError, next: WorkflowNextCommand) => {
+  const template = nextTemplates.get(next);
+  // Effect Schema copies the public next command when it constructs the error.
+  if (template && error.next) nextTemplates.set(error.next, template);
+  return error;
+};
+
 /** Every refusal names its rule and the next legal command; the type makes `next` mandatory. */
 export const nativeRefusal = (
   code: string,
   message: string,
   refusal: {readonly next: WorkflowNextCommand; readonly gate?: GateId; readonly detail?: WorkflowRefusalDetail},
 ) =>
-  WorkflowAutomationError.make({
-    code,
-    message,
-    next: refusal.next,
-    ...(refusal.gate === undefined ? {} : {gate: refusal.gate}),
-    ...(refusal.detail === undefined ? {} : {detail: refusal.detail}),
-  });
+  retainNextTemplate(
+    WorkflowAutomationError.make({
+      code,
+      message,
+      next: refusal.next,
+      ...(refusal.gate === undefined ? {} : {gate: refusal.gate}),
+      ...(refusal.detail === undefined ? {} : {detail: refusal.detail}),
+    }),
+    refusal.next,
+  );
 
 /** The next legal command for the action on the current task card. */
 export const nativeNextForTaskAction = (
@@ -276,14 +374,14 @@ export const nativeNextForTaskAction = (
     case 'compact-confirm':
       return nativeNext.compactConfirm(scope);
     case 'blocked':
-      return nativeControlNext(scope, 'resume', {reason: '<reason>'});
+      return nativeControlNext(scope, 'resume', {reason: nativeNextPlaceholder('reason')});
     case 'reconcile-plan':
-      return nativeControlNext(scope, 'reconcile', {reason: '<reason>'});
+      return nativeControlNext(scope, 'reconcile', {reason: nativeNextPlaceholder('reason')});
     case 'expand-review-budget':
       return nativeControlNext(scope, 'extend-review-budget', {
-        additionalReviews: '<additionalReviews>',
-        reason: '<reason>',
-        userAuthority: '<userAuthority>',
+        additionalReviews: nativeNextPlaceholder('additionalReviews'),
+        reason: nativeNextPlaceholder('reason'),
+        userAuthority: nativeNextPlaceholder('userAuthority'),
       });
     default:
       return nativeNext.view({runId: runId, callerCwd: callerCwd});
@@ -292,11 +390,14 @@ export const nativeNextForTaskAction = (
 
 /** The refusal with this next command. */
 export const withNativeNext = (error: WorkflowAutomationError, next: WorkflowNextCommand) =>
-  WorkflowAutomationError.make({
-    code: error.code,
-    message: error.message,
-    ...(error.retryable === undefined ? {} : {retryable: error.retryable}),
-    ...(error.gate === undefined ? {} : {gate: error.gate}),
-    ...(error.detail === undefined ? {} : {detail: error.detail}),
+  retainNextTemplate(
+    WorkflowAutomationError.make({
+      code: error.code,
+      message: error.message,
+      ...(error.retryable === undefined ? {} : {retryable: error.retryable}),
+      ...(error.gate === undefined ? {} : {gate: error.gate}),
+      ...(error.detail === undefined ? {} : {detail: error.detail}),
+      next,
+    }),
     next,
-  });
+  );
