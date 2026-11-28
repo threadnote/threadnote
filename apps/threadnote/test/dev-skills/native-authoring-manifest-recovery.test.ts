@@ -254,7 +254,8 @@ effectIt.effect(
     Effect.gen(function* () {
       const f = yield* nativeFixture();
       yield* commitFixtureSource(f.repo);
-      yield* runCommandEffect('git', ['-C', f.repo, 'checkout', '-b', 'ready-recovery']);
+      const branch = 'ready-recovery';
+      yield* runCommandEffect('git', ['-C', f.repo, 'checkout', '-b', branch]);
       const initialized = yield* f.init('native-run', 'skill-generation-v1', 'fixture', 'standard');
       const scope = {runId: 'native-run', callerCwd: f.repo};
       const draft = object(
@@ -307,6 +308,7 @@ effectIt.effect(
           decision: 'approved',
           response: approval.userResponse,
           delivery: approval.delivery,
+          bindings: {compact: {branch, baseBranch: approval.baseBranch}},
         },
         review: proof,
       };
