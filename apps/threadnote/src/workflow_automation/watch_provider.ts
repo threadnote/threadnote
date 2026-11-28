@@ -56,6 +56,13 @@ export interface NativeWatchProviderMetrics {
 }
 export interface NativeWatchProviderCache {
   readonly pages: readonly NativeWatchHttpPage[];
+  readonly jobLogs?: {readonly head: string; readonly entries: readonly JobLogRead[]};
+}
+interface JobLogRead {
+  readonly id: string;
+  readonly version: string;
+  /** Absent after one failed attempt. Null after a completed read with no usable detail or two failures. */
+  readonly detail?: string | null;
 }
 export interface NativeWatchProviderResult {
   readonly sweep: NativeWatchSweep;
@@ -127,6 +134,8 @@ const entity = (
 });
 
 const summaryLimit = 1024;
+const summaryNameLimit = 224;
+const summaryResultLimit = 32;
 const summaryLineLimit = 200;
 const summaryLogLines = 6;
 const summaryLogChecks = 6;
@@ -134,13 +143,8 @@ const summaryDetailSeparator = ' | ';
 const summaryInputLimit = 4096;
 const summaryLogFailureLimit = 2;
 const summaryLogCandidateLimit = 64;
-const summaryLogUnavailable = 'job log unavailable';
-/** Marks one failed log read; it has no ` | ` separator and survives summaryText unchanged. */
-const summaryLogRetrySentinel = ' (job log read failed; retrying)';
-const withoutRetrySentinel = (summary: string) =>
-  EffectString.endsWith(summaryLogRetrySentinel)(summary)
-    ? EffectString.slice(0, summary.length - summaryLogRetrySentinel.length)(summary)
-    : summary;
+const summaryLogBudgetMs = 5000;
+const summaryLogLatestMs = 50_000;
 const logTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s?/u;
 // oxlint-disable-next-line no-control-regex -- Terminal escapes (OSC hyperlinks, also unterminated, then CSI styles) are removed from CI text.
 const terminalEscapes = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\|$)|\u001b\[[0-9;?]*[A-Za-z]/gu;
@@ -161,58 +165,76 @@ const summaryText = (value: string, maximum: number) =>
     EffectString.slice(0, maximum),
     EffectString.trim,
   );
-const failureSummary = (name: unknown, outcome: unknown, fallback: string) =>
-  Effect2.pipe(
-    summaryText(
-      `${typeof name === 'string' && name ? name : fallback}: ${typeof outcome === 'string' && outcome ? outcome : 'failed'}`,
-      summaryLimit,
-    ),
-    EffectString.replaceAll('|', '/'),
-  ) || undefined;
+const failureSummary = (name: unknown, outcome: unknown, fallback: string) => {
+  const label = typeof name === 'string' ? summaryText(name, summaryNameLimit) : '';
+  const result = typeof outcome === 'string' ? summaryText(outcome, summaryResultLimit) : '';
+  return EffectString.replaceAll('|', '/')(`${label || fallback}: ${result || 'failed'}`);
+};
+
+/** An old failed check can lack a label or include log text where current pages keep only the check label and result. */
+const needsCheckSummaryRefresh = (page: NativeWatchHttpPage) =>
+  EffectString.startsWith('checks:')(page.key) &&
+  EffectArray.some(
+    page.projection.items,
+    ({kind, summary}) =>
+      kind === 'ci_error' &&
+      (summary === undefined ||
+        summary.length > summaryNameLimit + 2 + summaryResultLimit ||
+        EffectString.includes(summaryDetailSeparator)(summary) ||
+        EffectString.endsWith(' (job log read failed; retrying)')(summary)),
+  );
+
+const testFailure = /^FAIL\s+([A-Za-z0-9_./+@-]+\.[cm]?[jt]sx?)\s+>/u;
+const bazelFailure = /^(\/\/[A-Za-z0-9_./+@=-]*(?::[A-Za-z0-9_./+@=-]+)?)\s+FAILED\b/u;
+const testError = /^(AssertionError|TypeError|ReferenceError|RangeError|SyntaxError|Error)\b/u;
 
 /**
- * Select only failing test names, their first error line and failing Bazel targets from a CI job log. The raw log is
- * never retained.
+ * Select failing test paths, recognized error classes and failing Bazel labels. Test titles and assertion operands
+ * can include customer data, so never copy those fields from a job log.
  */
 export function nativeWatchFailureLines(log: string): string[] {
   const lines: string[] = [];
   const seen = new Set<string>();
-  let candidates = 0;
   let errorWindow = 0;
-  // Dedupe on the cut raw line and cap the candidates, so a hostile log cannot force many redaction passes.
   const add = (line: string) => {
-    if (seen.has(line) || lines.length >= summaryLogLines || candidates >= summaryLogCandidateLimit) return;
+    if (seen.has(line) || lines.length >= summaryLogLines) return;
     seen.add(line);
-    candidates++;
     const value = summaryText(line, summaryLineLimit);
     if (value && !EffectArray.contains(lines, value)) lines.push(value);
   };
-  for (const raw of EffectString.split(log, /\r?\n/u)) {
-    if (lines.length >= summaryLogLines || candidates >= summaryLogCandidateLimit) break;
-    // A crafted long line is cut before any regular expression or redaction pass reads it.
-    const line = EffectString.trim(
-      stripTerminal(EffectString.replace(logTimestamp, '')(EffectString.slice(0, summaryInputLimit)(raw))),
-    );
+  let offset = 0;
+  while (offset < log.length && lines.length < summaryLogLines && seen.size < summaryLogCandidateLimit) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Effect String cannot search from an offset.
+    const newline = log.indexOf('\n', offset);
+    const end = newline === -1 ? log.length : newline;
+    const prefix = EffectString.slice(offset, Math.min(end, offset + summaryInputLimit))(log);
+    offset = end + 1;
+    const line = EffectString.trim(stripTerminal(EffectString.replace(logTimestamp, '')(prefix)));
     if (!line) continue;
-    if (/^FAIL\s+\S.*\s>\s\S/u.test(line)) {
-      add(line);
+    const test = testFailure.exec(line);
+    if (test) {
+      add(`FAIL ${test[1]}`);
       errorWindow = 8;
-    } else if (/^\/\/\S+\s+FAILED\b/u.test(line)) add(line);
-    else if (errorWindow > 0) {
+      continue;
+    }
+    const target = bazelFailure.exec(line);
+    if (target) add(`${target[1]} FAILED`);
+    if (errorWindow > 0) {
       errorWindow--;
-      if (/^(?:[A-Za-z]*Error\b|expected\b)/u.test(line)) {
-        add(line);
+      const error = testError.exec(line)?.[1];
+      if (error || /^expected\b/u.test(line)) {
+        add(error ?? 'Assertion failed');
         errorWindow = 0;
       }
     }
   }
   return lines;
 }
-const actionsJobId = (item: NativeWatchEntity) => {
+const isActionsJob = (item: NativeWatchEntity) => {
   const match = item.url
     ? /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+\/job\/(\d+)$/u.exec(item.url)
     : null;
-  return match?.[1] === item.id ? match[1] : undefined;
+  return match?.[1] === item.id;
 };
 
 /** This adapter never accepts a hostname, executable, API URL or credential from PR content. */
@@ -386,6 +408,8 @@ export const verifyNativeWatchBoundPr = Effect.fn('nativeWatch.verifyBoundPr')(f
 });
 
 /** Parse only the selected response headers; raw headers/bodies never enter watch state. */
+const httpStatusLine = /^HTTP\/[\d.]+\s+(\d{3})(?:\s|$)/u;
+
 export function nativeWatchHttpResponse(stdout: string) {
   const boundary = /\r?\n\r?\n/u.exec(stdout);
   if (!boundary) throw fail('provider-http');
@@ -394,7 +418,7 @@ export function nativeWatchHttpResponse(stdout: string) {
     const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.split(/\r?\n/u));
     return __effectPipeStage1;
   });
-  const status = /^HTTP\/[\d.]+\s+(\d{3})(?:\s|$)/u.exec(lines.shift() ?? '');
+  const status = httpStatusLine.exec(lines.shift() ?? '');
   if (!status) throw fail('provider-http');
   const headers = new Map<string, string>();
   for (const line of lines) {
@@ -415,6 +439,30 @@ export function nativeWatchHttpResponse(stdout: string) {
     body: Effect2.pipe(stdout, EffectString.slice(boundary.index + boundary[0].length)),
   };
 }
+
+/** Sensitive command failures discard stdout. Keep only rate-limit metadata from the first HTTP header block. */
+const observeJobLogRateLimits = () => {
+  const headers = new Map<string, string>();
+  let status: number | undefined;
+  let remaining = 64;
+  const onStdoutLine = (line: string) => {
+    if (remaining === 0) return;
+    remaining--;
+    if (status === undefined) {
+      const code = Number(httpStatusLine.exec(line)?.[1]);
+      if (code === 403 || code === 429) status = code;
+      else remaining = 0;
+      return;
+    }
+    if (line === '' || line === '\r') {
+      remaining = 0;
+      return;
+    }
+    const header = /^(retry-after|x-ratelimit-(?:remaining|reset)):[ \t]*([^\r\n]{1,128})\r?$/iu.exec(line);
+    if (header) headers.set(EffectString.toLowerCase(header[1]), EffectString.trim(header[2]));
+  };
+  return {onStdoutLine, response: () => (status === undefined ? undefined : {status, headers})};
+};
 const restProjection = (source: Source, input: unknown, head: string): Projection => {
   const values =
     source === 'checks'
@@ -523,12 +571,38 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
       graphqlCost: 0,
       providerMilliseconds: 0,
     };
-    const pages = new Map(EffectArray.map(previous.pages, page => [page.key, page]));
+    const reusablePages = EffectArray.filter(previous.pages, page => !needsCheckSummaryRefresh(page));
+    const pages = new Map(EffectArray.map(reusablePages, page => [page.key, page]));
     const used = new Set<string>();
     const blockers: {source: string; code: string; retryable: boolean}[] = [];
     let retryAt = started + 60_000;
     let blockedUntil = 0;
     let authenticationFailed = false;
+    const recordResponseLimits = (response: Pick<ReturnType<typeof nativeWatchHttpResponse>, 'status' | 'headers'>) => {
+      const at = now();
+      const seconds = (name: string) => {
+        const value = response.headers.get(name);
+        return value !== undefined && /^\d+$/u.test(value) ? Number(value) : undefined;
+      };
+      const poll = seconds('x-poll-interval');
+      if (poll !== undefined) retryAt = Math.max(retryAt, at + poll * 1000);
+      const retry = response.headers.get('retry-after');
+      if (retry !== undefined) {
+        const until = /^\d+$/u.test(retry) ? at + Number(retry) * 1000 : Date.parse(retry);
+        if (checkedIsFiniteNumber(until)) retryAt = Math.max(retryAt, until);
+      }
+      const exhausted = seconds('x-ratelimit-remaining') === 0;
+      if (exhausted) {
+        blockedUntil = Math.max(at + 1000, (seconds('x-ratelimit-reset') ?? at / 1000 + 60) * 1000);
+        retryAt = Math.max(retryAt, blockedUntil);
+      }
+      const rateLimited = response.status === 429 || (response.status === 403 && (retry !== undefined || exhausted));
+      if (rateLimited) {
+        blockedUntil = Math.max(retryAt, at + 60_000);
+        retryAt = blockedUntil;
+      }
+      return rateLimited;
+    };
     const request = Effect.fn('workflowWatch.request')(function* (
       endpoint: string,
       data?: unknown,
@@ -565,22 +639,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
         try: () => nativeWatchHttpResponse(result.stdout),
         catch: () => fail('provider-http', true),
       });
-      const at = now();
-      const seconds = (name: string) => {
-        const value = response.headers.get(name);
-        return value !== undefined && /^\d+$/u.test(value) ? Number(value) : undefined;
-      };
-      const poll = seconds('x-poll-interval');
-      if (poll !== undefined) retryAt = Math.max(retryAt, at + poll * 1000);
-      const retry = response.headers.get('retry-after');
-      if (retry !== undefined) {
-        const until = /^\d+$/u.test(retry) ? at + Number(retry) * 1000 : Date.parse(retry);
-        if (checkedIsFiniteNumber(until)) retryAt = Math.max(retryAt, until);
-      }
-      if (seconds('x-ratelimit-remaining') === 0) {
-        blockedUntil = Math.max(at + 1000, (seconds('x-ratelimit-reset') ?? at / 1000 + 60) * 1000);
-        retryAt = Math.max(retryAt, blockedUntil);
-      }
+      const rateLimited = recordResponseLimits(response);
       if (response.status === 304 && cached) {
         metrics.notModified++;
         return {response, value: undefined, cached: cached.projection};
@@ -589,13 +648,8 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
         authenticationFailed = true;
         return yield* fail('provider-authentication');
       }
-      if (response.status === 403 || response.status === 429) {
-        if (retry !== undefined || seconds('x-ratelimit-remaining') === 0 || response.status === 429) {
-          blockedUntil = Math.max(retryAt, at + 60_000);
-          return yield* fail('provider-rate-limit', true);
-        }
-        return yield* fail('provider-permission');
-      }
+      if (rateLimited) return yield* fail('provider-rate-limit', true);
+      if (response.status === 403) return yield* fail('provider-permission');
       if (response.status >= 500) return yield* fail('provider-server', true);
       if (response.status !== 200) return yield* fail('provider-http-' + response.status);
       const value = yield* Effect.try({
@@ -696,92 +750,92 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
         catch: error => (Schema.is(WorkflowAutomationError)(error) ? error : fail('provider-shape')),
       });
     const before = yield* verifiedPull((yield* rest('pull', pullEndpoint, projectPull)).pull!);
-    // A completed check run is immutable, so a prior summary for the same id and version is reused as is.
-    const priorSummaries = new Map(
-      EffectArray.flatMap(previous.pages, page =>
-        EffectArray.flatMap(page.projection.items, item =>
-          item.summary ? [[`${item.id}\u0000${item.version}`, item.summary] as const] : [],
-        ),
-      ),
-    );
-    const jobFailureLines = (jobId: string) =>
+    let jobLogs = previous.jobLogs?.head === before.head ? previous.jobLogs.entries : [];
+    const jobFailureLines = (jobId: string, timeoutMs: number) =>
       Effect.gen(function* () {
         metrics.requests++;
+        const observed = observeJobLogRateLimits();
         const result = yield* runCommandEffect(
           'gh',
-          ['api', '--hostname', 'github.com', '--method', 'GET', `${base}/actions/jobs/${jobId}/logs`],
-          {allowFailure: true, timeoutMs: 15_000, maxOutputBytes: 8 * 1024 * 1024, sensitiveOutput: true},
-        ).pipe(Effect.result);
-        if (result._tag === 'Failure' || result.success.exitCode !== 0) return undefined;
-        metrics.responseBytes += Buffer.byteLength(result.success.stdout);
-        return nativeWatchFailureLines(result.success.stdout);
+          ['api', '--hostname', 'github.com', '--include', '--method', 'GET', `${base}/actions/jobs/${jobId}/logs`],
+          {
+            allowFailure: true,
+            timeoutMs,
+            maxOutputBytes: 8 * 1024 * 1024,
+            sensitiveOutput: true,
+            onStdoutLine: observed.onStdoutLine,
+          },
+        ).pipe(Effect.timeout(timeoutMs), Effect.result);
+        if (result._tag === 'Failure' || result.success.exitCode !== 0) {
+          const response = observed.response();
+          if (response) recordResponseLimits(response);
+          return undefined;
+        }
+        const {stdout} = result.success;
+        metrics.responseBytes += Buffer.byteLength(stdout);
+        const response = yield* Effect.option(Effect.try(() => nativeWatchHttpResponse(stdout)));
+        if (Effect2.Option.isNone(response)) return undefined;
+        recordResponseLimits(response.value);
+        if (response.value.status !== 200) return undefined;
+        return nativeWatchFailureLines(response.value.body);
       });
-    /**
-     * Best effort: an unreadable log keeps the base summary for a retry in a later sweep and never fails the checks
-     * source. An event carries the summary of its emitting sweep only; a later summary never re-emits it.
-     */
+    /** Unreadable logs never fail the checks source. Keep a separate record of attempts that actually ran. */
     const enrichFailedChecks = (items: readonly NativeWatchEntity[]) =>
       Effect.gen(function* () {
-        const summaries = new Map<string, string>();
+        const priorReads = new Map(EffectArray.map(jobLogs, read => [read.id, read]));
+        const reads = new Map<string, JobLogRead>();
         const pendingReads: {
-          readonly id: string;
-          readonly base: string;
-          readonly jobId: string;
+          readonly item: NativeWatchEntity;
           readonly retry: boolean;
         }[] = [];
         for (const item of items) {
-          const prior = priorSummaries.get(`${item.id}\u0000${item.version}`);
-          const jobId = item.kind === 'ci_error' ? actionsJobId(item) : undefined;
-          // Only a finished read adds the ` | ` separator; the base summary never contains it.
-          if (prior !== undefined && EffectString.includes(summaryDetailSeparator)(prior))
-            summaries.set(item.id, summaryText(prior, summaryLimit));
-          else if (jobId && item.summary) {
-            const retry = prior !== undefined && EffectString.endsWith(summaryLogRetrySentinel)(prior);
-            // An unread retry keeps its sentinel, so a skipped sweep never grants another attempt.
-            if (retry) summaries.set(item.id, prior);
-            pendingReads.push({id: item.id, base: withoutRetrySentinel(item.summary), jobId, retry});
-          }
+          if (item.kind !== 'ci_error' || !isActionsJob(item) || !item.summary) continue;
+          const prior = priorReads.get(item.id);
+          const retained = prior?.version === item.version ? prior : undefined;
+          if (retained) reads.set(item.id, retained);
+          if (retained?.detail === undefined) pendingReads.push({item, retry: retained !== undefined});
         }
-        // First-seen failures emit their event in this sweep, so they read their logs first.
+        // Read unread logs before spending the budget on retries.
         const ordered = [
           ...EffectArray.filter(pendingReads, read => !read.retry),
           ...EffectArray.filter(pendingReads, read => read.retry),
         ];
         let consecutiveFailures = 0;
-        for (const {id, base, jobId, retry} of EffectArray.take(ordered, summaryLogChecks)) {
+        const deadline = Math.min(now() + summaryLogBudgetMs, started + summaryLogLatestMs);
+        for (const {item, retry} of EffectArray.take(ordered, summaryLogChecks)) {
+          const at = now();
+          const remaining = deadline - at;
           if (
             authenticationFailed ||
-            now() < blockedUntil ||
-            now() - started > 20_000 ||
+            at < blockedUntil ||
+            remaining <= 0 ||
             consecutiveFailures >= summaryLogFailureLimit
           )
             break;
-          const lines = yield* jobFailureLines(jobId);
+          const lines = yield* jobFailureLines(item.id, remaining);
           consecutiveFailures = lines === undefined ? consecutiveFailures + 1 : 0;
-          // Only a read that was tried counts: the first failure marks one retry, and a second failure is final.
-          summaries.set(
-            id,
-            lines === undefined && !retry
-              ? summaryText(base, summaryLimit - summaryLogRetrySentinel.length) + summaryLogRetrySentinel
-              : summaryText(
-                  EffectArray.join(
-                    [
-                      base,
-                      ...(lines === undefined
-                        ? [summaryLogUnavailable]
-                        : lines.length
-                          ? lines
-                          : ['no failing test lines in job log']),
-                    ],
-                    summaryDetailSeparator,
-                  ),
-                  summaryLimit,
-                ),
-          );
+          reads.set(item.id, {
+            id: item.id,
+            version: item.version,
+            ...(lines === undefined && !retry
+              ? {}
+              : {
+                  detail: lines?.length
+                    ? EffectString.slice(0, summaryLimit)(EffectArray.join(lines, summaryDetailSeparator))
+                    : null,
+                }),
+          });
         }
+        jobLogs = [...reads.values()];
         return EffectArray.map(items, item => {
-          const summary = summaries.get(item.id);
-          return summary === undefined ? item : {...item, summary};
+          const detail = reads.get(item.id)?.detail;
+          return detail && item.summary
+            ? {
+                ...item,
+                summary: EffectString.slice(0, summaryLimit)(item.summary + summaryDetailSeparator + detail),
+                hasJobLogDetails: true as const,
+              }
+            : item;
         });
       });
     const sources: NativeWatchSourceResult[] = [];
@@ -831,13 +885,11 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
         Effect.gen(function* () {
           const items: NativeWatchEntity[] = [];
           const oldKeys = new Set(used);
-          const pageKeys: string[] = [];
           for (let page = 1; page <= 101; page++) {
             if (page === 101) return yield* fail('provider-pagination-limit');
             const query =
               endpoint + (Effect2.pipe(endpoint, EffectString.includes('?')) ? '&' : '?') + `per_page=100&page=${page}`;
             const key = source + ':' + (source === 'checks' || source === 'statuses' ? before.head + ':' : '') + page;
-            pageKeys.push(key);
             const projection = yield* rest(key, query, input => restProjection(source, input, before.head));
             items.push(...projection.items);
             if (source === 'checks' || source === 'statuses') {
@@ -852,22 +904,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
             for (const key of used) if (!oldKeys.has(key)) used.delete(key);
             return yield* fail('provider-pagination-race', true);
           }
-          if (source !== 'checks') return items;
-          const enriched = yield* enrichFailedChecks(items);
-          const byId = new Map(EffectArray.map(enriched, item => [item.id, item]));
-          // Cache the enriched items so a not-modified sweep keeps their summaries without a log request.
-          for (const key of pageKeys) {
-            const page = pages.get(key);
-            if (page)
-              pages.set(key, {
-                ...page,
-                projection: {
-                  ...page.projection,
-                  items: EffectArray.map(page.projection.items, item => byId.get(item.id) ?? item),
-                },
-              });
-          }
-          return enriched;
+          return items;
         }),
       );
     }
@@ -964,6 +1001,13 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
                 }
               : source,
           );
+    // Complete the canonical reads and verify the head before optional log work.
+    const checks = EffectArray.findFirstIndex(verifiedSources, source => source.source === 'checks');
+    if (before.head === after.head && Effect2.Option.isSome(checks)) {
+      const index = checks.value;
+      const source = verifiedSources[index];
+      if (source.complete) verifiedSources[index] = {...source, items: yield* enrichFailedChecks(source.items)};
+    }
     const at = now();
     metrics.providerMilliseconds = at - started;
     const complete =
@@ -991,7 +1035,10 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
           ),
         },
       },
-      cache: {pages: EffectArray.filter([...pages.values()], page => used.has(page.key)).slice(-402)},
+      cache: {
+        pages: EffectArray.filter([...pages.values()], page => used.has(page.key)).slice(-402),
+        ...(jobLogs.length ? {jobLogs: {head: before.head, entries: jobLogs}} : {}),
+      },
       metrics,
       retryAt,
       blockers,

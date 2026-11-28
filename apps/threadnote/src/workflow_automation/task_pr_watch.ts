@@ -1,6 +1,8 @@
 import type {WorkflowAutomationError, WorkflowNextCommand} from '@threadnote/workflow-automations/contracts';
 import {
   nativeNext,
+  nativeNextCommand,
+  nativeNextPlaceholder,
   nativeWatchIdentityOf,
   nativeWatchNext,
   withNativeNext,
@@ -84,7 +86,7 @@ export function validateNativeTaskWatchMaintenanceRoute(
 export const sourceChangedCodes = new Set(['source-drift', 'review-stale']);
 
 /** Refusal codes whose recovery operation is fixed; anything unlisted inspects the watch. */
-const watchRecoveryOperations: Readonly<Record<string, 'work' | 'relay' | 'view' | 'deliver' | 'card'>> = {
+const watchRecoveryOperations: Readonly<Record<string, 'work' | 'relay' | 'view' | 'deliver'>> = {
   'stale-watch-work-view': 'work',
   'stale-watch-work-ref': 'work',
   'invalid-watch-page': 'work',
@@ -95,13 +97,19 @@ const watchRecoveryOperations: Readonly<Record<string, 'work' | 'relay' | 'view'
   'invalid-validation-ref': 'view',
   'stale-validation-ref': 'view',
   'user-authority-required': 'deliver',
-  'provisional-watch-not-eligible': 'card',
+  'provisional-watch-not-eligible': 'view',
+  'watch-proof-conflict': 'view',
+  'invalid-request': 'view',
+  'invalid-supplemental-ref': 'view',
+  'stale-supplemental-ref': 'view',
+  'watch-identity-conflict': 'view',
+  'snapshot-ambiguous': 'view',
 };
 const routeProofKeys = ['snapshotRef', 'candidateWatchRef', 'pr', 'supplementalRef'] as const;
 
 /**
- * The operation that recovers a watch refusal, or undefined to keep the task card's next command. A watch refusal
- * never points at task finish, and a candidate or supplemental route stays on its own proof and never renews.
+ * Use the watch operation that can recover the refusal. Invalid proof returns to the task view.
+ * A candidate or supplemental route stays on its own proof and never renews.
  */
 export const nativeWatchRecoveryNext = (
   input: Readonly<Record<string, unknown>>,
@@ -123,10 +131,13 @@ export const nativeWatchRecoveryNext = (
           ? 'inspect'
           : 'renew'
         : (watchRecoveryOperations[error.code] ?? 'inspect');
-  if (mapped === 'card') return undefined;
+  if (error.code === 'invalid-candidate-watch-ref' && scope) {
+    const fields = {...scope, candidateWatchRef: nativeNextPlaceholder('candidateWatchRef'), operation: 'inspect'};
+    return nativeNextCommand('workflow_task_watch_pr', 'inspect', {command: 'watch-pr', flags: fields}, fields);
+  }
   if (mapped === 'deliver') return scope ? nativeNext.deliver(scope, 'pr') : undefined;
   // A plain view reloads the current references; a phase view is the historical-watch mode and refuses after a push.
-  if (mapped === 'view') return scope ? nativeNext.view(scope) : nativeWatchNext(identity, 'inspect');
+  if (mapped === 'view') return scope ? nativeNext.view(scope) : undefined;
   return nativeWatchNext(identity, mapped);
 };
 

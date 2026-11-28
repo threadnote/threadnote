@@ -1,7 +1,8 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Predicate} from 'effect';
+import {Deferred, Effect, Fiber, Predicate} from 'effect';
+import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {
   CommandExecutor,
@@ -9,7 +10,15 @@ import {
   type CommandOptions,
   type CommandResult,
 } from '@threadnote/platform/command';
-import {initializeNativeWatch, reconcileNativeWatch} from '@threadnote/workflow-automations/watch';
+import {
+  acknowledgeNativeWatch,
+  attachNativeWatchConsumer,
+  initializeNativeWatch,
+  nativeWatchEventLimit,
+  reconcileNativeWatch,
+  recordNativeWatchDispositions,
+  relayNativeWatch,
+} from '@threadnote/workflow-automations/watch';
 import {
   collectNativeWatchGitHub,
   verifyNativeWatchBoundPr,
@@ -35,6 +44,7 @@ interface Reply {
   readonly status?: number;
   readonly headers?: Readonly<Record<string, string>>;
   readonly body: unknown | string;
+  readonly delayUntil?: Effect.Effect<void>;
 }
 type ReplyFor = (args: readonly string[], input: unknown, call: number, now: number) => Reply;
 
@@ -144,14 +154,22 @@ const harness = (replyFor: ReplyFor = defaultReply) => {
       const reply = replyFor(args, input, calls.length, at);
       calls.push({args: [...args], input, at});
       now += 20;
-      // Job log downloads follow a redirect and print the raw body without --include.
+      // Identity reads omit HTTP headers. Source and job log reads include them.
       const raw = !EffectArray.contains(args, '--include');
+      const stdout = raw ? (typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body)) : frame(reply);
+      const exitCode = (reply.status ?? 200) >= 400 ? 1 : 0;
       const result: CommandResult = {
-        exitCode: raw && (reply.status ?? 200) >= 400 ? 1 : 0,
+        exitCode,
         stderr: '',
-        stdout: raw ? (typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body)) : frame(reply),
+        stdout: options?.sensitiveOutput && exitCode !== 0 ? '' : stdout,
       };
-      return Effect.succeed(result);
+      return Effect.gen(function* () {
+        if (reply.delayUntil) yield* reply.delayUntil;
+        if (options?.onStdoutLine) {
+          for (const line of EffectString.split('\n')(stdout).slice(0, -1)) options.onStdoutLine(line);
+        }
+        return result;
+      });
     },
     executeStreaming: () => Effect.die(new Error('Streaming is outside the provider test contract')),
   });
@@ -536,6 +554,7 @@ describe('native GitHub watch provider', () => {
         const replay = yield* second.sweep(original.cache);
         expect(replay.sweep).toEqual(original.sweep);
         expect(replay.cache).toEqual(original.cache);
+        expect(replay.cache).not.toHaveProperty('jobLogs');
         expect(replay.metrics.notModified).toBe(7);
         expect(replay.metrics.graphqlCost).toBe(1);
         expect(replay.metrics.requests).toBe(second.calls.length);
@@ -767,15 +786,16 @@ describe('native GitHub watch provider', () => {
     () =>
       Effect.gen(function* () {
         const jobUrl = 'https://github.com/example/project/actions/runs/9/job/41';
+        const customerValue = 'customer-order-348715';
         const log = EffectArray.join(
           [
             '2026-11-27T16:22:32.1673244Z ##[group]Run tests',
             `2026-11-27T16:22:32.1700000Z ${secretBody}`,
             '2026-11-27T16:22:32.1892227Z \u001b[31m FAIL \u001b[39m apps/a.test.ts > suite > keeps limits',
             '2026-11-27T16:22:32.1892300Z ⎯⎯⎯',
-            '2026-11-27T16:22:32.1893387Z AssertionError: expected 67409 to be less than or equal to 67100',
+            `2026-11-27T16:22:32.1893387Z AssertionError: expected ${customerValue} to equal a private value`,
             '2026-11-27T16:26:39.8144690Z \u001b]8;;https://example.invalid/target\u0007//apps/threadnote:test_heavy\u001b]8;;\u0007                    FAILED in 445.5s',
-            '2026-11-27T16:26:40.0000000Z FAIL  apps/b.test.ts > token \u202eghp_ABCDEFGHIJKLMNOPQRSTUVWX\u200b leaks',
+            `2026-11-27T16:26:40.0000000Z FAIL  apps/b.test.ts > handles ${customerValue} and \u202eghp_ABCDEFGHIJKLMNOPQRSTUVWX\u200b`,
           ],
           '\n',
         );
@@ -808,7 +828,7 @@ describe('native GitHub watch provider', () => {
         const first = yield* provider.sweep();
         const summary = summaryOf(first);
         expect(summary).toBe(
-          'Bazel shard · 3/8: failure | FAIL apps/a.test.ts > suite > keeps limits | AssertionError: expected 67409 to be less than or equal to 67100 | //apps/threadnote:test_heavy FAILED in 445.5s | FAIL apps/b.test.ts > token <secret> leaks',
+          'Bazel shard · 3/8: failure | FAIL apps/a.test.ts | AssertionError | //apps/threadnote:test_heavy FAILED | FAIL apps/b.test.ts',
         );
         expect(summary).not.toContain(secretBody);
         expect(summary).not.toContain('ghp_');
@@ -824,10 +844,61 @@ describe('native GitHub watch provider', () => {
         expect(summaryOf(refreshed)).toBe(summary);
         expect(logReads).toBe(1);
         expect(JSON.stringify(refreshed.cache)).not.toContain(secretBody);
+        expect(JSON.stringify(refreshed.cache)).not.toContain(customerValue);
+        expect(JSON.stringify(state.events)).not.toContain(customerValue);
       }),
   );
 
-  const singleFailedCheck = (logReply: (read: number) => Reply) => {
+  effectIt.effect('refreshes a pre-summary failed check page while reusing a healthy conditional page', () =>
+    Effect.gen(function* () {
+      const failed = {
+        ...check(42, 'failure'),
+        name: 'unit',
+        html_url: 'https://github.com/example/project/actions/runs/9/job/42',
+      };
+      let attempts = 0;
+      const conditionalPages: number[] = [];
+      const provider = harness((args, input, call, now) => {
+        const endpoint = apiEndpoint(args);
+        if (EffectString.endsWith('/logs')(endpoint))
+          return ++attempts === 1 ? {status: 500, body: ''} : {body: 'FAIL apps/c.test.ts > retries'};
+        if (!EffectString.includes('/check-runs')(endpoint)) return defaultReply(args, input, call, now);
+        const page = pageNumber(endpoint);
+        const etag = `"checks-${page}"`;
+        if (EffectArray.contains(args, `If-None-Match: ${etag}`)) {
+          conditionalPages.push(page);
+          return {status: 304, headers: {etag}, body: ''};
+        }
+        const checkRuns = page === 1 ? [failed, ...EffectArray.makeBy(99, index => check(100 + index))] : [check(200)];
+        return {headers: {etag}, body: {check_runs: checkRuns}};
+      });
+      const initial = yield* provider.sweep();
+      expect(initial.cache.jobLogs?.entries).toHaveLength(1);
+      const legacy = {
+        ...initial.cache,
+        pages: EffectArray.map(initial.cache.pages, page =>
+          page.etag === '"checks-1"'
+            ? {
+                ...page,
+                projection: {
+                  ...page.projection,
+                  items: EffectArray.map(page.projection.items, ({summary: _old, ...item}) => item),
+                },
+              }
+            : page,
+        ),
+      };
+      const recovered = yield* provider.sweep(legacy);
+      const state = reconcileNativeWatch(initializeNativeWatch('watch-1', pr, 0), recovered.sweep);
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(state.events, event => event.kind === 'ci_error')),
+      ).toMatchObject({summary: 'unit: failure | FAIL apps/c.test.ts'});
+      expect(conditionalPages).toEqual([2]);
+      expect(attempts).toBe(2);
+    }),
+  );
+
+  const singleFailedCheck = (logReply: (read: number) => Reply, name = 'unit') => {
     let logReads = 0;
     const provider = harness((args, input, call, now) => {
       const endpoint = apiEndpoint(args);
@@ -838,7 +909,7 @@ describe('native GitHub watch provider', () => {
             check_runs: [
               {
                 ...check(42, 'failure'),
-                name: 'unit',
+                name,
                 html_url: 'https://github.com/example/project/actions/runs/9/job/42',
               },
             ],
@@ -861,32 +932,133 @@ describe('native GitHub watch provider', () => {
         read === 1 ? {status: 500, body: 'unavailable'} : {body: 'FAIL  apps/c.test.ts > retries'},
       );
       const first = yield* recovering.provider.sweep();
-      expect(recovering.summaryOf(first)).toBe('unit: failure (job log read failed; retrying)');
+      expect(recovering.summaryOf(first)).toBe('unit: failure');
+      const consumer = {id: 'consumer', wakeupId: 'wakeup'};
+      const initial = reconcileNativeWatch(initializeNativeWatch('watch-1', pr, 0), first.sweep);
+      const delivered = relayNativeWatch(
+        attachNativeWatchConsumer(initial, consumer, first.sweep.at),
+        consumer.id,
+        first.sweep.at,
+      );
       const second = yield* recovering.provider.sweep(first.cache);
-      expect(recovering.summaryOf(second)).toBe('unit: failure | FAIL apps/c.test.ts > retries');
+      expect(recovering.summaryOf(second)).toBe('unit: failure | FAIL apps/c.test.ts');
+      const updated = reconcileNativeWatch(delivered.state, second.sweep);
+      expect(relayNativeWatch(updated, consumer.id, second.sweep.at).delivery).toEqual(delivered.delivery);
+      const original = delivered.delivery!;
+      const dispositions = EffectArray.map(original.events, event => ({
+        eventId: event.id,
+        status: 'ignored',
+        reason: 'Test delivery recorded',
+        evidence: 'Initial notice',
+      }));
+      const recorded = recordNativeWatchDispositions(updated, consumer.id, original.id, dispositions, second.sweep.at);
+      const acknowledged = acknowledgeNativeWatch(recorded, consumer.id, original.id, second.sweep.at);
+      expect(relayNativeWatch(acknowledged, consumer.id, second.sweep.at).delivery?.events).toMatchObject([
+        {kind: 'ci_error', summary: 'unit: failure | FAIL apps/c.test.ts'},
+      ]);
+      const third = yield* recovering.provider.sweep(second.cache);
+      expect(reconcileNativeWatch(updated, third.sweep).nextSequence).toBe(updated.nextSequence);
       expect(recovering.logReads()).toBe(2);
 
       const unavailable = singleFailedCheck(() => ({status: 500, body: 'unavailable'}));
       const failedOnce = yield* unavailable.provider.sweep();
       const failedTwice = yield* unavailable.provider.sweep(failedOnce.cache);
-      expect(unavailable.summaryOf(failedTwice)).toBe('unit: failure | job log unavailable');
+      expect(unavailable.summaryOf(failedTwice)).toBe('unit: failure');
       const settled = yield* unavailable.provider.sweep(failedTwice.cache);
-      expect(unavailable.summaryOf(settled)).toBe('unit: failure | job log unavailable');
+      expect(unavailable.summaryOf(settled)).toBe('unit: failure');
       expect(unavailable.logReads()).toBe(2);
     }),
   );
 
   effectIt.effect('bounds a crafted long log line before redaction', () =>
     Effect.gen(function* () {
-      const crafted = singleFailedCheck(() => ({
-        body: 'FAIL a > b ' + EffectString.repeat(80_000)('redis://a:'),
-      }));
+      const crafted = singleFailedCheck(
+        () => ({body: 'FAIL apps/a.test.ts > ' + EffectString.repeat(80_000)('redis://a:')}),
+        EffectString.repeat(4096)('x'),
+      );
       // Wall time, not the test clock: unbounded redaction of this line took about 17 seconds.
       const started = performance.now();
-      const summary = crafted.summaryOf(yield* crafted.provider.sweep());
+      const first = yield* crafted.provider.sweep();
+      const summary = crafted.summaryOf(first);
       expect(performance.now() - started).toBeLessThan(5000);
-      expect(summary).toMatch(/^unit: failure \| FAIL a > b /u);
+      expect(summary).toMatch(/: failure \| FAIL apps\/a\.test\.ts$/u);
       expect(summary?.length).toBeLessThanOrEqual(1024);
+      expect(crafted.summaryOf(yield* crafted.provider.sweep(first.cache))).toBe(summary);
+      expect(crafted.logReads()).toBe(1);
+    }),
+  );
+
+  effectIt.effect('reserves the final event slot for required events instead of late job-log details', () =>
+    Effect.gen(function* () {
+      const recovering = singleFailedCheck(read =>
+        read === 1 ? {status: 500, body: 'unavailable'} : {body: 'FAIL apps/c.test.ts > retries'},
+      );
+      const first = yield* recovering.provider.sweep();
+      const initial = reconcileNativeWatch(initializeNativeWatch('watch-1', pr, 0), first.sweep);
+      const events = [
+        ...initial.events,
+        ...EffectArray.makeBy(nativeWatchEventLimit - initial.events.length - 1, index => {
+          const sequence = initial.nextSequence + index;
+          return {...initial.events[0], sequence, id: `${initial.watchId}:${sequence}`};
+        }),
+      ];
+      const nearCapacity = {...initial, events, nextSequence: nativeWatchEventLimit};
+      const second = yield* recovering.provider.sweep(first.cache);
+      expect(recovering.summaryOf(second)).toBe('unit: failure | FAIL apps/c.test.ts');
+      expect(reconcileNativeWatch(nearCapacity, second.sweep).events).toHaveLength(nativeWatchEventLimit - 1);
+      const merged = reconcileNativeWatch(nearCapacity, {...second.sweep, state: 'merged'});
+      expect(merged.events).toHaveLength(nativeWatchEventLimit);
+      expect(merged.events.at(-1)?.kind).toBe('merged');
+    }),
+  );
+
+  effectIt.effect('returns complete source evidence when optional log enrichment times out', () =>
+    Effect.gen(function* () {
+      const logStarted = yield* Deferred.make<void>();
+      const delayed = singleFailedCheck(read =>
+        read === 1
+          ? {body: '', delayUntil: Effect.andThen(Deferred.succeed(logStarted, undefined), Effect.never)}
+          : {body: 'FAIL apps/c.test.ts > retries'},
+      );
+      const pending = yield* delayed.provider.sweep().pipe(Effect.forkChild);
+      yield* Deferred.await(logStarted);
+      expect(
+        EffectArray.filter(delayed.provider.calls, call => EffectString.endsWith('/pulls/7')(apiEndpoint(call.args))),
+      ).toHaveLength(2);
+      yield* TestClock.adjust(5000);
+      const first = yield* Fiber.join(pending);
+      expect(first.sweep.ci.complete).toBe(true);
+      expect(delayed.summaryOf(first)).toBe('unit: failure');
+      expect(delayed.summaryOf(yield* delayed.provider.sweep(first.cache))).toBe('unit: failure | FAIL apps/c.test.ts');
+      expect(delayed.logReads()).toBe(2);
+    }),
+  );
+
+  effectIt.effect('keeps the canonical sweep complete and defers other log reads after provider throttling', () =>
+    Effect.gen(function* () {
+      const checks = EffectArray.map([43, 44], id => ({
+        ...check(id, 'failure'),
+        html_url: `https://github.com/example/project/actions/runs/9/job/${id}`,
+      }));
+      const provider = harness((args, input, call, now) => {
+        const endpoint = apiEndpoint(args);
+        if (EffectString.endsWith('/logs')(endpoint))
+          return {status: 429, headers: {'Retry-After': '120'}, body: `Retry-After: 300\n${secretBody}\n`};
+        if (EffectString.includes('/check-runs')(endpoint)) return {body: {check_runs: checks}};
+        return defaultReply(args, input, call, now);
+      });
+      const started = provider.currentTime();
+      const collected = yield* provider.sweep();
+      expect(collected.sweep.ci.complete).toBe(true);
+      expect(collected.retryAt).toBeGreaterThanOrEqual(started + 120_000);
+      expect(collected.retryAt).toBeLessThan(started + 121_000);
+      expect(JSON.stringify(collected)).not.toContain(secretBody);
+      const logRequests = EffectArray.filter(provider.calls, call =>
+        EffectString.endsWith('/logs')(apiEndpoint(call.args)),
+      );
+      expect(EffectArray.map(logRequests, call => apiEndpoint(call.args))).toEqual([
+        'repos/example/project/actions/jobs/43/logs',
+      ]);
     }),
   );
 
@@ -902,9 +1074,11 @@ describe('native GitHub watch provider', () => {
         const endpoint = apiEndpoint(args);
         const job = /\/actions\/jobs\/(\d+)\/logs$/u.exec(endpoint)?.[1];
         if (job) {
-          reads.set(job, (reads.get(job) ?? 0) + 1);
-          // The seventh check, which the cap skips first, never has a readable log.
-          return job === '57' ? {status: 500, body: 'unavailable'} : {body: `FAIL  apps/${job}.test.ts > fails`};
+          const attempt = (reads.get(job) ?? 0) + 1;
+          reads.set(job, attempt);
+          return job === '57' && attempt === 1
+            ? {status: 500, body: 'unavailable'}
+            : {body: `FAIL  apps/${job}.test.ts > fails`};
         }
         if (Effect2.pipe(endpoint, EffectString.includes('/check-runs'))) return {body: {check_runs: failedChecks}};
         return defaultReply(args, input, call, now);
@@ -921,10 +1095,10 @@ describe('native GitHub watch provider', () => {
       expect(reads.get('57')).toBeUndefined();
       expect(summaryOf57(capped)).toBe('unit-57: failure');
       const firstFailure = yield* provider.sweep(capped.cache);
-      expect(summaryOf57(firstFailure)).toBe('unit-57: failure (job log read failed; retrying)');
-      const secondFailure = yield* provider.sweep(firstFailure.cache);
-      expect(summaryOf57(secondFailure)).toBe('unit-57: failure | job log unavailable');
-      yield* provider.sweep(secondFailure.cache);
+      expect(summaryOf57(firstFailure)).toBe('unit-57: failure');
+      const recovered = yield* provider.sweep(firstFailure.cache);
+      expect(summaryOf57(recovered)).toBe('unit-57: failure | FAIL apps/57.test.ts');
+      yield* provider.sweep(recovered.cache);
       expect(reads.get('57')).toBe(2);
       expect(reads.get('51')).toBe(1);
     }),

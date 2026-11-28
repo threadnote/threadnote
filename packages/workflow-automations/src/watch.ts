@@ -77,6 +77,7 @@ const entitySchema = Schema.Struct({
   bootstrap: Schema.Boolean,
   // Informational failure detail; never part of the entity version.
   summary: Schema.optionalKey(boundedText(1024)),
+  hasJobLogDetails: Schema.optionalKey(Schema.Literal(true)),
 });
 const sourceErrorSchema = Schema.Struct({code: boundedText(64), retryable: Schema.Boolean});
 const leaseMillisecondsSchema = integerRange(1, nativeWatchMaximumLeaseMilliseconds);
@@ -395,6 +396,7 @@ export function reconcileNativeWatch(input: NativeWatchState, rawSweep: unknown)
   const sweep = decodeNativeWatchSweep(rawSweep);
   const checkpoints = new Map(EffectArray.map(state.sources, item => [item.source, item]));
   const events: Omit<NativeWatchEvent, 'sequence' | 'id'>[] = [];
+  const optionalLogDetails: typeof events = [];
   let head = state.head;
   let prState = state.prState;
   const base = sweep.base ?? state.base;
@@ -470,18 +472,29 @@ export function reconcileNativeWatch(input: NativeWatchState, rawSweep: unknown)
     uniqueEntities(result.items);
     const oldItems = new Map(EffectArray.map(prior?.items ?? [], item => [item.id, item]));
     const newItems = new Map(EffectArray.map(result.items, item => [item.id, item]));
+    const checkpointItems: NativeWatchEntity[] = [];
     for (const item of result.items) {
       const isNonActionableCiUpdate =
         (result.source === 'checks' || result.source === 'statuses') && item.kind === 'ci_update';
       const old = oldItems.get(item.id);
+      const sameEntity = old?.version === item.version && old.kind === item.kind && old.head === item.head;
       if (old) {
-        if (
-          (old.version !== item.version || old.kind !== item.kind || old.head !== item.head) &&
-          !isNonActionableCiUpdate
-        )
-          events.push(eventForEntity(result.source, item, result.at));
+        const addedJobLogDetails =
+          result.source === 'checks' &&
+          item.kind === 'ci_error' &&
+          !!item.summary &&
+          item.hasJobLogDetails &&
+          !old.hasJobLogDetails;
+        if (!sameEntity && !isNonActionableCiUpdate) events.push(eventForEntity(result.source, item, result.at));
+        if (sameEntity && addedJobLogDetails) optionalLogDetails.push(eventForEntity(result.source, item, result.at));
       } else if ((prior?.lastCompleteAt !== undefined || item.bootstrap) && !isNonActionableCiUpdate)
         events.push(eventForEntity(result.source, item, result.at));
+      // Temporary cache loss must not publish the same details again or erase the previous proof of emission.
+      checkpointItems.push(
+        sameEntity && old.hasJobLogDetails && old.summary && !item.hasJobLogDetails
+          ? {...item, summary: old.summary, hasJobLogDetails: true}
+          : item,
+      );
     }
     for (const item of prior?.items ?? []) {
       // Head changes already invalidate prior CI. Retain their work without
@@ -492,7 +505,7 @@ export function reconcileNativeWatch(input: NativeWatchState, rawSweep: unknown)
         item.head !== sweep.head;
       if (!newItems.has(item.id) && !supersededCi) events.push(eventForEntity(result.source, item, result.at, true));
     }
-    checkpoints.set(result.source, {source: result.source, items: result.items, lastCompleteAt: result.at});
+    checkpoints.set(result.source, {source: result.source, items: checkpointItems, lastCompleteAt: result.at});
   }
   let ci: NativeWatchCiCheckpoint | null = null;
   let ciEmittedVersions = state.ciEmittedVersions;
@@ -529,7 +542,9 @@ export function reconcileNativeWatch(input: NativeWatchState, rawSweep: unknown)
       ciEmittedVersions = [...ciEmittedVersions, emissionKey];
     }
   }
-  const withDiff = appendEvents(state, events);
+  // A late summary is best effort. Required events take priority and optional events leave an invalidation slot.
+  const optionalCapacity = Math.max(0, nativeWatchEventLimit - state.events.length - events.length - 1);
+  const withDiff = appendEvents(state, [...events, ...EffectArray.take(optionalLogDetails, optionalCapacity)]);
   const work = [...withDiff.work];
   for (const event of withDiff.events.slice(state.events.length)) {
     if (event.kind === 'merge_conflict')
@@ -642,7 +657,11 @@ export function relayNativeWatch(
   };
 }
 
-function compactWork(work: readonly NativeWatchWork[], acknowledged: number, watchId: string): NativeWatchWork[] {
+function compactWork(
+  work: readonly NativeWatchWork[],
+  acknowledged: number,
+  {watchId, prState, head}: Pick<NativeWatchState, 'watchId' | 'prState' | 'head'>,
+): NativeWatchWork[] {
   const active = EffectArray.filter(work, item => item.status === 'open' || item.status === 'blocked');
   const prefix = `${watchId}:`;
   const terminal = EffectArray.filter(work, item => item.status === 'resolved' || item.status === 'ignored');
@@ -650,12 +669,27 @@ function compactWork(work: readonly NativeWatchWork[], acknowledged: number, wat
     terminal,
     item => Number(Effect.pipe(item.eventId, EffectString.slice(prefix.length))) > acknowledged,
   );
-  const history = EffectArray.filter(
-    work,
-    item =>
-      (item.status === 'resolved' || item.status === 'ignored') &&
-      Number(Effect.pipe(item.eventId, EffectString.slice(prefix.length))) <= acknowledged,
-  ).slice(-nativeWatchWorkHistoryLimit);
+  const settled = EffectArray.filter(
+    terminal,
+    item => Number(Effect.pipe(item.eventId, EffectString.slice(prefix.length))) <= acknowledged,
+  );
+  const recent = settled.slice(-nativeWatchWorkHistoryLimit);
+  // Keep the exact terminal merge as proof even when this sweep also generated many later events.
+  const merged =
+    prState === 'merged' && settled.length > nativeWatchWorkHistoryLimit
+      ? EffectOption.getOrUndefined(
+          EffectArray.findLast(
+            settled,
+            ({event}) =>
+              event.source === 'watch' &&
+              event.kind === 'merged' &&
+              event.key === watchId &&
+              !event.removed &&
+              event.head === head,
+          ),
+        )
+      : undefined;
+  const history = merged && !EffectArray.contains(recent, merged) ? [merged, ...recent.slice(1)] : recent;
   return [...active, ...unacknowledged, ...history];
 }
 
@@ -730,7 +764,7 @@ export function updateNativeWatchWork(
     EffectArray.filter(next, item => item.status === 'open' || item.status === 'blocked').length > nativeWatchWorkLimit
   )
     fail('Unresolved watch work exceeds its limit.');
-  return decodeNativeWatchState({...state, work: compactWork(next, state.acknowledged, state.watchId)});
+  return decodeNativeWatchState({...state, work: compactWork(next, state.acknowledged, state)});
 }
 
 export function acknowledgeNativeWatch(
@@ -757,7 +791,7 @@ export function acknowledgeNativeWatch(
     events: remaining,
     delivery: null,
     lastAck: deliveryId,
-    work: compactWork(state.work, delivery.last, state.watchId),
+    work: compactWork(state.work, delivery.last, state),
   });
 }
 

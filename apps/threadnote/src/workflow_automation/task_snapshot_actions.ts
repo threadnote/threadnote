@@ -4,6 +4,7 @@ import {decodeNativeTaskActionRef, nativeTaskSnapshotId} from '@threadnote/workf
 import {
   nativeNext,
   nativeNextCommand,
+  nativeNextPlaceholder,
   nativeRefusal,
   nativeWorkflowPolicyOf,
 } from '@threadnote/workflow-automations/gates';
@@ -209,11 +210,19 @@ export const runNativeTaskSnapshotAction = (
                   'supersede-unreviewed',
                   {
                     command: 'task-action supersede-unreviewed-snapshot',
-                    flags: {...scope, snapshotRef: '<snapshotRef>', reason: '<reason>'},
+                    flags: {
+                      ...scope,
+                      snapshotRef: nativeNextPlaceholder('snapshotRef'),
+                      reason: nativeNextPlaceholder('reason'),
+                    },
                   },
                   {
                     ...scope,
-                    snapshot: {command: 'supersede-unreviewed', snapshotRef: '<snapshotRef>', reason: '<reason>'},
+                    snapshot: {
+                      command: 'supersede-unreviewed',
+                      snapshotRef: nativeNextPlaceholder('snapshotRef'),
+                      reason: nativeNextPlaceholder('reason'),
+                    },
                   },
                 )
               : nativeNext.work(scope),
