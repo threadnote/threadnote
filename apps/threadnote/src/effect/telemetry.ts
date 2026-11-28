@@ -24,7 +24,7 @@ import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-const TELEMETRY_SCHEMA_VERSION = 6;
+const TELEMETRY_SCHEMA_VERSION = 7;
 const TELEMETRY_VERSION_MAX_BYTES = 96;
 const FIRST_CHECKPOINT_DELAY = '30 seconds';
 const CHECKPOINT_INTERVAL = '60 seconds';
@@ -349,6 +349,12 @@ export interface AnonymousTelemetryFields {
   readonly phase?: AnonymousTelemetryPhase;
   readonly phaseOutcome?: 'failure' | 'interrupted' | 'success' | 'timed-out' | 'unavailable';
   readonly readingMilliseconds?: number;
+  readonly recallReadCompactionBucket?: AnonymousTelemetryQuantityBucket;
+  readonly recallReadCurrentBucket?: AnonymousTelemetryQuantityBucket;
+  readonly recallReadRefreshableBucket?: AnonymousTelemetryQuantityBucket;
+  readonly recallReadServingOlderBucket?: AnonymousTelemetryQuantityBucket;
+  readonly recallRefreshBuildMillisecondsBucket?: AnonymousTelemetryQuantityBucket;
+  readonly recallRefreshStaleMillisecondsBucket?: AnonymousTelemetryQuantityBucket;
   readonly resolutionClosure?: AnonymousTelemetryGraphResolutionClosure;
   readonly reusedFilesBucket?: AnonymousTelemetryQuantityBucket;
   readonly requestKind?: AnonymousTelemetryGraphRequestKind;
@@ -687,11 +693,18 @@ export function emitObservedAnonymousTelemetryCheckpoint(options: {
 
 /** Records bounded progress on the current operation without network I/O. */
 export function recordAnonymousTelemetryFields(fields: AnonymousTelemetryFields): Effect.Effect<void> {
+  return recordAnonymousTelemetryFieldsFrom(Effect.succeed(fields));
+}
+
+/** Resolve optional observations only inside an active telemetry invocation. */
+export function recordAnonymousTelemetryFieldsFrom<R>(
+  fields: Effect.Effect<AnonymousTelemetryFields, never, R>,
+): Effect.Effect<void, never, R> {
   return Effect.flatMap(CurrentAnonymousTelemetryRecorder, recorder =>
     recorder === undefined || !recorder.active
       ? Effect.void
-      : Effect.sync(() => {
-          recorder.fields = mergeTelemetryFields(recorder.fields, fields);
+      : Effect.map(fields, observed => {
+          if (recorder.active) recorder.fields = mergeTelemetryFields(recorder.fields, observed);
         }),
   );
 }
@@ -832,7 +845,10 @@ function emitSafeSpan(
     'threadnote.runtime.architecture': safeRuntimeLabel(system.architecture),
     'threadnote.runtime.platform': safeRuntimeLabel(system.platform),
     'threadnote.runtime.version': safeVersion(system.runtimeVersion),
-    ...telemetryFieldAttributes(event.fields),
+    ...telemetryFieldAttributes(
+      event.fields,
+      event.event === undefined && (operation === 'recall' || operation === 'recall_context'),
+    ),
     ...(memory === undefined
       ? currentMemoryAttributes(safeMemoryUsage(system))
       : memoryAttributes(memory.start, memory.end)),
@@ -917,7 +933,10 @@ function unsafeCompletionClassification<A, E>(
   };
 }
 
-function telemetryFieldAttributes(fields: AnonymousTelemetryFields | undefined): Record<string, unknown> {
+function telemetryFieldAttributes(
+  fields: AnonymousTelemetryFields | undefined,
+  includeRecallRead: boolean,
+): Record<string, unknown> {
   if (fields === undefined) return {};
   const attributes: Record<string, unknown> = {};
   const autoUpdateResult = fields.autoUpdateResult;
@@ -1077,6 +1096,12 @@ function telemetryFieldAttributes(fields: AnonymousTelemetryFields | undefined):
     const value = recordValue(fields, key);
     if (isQuantityBucket(value)) Reflect.set(attributes, attribute, value);
   }
+  if (includeRecallRead) {
+    for (const [key, attribute] of EffectRecord.toEntries(RECALL_QUANTITY_BUCKET_ATTRIBUTE_KEYS)) {
+      const value = recordValue(fields, key);
+      if (isQuantityBucket(value)) Reflect.set(attributes, attribute, value);
+    }
+  }
   // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
   for (const [key, value] of Object.entries(fields)) {
     if (
@@ -1102,6 +1127,7 @@ type NumericTelemetryField = Exclude<
   | CodeAnchorFinalizationQuantityBucketField
   | ContextBriefQuantityBucketField
   | GraphQuantityBucketField
+  | RecallQuantityBucketField
   | 'autoUpdateRepairRequired'
   | 'autoUpdateResult'
   | 'buildKind'
@@ -1134,6 +1160,14 @@ type NumericTelemetryField = Exclude<
   | 'subphase'
   | 'waitingReason'
 >;
+
+type RecallQuantityBucketField =
+  | 'recallReadCompactionBucket'
+  | 'recallReadCurrentBucket'
+  | 'recallReadRefreshableBucket'
+  | 'recallReadServingOlderBucket'
+  | 'recallRefreshBuildMillisecondsBucket'
+  | 'recallRefreshStaleMillisecondsBucket';
 
 type CodeAnchorFinalizationQuantityBucketField =
   | 'codeAnchorFinalizationConflictBucket'
@@ -1173,6 +1207,15 @@ type ContextBriefQuantityBucketField =
   | 'contextBriefRepositoriesValidatedBucket'
   | 'contextBriefStaleCitationsBucket'
   | 'contextBriefUnknownCitationsBucket';
+
+const RECALL_QUANTITY_BUCKET_ATTRIBUTE_KEYS: Readonly<Record<RecallQuantityBucketField, string>> = {
+  recallReadCompactionBucket: 'threadnote.recall.read_compaction_bucket',
+  recallReadCurrentBucket: 'threadnote.recall.read_current_bucket',
+  recallReadRefreshableBucket: 'threadnote.recall.read_refreshable_bucket',
+  recallReadServingOlderBucket: 'threadnote.recall.read_serving_older_bucket',
+  recallRefreshBuildMillisecondsBucket: 'threadnote.recall.refresh_build_ms_bucket',
+  recallRefreshStaleMillisecondsBucket: 'threadnote.recall.refresh_stale_ms_bucket',
+};
 
 const CONTEXT_BRIEF_QUANTITY_BUCKET_ATTRIBUTE_KEYS: Readonly<Record<ContextBriefQuantityBucketField, string>> = {
   contextBriefCacheHitsBucket: 'threadnote.context_brief.cache_hits_bucket',
@@ -1317,7 +1360,8 @@ function mergeTelemetryFields(
       (key === 'snapshotSelection' && isOneOf(value, ANONYMOUS_TELEMETRY_GRAPH_SNAPSHOT_SELECTIONS)) ||
       ((key in GRAPH_QUANTITY_BUCKET_ATTRIBUTE_KEYS ||
         key in CONTEXT_BRIEF_QUANTITY_BUCKET_ATTRIBUTE_KEYS ||
-        key in CODE_ANCHOR_FINALIZATION_QUANTITY_BUCKET_ATTRIBUTE_KEYS) &&
+        key in CODE_ANCHOR_FINALIZATION_QUANTITY_BUCKET_ATTRIBUTE_KEYS ||
+        key in RECALL_QUANTITY_BUCKET_ATTRIBUTE_KEYS) &&
         isQuantityBucket(value))
     ) {
       Reflect.set(merged, key, value);
@@ -1413,10 +1457,16 @@ function byteBucket(bytes: number): string {
   return '>=4GiB';
 }
 
-function quantityBucket(value: number): string {
+/** Bucket exact, non-negative quantities before they reach the telemetry recorder. */
+export function telemetryQuantityBucket(value: number): AnonymousTelemetryQuantityBucket | undefined {
+  return Number.isSafeInteger(value) && value >= 0 ? quantityBucket(value) : undefined;
+}
+
+function quantityBucket(value: number): AnonymousTelemetryQuantityBucket {
   if (value <= 0) return '0';
   const exponent = Math.min(52, Math.floor(Math.log2(value)));
-  return `2^${exponent}`;
+  // Math.log2 can round a value just below a power of two up to its exponent.
+  return `2^${value < 2 ** exponent ? exponent - 1 : exponent}`;
 }
 
 function recordValue(record: object, key: string): unknown {

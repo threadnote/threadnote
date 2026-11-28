@@ -1914,7 +1914,7 @@ describe('post-update validation', () => {
           yield* fs.writeFileString(
             telemetryFile,
             `${JSON.stringify({
-              consentVersion: 5,
+              consentVersion: 6,
               enabled: true,
               endpoint: DEFAULT_TELEMETRY_ENDPOINT,
               sessionSalt: Base64Url.encode(new Uint8Array(32).fill(5)),
@@ -1998,7 +1998,7 @@ describe('post-update validation', () => {
         }),
       ).pipe(provideTestLayer(ApplicationLayer));
 
-      expect(result.afterNonInteractive).toMatchObject({consentVersion: 5, enabled: true});
+      expect(result.afterNonInteractive).toMatchObject({consentVersion: 6, enabled: true});
       expect(result.nonInteractive).toContain('Telemetry remains disabled');
       expect(result.nonInteractive).toContain('telemetry enable --apply');
       expect(result.attempts).toEqual([
@@ -2006,7 +2006,7 @@ describe('post-update validation', () => {
         ['telemetry', 'enable'],
         ['telemetry', 'enable', '--apply'],
       ]);
-      expect(result.current).toMatchObject({consentVersion: 6, enabled: true});
+      expect(result.current).toMatchObject({consentVersion: 7, enabled: true});
       expect(result.interactive).toContain('Finished telemetry-consent-renewal');
       expect(result.notificationAttemptsAfterNonInteractive).toBe(1);
       expect(result.notificationAttempts).toBe(1);
@@ -2041,7 +2041,7 @@ describe('post-update validation', () => {
           telemetryFile,
           `${JSON.stringify({
             autoAccept: true,
-            consentVersion: 5,
+            consentVersion: 6,
             enabled: true,
             endpoint: DEFAULT_TELEMETRY_ENDPOINT,
             sessionSalt: Base64Url.encode(new Uint8Array(32).fill(7)),
@@ -2081,10 +2081,10 @@ describe('post-update validation', () => {
         expect(commandAttempts).toBe(0);
         expect(yield* readTelemetryConfiguration(config)).toMatchObject({
           autoAccept: true,
-          consentVersion: 6,
+          consentVersion: 7,
           enabled: true,
         });
-        expect(JSON.parse(yield* fs.readFileString(telemetryFile))).toMatchObject({consentVersion: 5});
+        expect(JSON.parse(yield* fs.readFileString(telemetryFile))).toMatchObject({consentVersion: 6});
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

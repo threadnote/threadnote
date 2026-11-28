@@ -1,7 +1,7 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Array as EffectArray} from 'effect';
 import {recallCandidateIsValid} from '../candidate_validation.js';
-import {Clock, DateTime, Effect, Exit, Option, Path} from 'effect';
+import {Clock, Effect, Exit, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -17,7 +17,16 @@ import {
   recallVectorPreparationIdentity,
   recallVectorPreparationJobId,
 } from '../vector/preparation-identity.js';
-import {preparationChanged, withRecallVectorWrite} from '../vector/storage.js';
+import {
+  confirmRecallVectorRefresh,
+  preparationChanged,
+  recallVectorRefreshRecord,
+  recallVectorWriteTransaction,
+  recordRecallVectorRefresh,
+  removeRecallVectorRefresh,
+  withRecallVectorWrite,
+  withRecallVectorWriter,
+} from '../vector/storage.js';
 import type {RecallEmbeddingObservation, RecallEmbeddingScope} from './demand.js';
 import {emitRecallDiagnostic} from '../diagnostics.js';
 import {
@@ -205,7 +214,8 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
             yield* sql`INSERT INTO vector_chunks (generation,chunk_id,uri,fingerprint,project,approved_authoritative,vector_id)
             SELECT ${target.generation},${chunk.chunk_id},${chunk.uri},${chunk.fingerprint},${chunk.project},${chunk.approved_authoritative},id FROM vector_values WHERE vector_key = ${chunk.vector_key}`;
           }
-          yield* sql`UPDATE idle_recall_targets SET source_after = ${chunks[chunks.length - 1].chunk_id} WHERE generation = ${target.generation}`;
+          yield* sql`UPDATE idle_recall_targets SET source_after = ${chunks[chunks.length - 1].chunk_id},
+            embedded_chunks = embedded_chunks + ${inferred === undefined ? 0 : 1} WHERE generation = ${target.generation}`;
         }),
       );
       return {
@@ -219,97 +229,123 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
     yield* authorizeRecallVectorCorpus(source);
     yield* verify;
     yield* source.fence;
-    const activated = yield* Effect.acquireUseRelease(
-      withRecallVectorWrite(
-        config,
-        manifest,
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          yield* assertRecallVectorTarget(target);
-          const previous = yield* sql<{
-            readonly generation: string;
-          }>`SELECT generation FROM vector_pointer WHERE singleton = 1`;
-          // A delta adds the chunk rows it copied from its base to the chunks it prepared. A prepared chunk
-          // was embedded by this build when no other generation holds its vector.
-          const counts = yield* sql<{
-            readonly prepared: number;
-            readonly actual: number;
-            readonly changed: number;
-            readonly embedded: number;
-            readonly created_at: string;
-          }>`SELECT
+    const activated = yield* withRecallVectorWriter(
+      config,
+      manifest,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        // Keep the writer lease across both transactions so foreground work cannot take the lock between them.
+        return yield* Effect.acquireUseRelease(
+          recallVectorWriteTransaction(
+            sql,
+            Effect.gen(function* () {
+              yield* assertRecallVectorTarget(target);
+              const [previous] = yield* sql<{
+                readonly generation: string;
+                readonly corpus_generation: string | null;
+              }>`SELECT g.generation, g.corpus_generation FROM vector_pointer p
+            JOIN vector_generations g USING(generation) WHERE p.singleton = 1`;
+              const previousCorpus = previous?.corpus_generation ?? undefined;
+              const changes =
+                previousCorpus === undefined
+                  ? undefined
+                  : yield* source.readRefreshChanges(previousCorpus).pipe(Effect.orElseSucceed(() => undefined));
+              // A delta adds copied chunks to the chunks it prepared. Only a build resumed from an older
+              // binary lacks the count of inference steps; use the previous estimate for that build.
+              const counts = yield* sql<{
+                readonly prepared: number;
+                readonly actual: number;
+                readonly changed: number;
+                readonly embedded: number;
+                readonly created_at: string;
+              }>`SELECT
         (SELECT COUNT(*) FROM idle_recall_chunks WHERE generation = ${target.generation}) AS prepared,
         (SELECT COUNT(*) FROM vector_chunks WHERE generation = ${target.generation}) AS actual,
-        (SELECT COUNT(*) FROM idle_recall_delta_uris WHERE generation = ${target.generation}) AS changed,
-        (SELECT COUNT(DISTINCT c.vector_id) FROM vector_chunks c
-          JOIN idle_recall_chunks p ON p.generation = c.generation AND p.chunk_id = c.chunk_id
-          WHERE c.generation = ${target.generation} AND NOT EXISTS (
-            SELECT 1 FROM vector_chunks o WHERE o.vector_id = c.vector_id AND o.generation <> c.generation)) AS embedded,
+        COALESCE(${changes?.changedCount ?? null}, CASE WHEN ${target.base_generation} IS NULL
+          THEN (SELECT COUNT(*) FROM idle_recall_metadata WHERE generation = ${target.generation})
+          ELSE (SELECT COUNT(*) FROM idle_recall_delta_uris WHERE generation = ${target.generation})
+        END) AS changed,
+        COALESCE(
+          (SELECT embedded_chunks FROM idle_recall_targets WHERE generation = ${target.generation}),
+          (SELECT COUNT(DISTINCT c.vector_id) FROM vector_chunks c
+            JOIN idle_recall_chunks p ON p.generation = c.generation AND p.chunk_id = c.chunk_id
+            WHERE c.generation = ${target.generation} AND NOT EXISTS (
+              SELECT 1 FROM vector_chunks o WHERE o.vector_id = c.vector_id AND o.generation <> c.generation))
+        ) AS embedded,
         (SELECT created_at FROM vector_generations WHERE generation = ${target.generation}) AS created_at`;
-          const count = counts[0];
-          if (
-            !count ||
-            (target.copy_stage !== null && target.copy_stage !== 'done') ||
-            count.prepared + target.copied_chunks !== count.actual
-          )
-            return yield* preparationChanged();
-          yield* verify;
-          yield* source.fence;
-          // A delta takes its real job id only now; an older binary's full target of the same job wins.
-          const promoted =
-            yield* sql`UPDATE vector_generations SET job_id = ${job}, state = 'ready', chunk_count = ${count.actual}
+              const count = counts[0];
+              if (
+                !count ||
+                (target.copy_stage !== null && target.copy_stage !== 'done') ||
+                count.prepared + target.copied_chunks !== count.actual
+              )
+                return yield* preparationChanged();
+              yield* verify;
+              yield* source.fence;
+              // A delta takes its real job id only now; an older binary's full target of the same job wins.
+              const promoted =
+                yield* sql`UPDATE vector_generations SET job_id = ${job}, state = 'ready', chunk_count = ${count.actual}
             WHERE generation = ${target.generation}
             AND NOT EXISTS (SELECT 1 FROM vector_generations o WHERE o.job_id = ${job} AND o.generation <> ${target.generation})
             RETURNING generation`;
-          if (!promoted.length) return yield* preparationChanged();
-          yield* sql`INSERT INTO vector_pointer (singleton,generation) VALUES (1,${target.generation}) ON CONFLICT(singleton) DO UPDATE SET generation = excluded.generation`;
-          yield* sql`UPDATE idle_recall_targets SET phase = 'retire' WHERE generation = ${target.generation}`;
-          const createdAt = DateTime.make(count.created_at);
-          return {
-            previous: previous[0]?.generation,
-            createdAt: Option.isSome(createdAt) ? DateTime.toEpochMillis(createdAt.value) : undefined,
-            build: {
-              kind: target.base_generation === null ? ('full' as const) : ('delta' as const),
-              changedCount: count.changed,
-              copiedChunkCount: target.copied_chunks,
-              reusedChunkCount: count.prepared - count.embedded,
-              embeddedChunkCount: count.embedded,
-            },
-          };
-        }),
-      ),
-      activation => verify.pipe(Effect.andThen(source.fence), Effect.as(activation)),
-      ({previous: previousPointer}, exit) =>
-        Exit.isSuccess(exit)
-          ? Effect.void
-          : withRecallVectorWrite(
-              config,
-              manifest,
-              Effect.gen(function* () {
-                const sql = yield* SqlClient.SqlClient;
-                const restored =
-                  previousPointer === undefined
-                    ? []
-                    : yield* sql`
+              if (!promoted.length) return yield* preparationChanged();
+              yield* sql`INSERT INTO vector_pointer (singleton,generation) VALUES (1,${target.generation}) ON CONFLICT(singleton) DO UPDATE SET generation = excluded.generation`;
+              yield* sql`UPDATE idle_recall_targets SET phase = 'retire' WHERE generation = ${target.generation}`;
+              const refresh = recallVectorRefreshRecord(
+                {
+                  kind: target.base_generation === null ? 'full' : 'delta',
+                  changedCount: count.changed,
+                  copiedChunkCount: target.copied_chunks,
+                  reusedChunkCount: count.prepared - count.embedded,
+                  embeddedChunkCount: count.embedded,
+                },
+                count.created_at,
+                yield* Clock.currentTimeMillis,
+                changes?.publishedAtMillis,
+              );
+              return {
+                previous: previous?.generation,
+                refresh,
+                sequence: yield* recordRecallVectorRefresh(sql, refresh),
+              };
+            }),
+          ),
+          current =>
+            verify.pipe(
+              Effect.andThen(source.fence),
+              Effect.andThen(sql.withTransaction(confirmRecallVectorRefresh(sql, current.sequence))),
+              Effect.as(current),
+            ),
+          ({previous: previousPointer, sequence}, exit) =>
+            Exit.isSuccess(exit)
+              ? Effect.void
+              : sql.withTransaction(
+                  Effect.gen(function* () {
+                    const restored =
+                      previousPointer === undefined
+                        ? []
+                        : yield* sql`
             UPDATE vector_pointer SET generation = ${previousPointer}
             WHERE generation = ${target.generation}
               AND EXISTS (SELECT 1 FROM vector_generations WHERE generation = ${previousPointer} AND state = 'ready')
             RETURNING generation`;
-                if (!restored.length) yield* sql`DELETE FROM vector_pointer WHERE generation = ${target.generation}`;
-                yield* sql`UPDATE vector_generations SET state = 'building',
+                    if (!restored.length)
+                      yield* sql`DELETE FROM vector_pointer WHERE generation = ${target.generation}`;
+                    yield* sql`UPDATE vector_generations SET state = 'building',
                   job_id = ${target.base_generation === null ? job : recallVectorDeltaJobId(job)}
                   WHERE generation = ${target.generation}`;
-                yield* sql`UPDATE idle_recall_targets SET phase = 'embed' WHERE generation = ${target.generation}`;
-              }),
-            ),
+                    yield* sql`UPDATE idle_recall_targets SET phase = 'embed' WHERE generation = ${target.generation}`;
+                    yield* removeRecallVectorRefresh(sql, sequence);
+                  }),
+                ),
+        );
+      }),
     );
     // Logged after the pointer is final, so an interrupted log write cannot undo a publication.
-    const finished = yield* Clock.currentTimeMillis;
     yield* emitRecallDiagnostic(config.agentContextHome, {
       event: 'recall.vector-build',
       scope: 'active',
-      ...activated.build,
-      durationMilliseconds: Math.max(0, finished - (activated.createdAt ?? finished)),
+      ...activated.refresh,
     });
     return {state: 'pending' as const, phase: 'retire' as const, inferred: false, generation: target.generation};
   } else if (target.phase === 'retire') {

@@ -36,7 +36,7 @@ threadnote telemetry disable --apply`,
     },
     {
       type: 'paragraph',
-      text: 'Consent is versioned separately from the configuration format. The current schema-v6 contract requires consent version 6: by default, an earlier v5 consent fails closed and telemetry remains off until the current preview is reviewed and explicitly applied again. Users who apply consent with --auto-accept instead opt into future data-contract updates without another prompt, so telemetry stays enabled after those updates. A consent version from a newer Threadnote release still fails closed in an older release.',
+      text: 'Consent is versioned separately from the configuration format. Schema v7 requires consent version 7. If an earlier consent does not include automatic acceptance, review the current preview and apply consent again to enable telemetry. Users who apply consent with --auto-accept instead opt into future data-contract updates without another prompt, so telemetry stays enabled after those updates. A consent version from a newer Threadnote release still fails closed in an older release.',
     },
     {
       type: 'paragraph',

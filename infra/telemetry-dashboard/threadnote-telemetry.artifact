@@ -93,7 +93,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" } | count_over_time() by (span.threadnote.component, span.threadnote.outcome)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" } | count_over_time() by (span.threadnote.component, span.threadnote.outcome)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -166,7 +166,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" } | count_over_time() by (resource.service.version) | topk(10)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" } | count_over_time() by (resource.service.version) | topk(10)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -230,7 +230,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" } | count_over_time() by (span.threadnote.operation, span.threadnote.outcome) | topk(20)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" } | count_over_time() by (span.threadnote.operation, span.threadnote.outcome) | topk(20)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -303,7 +303,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome != \"success\" } | count_over_time() by (span.threadnote.operation, span.threadnote.outcome) | topk(20)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome != \"success\" } | count_over_time() by (span.threadnote.operation, span.threadnote.outcome) | topk(20)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -367,7 +367,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "instant",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.duration_ms != nil && span.threadnote.operation != \"mcp-server\" && span.threadnote.operation != \"mcp-broker\" && span.threadnote.operation != \"manage\" } | quantile_over_time(span.threadnote.duration_ms, .5, .95, .99) by (span.threadnote.operation) | topk(20)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.duration_ms != nil && span.threadnote.operation != \"mcp-server\" && span.threadnote.operation != \"mcp-broker\" && span.threadnote.operation != \"manage\" } | quantile_over_time(span.threadnote.duration_ms, .5, .95, .99) by (span.threadnote.operation) | topk(20)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -466,7 +466,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "instant",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase.elapsed_ms != nil } | quantile_over_time(span.threadnote.phase.elapsed_ms, .5, .95) by (span.threadnote.phase)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase.elapsed_ms != nil } | quantile_over_time(span.threadnote.phase.elapsed_ms, .5, .95) by (span.threadnote.phase)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -574,7 +574,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase != nil } | count_over_time() by (span.threadnote.phase, span.threadnote.phase.outcome) | topk(20)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase != nil } | count_over_time() by (span.threadnote.phase, span.threadnote.phase.outcome) | topk(20)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -647,7 +647,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome != \"success\" && span.error.type != nil } | count_over_time() by (span.error.type) | topk(20)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome != \"success\" && span.error.type != nil } | count_over_time() by (span.error.type) | topk(20)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -711,7 +711,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.memory.rss.end_bucket != nil } | count_over_time() by (span.threadnote.memory.rss.end_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.memory.rss.end_bucket != nil } | count_over_time() by (span.threadnote.memory.rss.end_bucket)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -775,7 +775,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.memory.heap.end_bucket != nil } | count_over_time() by (span.threadnote.memory.heap.end_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.memory.heap.end_bucket != nil } | count_over_time() by (span.threadnote.memory.heap.end_bucket)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -839,7 +839,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.memory.peak_rss.end_bucket != nil } | count_over_time() by (span.threadnote.memory.peak_rss.end_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.memory.peak_rss.end_bucket != nil } | count_over_time() by (span.threadnote.memory.peak_rss.end_bucket)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1041,7 +1041,7 @@
             },
             "limit": 100,
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome != \"success\" && span.threadnote.outcome != \"interrupted\" } | select(resource.service.version, resource.session.id, resource.threadnote.session.scope, span.threadnote.component, span.threadnote.operation, span.threadnote.outcome, span.error.type, span.threadnote.duration_ms, span.threadnote.failure.domain, span.threadnote.failure.code, span.threadnote.failure.recovery, span.threadnote.invocation.id) with (most_recent=true)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome != \"success\" && span.threadnote.outcome != \"interrupted\" } | select(resource.service.version, resource.session.id, resource.threadnote.session.scope, span.threadnote.component, span.threadnote.operation, span.threadnote.outcome, span.error.type, span.threadnote.duration_ms, span.threadnote.failure.domain, span.threadnote.failure.code, span.threadnote.failure.recovery, span.threadnote.invocation.id) with (most_recent=true)",
             "queryType": "traceql",
             "refId": "A",
             "spanLimit": 3,
@@ -1092,7 +1092,7 @@
             },
             "hide": true,
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.build_kind = \"dirty\" && (span.threadnote.graph.efficiency_class = \"small-delta-full\" || span.threadnote.graph.efficiency_class = \"high-amplification-full\" || span.threadnote.graph.efficiency_class = \"critical-amplification-full\") } | count_over_time()",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.build_kind = \"dirty\" && (span.threadnote.graph.efficiency_class = \"small-delta-full\" || span.threadnote.graph.efficiency_class = \"high-amplification-full\" || span.threadnote.graph.efficiency_class = \"critical-amplification-full\") } | count_over_time()",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1104,7 +1104,7 @@
             },
             "hide": true,
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.build_kind = \"dirty\" } | count_over_time()",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.build_kind = \"dirty\" } | count_over_time()",
             "queryType": "traceql",
             "refId": "B",
             "tableType": "traces"
@@ -1156,7 +1156,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" } | count_over_time() by (resource.service.version) | topk(10)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" } | count_over_time() by (resource.service.version) | topk(10)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1199,7 +1199,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" } | count_over_time() by (span.threadnote.graph.materialization_mode, span.threadnote.graph.efficiency_class)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" } | count_over_time() by (span.threadnote.graph.materialization_mode, span.threadnote.graph.efficiency_class)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1242,7 +1242,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.materialization_mode = \"full\" } | count_over_time() by (span.threadnote.graph.fallback_reason, span.threadnote.graph.efficiency_class)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.materialization_mode = \"full\" } | count_over_time() by (span.threadnote.graph.fallback_reason, span.threadnote.graph.efficiency_class)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1285,7 +1285,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.build_kind = \"dirty\" && span.threadnote.graph.delta_files_bucket != \"0\" } | count_over_time() by (span.threadnote.graph.rewrite_amplification_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.build_kind = \"dirty\" && span.threadnote.graph.delta_files_bucket != \"0\" } | count_over_time() by (span.threadnote.graph.rewrite_amplification_bucket)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1328,7 +1328,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.build_kind = \"dirty\" && span.threadnote.graph.delta_files_bucket != \"0\" } | count_over_time() by (span.threadnote.graph.cached_fact_replay_bytes_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.build_kind = \"dirty\" && span.threadnote.graph.delta_files_bucket != \"0\" } | count_over_time() by (span.threadnote.graph.cached_fact_replay_bytes_bucket)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1371,7 +1371,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.build_kind = \"dirty\" && span.threadnote.graph.changed_fact_bytes_bucket != \"0\" } | count_over_time() by (span.threadnote.graph.fact_replay_amplification_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"lifecycle\" && span.threadnote.operation = \"graph-build\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.build_kind = \"dirty\" && span.threadnote.graph.changed_fact_bytes_bucket != \"0\" } | count_over_time() by (span.threadnote.graph.fact_replay_amplification_bucket)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1595,7 +1595,7 @@
             },
             "limit": 100,
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && resource.threadnote.telemetry.schema_version >= 2 && resource.threadnote.telemetry.schema_version <= 6 && span.threadnote.graph.efficiency_class =~ \"(small|high|critical).*full\" } | select(resource.service.version,span.threadnote.graph.build_kind,span.threadnote.graph.materialization_mode,span.threadnote.graph.fallback_reason,span.threadnote.graph.resolution_closure,span.threadnote.graph.efficiency_class,span.threadnote.graph.changed_files_bucket,span.threadnote.graph.delta_files_bucket,span.threadnote.graph.staged_files_bucket,span.threadnote.graph.total_files_bucket,span.threadnote.graph.cached_fact_replay_bytes_bucket,span.threadnote.graph.changed_fact_bytes_bucket,span.threadnote.graph.rewrite_amplification_bucket,span.threadnote.graph.fact_replay_amplification_bucket,span.threadnote.duration_ms) with (most_recent=true)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && resource.threadnote.telemetry.schema_version >= 2 && resource.threadnote.telemetry.schema_version <= 7 && span.threadnote.graph.efficiency_class =~ \"(small|high|critical).*full\" } | select(resource.service.version,span.threadnote.graph.build_kind,span.threadnote.graph.materialization_mode,span.threadnote.graph.fallback_reason,span.threadnote.graph.resolution_closure,span.threadnote.graph.efficiency_class,span.threadnote.graph.changed_files_bucket,span.threadnote.graph.delta_files_bucket,span.threadnote.graph.staged_files_bucket,span.threadnote.graph.total_files_bucket,span.threadnote.graph.cached_fact_replay_bytes_bucket,span.threadnote.graph.changed_fact_bytes_bucket,span.threadnote.graph.rewrite_amplification_bucket,span.threadnote.graph.fact_replay_amplification_bucket,span.threadnote.duration_ms) with (most_recent=true)",
             "queryType": "traceql",
             "refId": "A",
             "spanLimit": 3,
@@ -1660,7 +1660,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.operation = \"auto-update-worker\" && span.threadnote.auto_update.result != nil } | count_over_time() by (span.threadnote.auto_update.result, span.threadnote.auto_update.repair_required)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.operation = \"auto-update-worker\" && span.threadnote.auto_update.result != nil } | count_over_time() by (span.threadnote.auto_update.result, span.threadnote.auto_update.repair_required)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1715,7 +1715,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "instant",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.request_kind != nil && span.threadnote.duration_ms != nil } | quantile_over_time(span.threadnote.duration_ms, .5, .95, .99) by (span.threadnote.graph.request_kind)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.request_kind != nil && span.threadnote.duration_ms != nil } | quantile_over_time(span.threadnote.duration_ms, .5, .95, .99) by (span.threadnote.graph.request_kind)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1814,7 +1814,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "instant",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase =~ \"graph.query.*\" && span.threadnote.stage = nil && span.threadnote.graph.request_kind != nil && span.threadnote.phase.elapsed_ms != nil } | quantile_over_time(span.threadnote.phase.elapsed_ms, .5, .95) by (span.threadnote.graph.request_kind, span.threadnote.phase)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase =~ \"graph.query.*\" && span.threadnote.stage = nil && span.threadnote.graph.request_kind != nil && span.threadnote.phase.elapsed_ms != nil } | quantile_over_time(span.threadnote.phase.elapsed_ms, .5, .95) by (span.threadnote.graph.request_kind, span.threadnote.phase)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -1825,7 +1825,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "instant",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase =~ \"graph.query.*\" && span.threadnote.stage =~ \"query-.*\" && span.threadnote.graph.request_kind != nil && span.threadnote.phase.elapsed_ms != nil } | quantile_over_time(span.threadnote.phase.elapsed_ms, .5, .95) by (span.threadnote.graph.request_kind, span.threadnote.stage, span.threadnote.subphase)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase =~ \"graph.query.*\" && span.threadnote.stage =~ \"query-.*\" && span.threadnote.graph.request_kind != nil && span.threadnote.phase.elapsed_ms != nil } | quantile_over_time(span.threadnote.phase.elapsed_ms, .5, .95) by (span.threadnote.graph.request_kind, span.threadnote.stage, span.threadnote.subphase)",
             "queryType": "traceql",
             "refId": "B",
             "tableType": "traces"
@@ -1938,7 +1938,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "instant",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.request_kind != nil && span.threadnote.graph.snapshot_files_bucket != nil && span.threadnote.duration_ms != nil } | quantile_over_time(span.threadnote.duration_ms, .95) by (span.threadnote.graph.request_kind, span.threadnote.graph.snapshot_files_bucket) | topk(40)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.request_kind != nil && span.threadnote.graph.snapshot_files_bucket != nil && span.threadnote.duration_ms != nil } | quantile_over_time(span.threadnote.duration_ms, .95) by (span.threadnote.graph.request_kind, span.threadnote.graph.snapshot_files_bucket) | topk(40)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2046,7 +2046,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.request_kind != nil && span.threadnote.graph.snapshot_selection != nil && span.threadnote.graph.snapshot_freshness != nil } | count_over_time() by (span.threadnote.graph.snapshot_selection, span.threadnote.graph.snapshot_freshness)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && span.threadnote.outcome = \"success\" && span.threadnote.graph.request_kind != nil && span.threadnote.graph.snapshot_selection != nil && span.threadnote.graph.snapshot_freshness != nil } | count_over_time() by (span.threadnote.graph.snapshot_selection, span.threadnote.graph.snapshot_freshness)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2119,7 +2119,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.context_brief.scope != nil && span.threadnote.outcome != nil } | count_over_time() by (span.threadnote.context_brief.scope, span.threadnote.outcome)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.context_brief.scope != nil && span.threadnote.outcome != nil } | count_over_time() by (span.threadnote.context_brief.scope, span.threadnote.outcome)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2174,7 +2174,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "instant",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.scope != nil && span.threadnote.duration_ms != nil } | quantile_over_time(span.threadnote.duration_ms, .5, .95, .99) by (span.threadnote.context_brief.scope)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.scope != nil && span.threadnote.duration_ms != nil } | quantile_over_time(span.threadnote.duration_ms, .5, .95, .99) by (span.threadnote.context_brief.scope)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2273,7 +2273,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "instant",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.phase = \"context.brief.citation-validation\" && span.threadnote.phase.outcome = \"success\" && span.threadnote.context_brief.scope != nil && span.threadnote.context_brief.citations_bucket != nil && span.threadnote.phase.elapsed_ms != nil } | quantile_over_time(span.threadnote.phase.elapsed_ms, .5, .95, .99) by (span.threadnote.context_brief.scope, span.threadnote.context_brief.citations_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.phase = \"context.brief.citation-validation\" && span.threadnote.phase.outcome = \"success\" && span.threadnote.context_brief.scope != nil && span.threadnote.context_brief.citations_bucket != nil && span.threadnote.phase.elapsed_ms != nil } | quantile_over_time(span.threadnote.phase.elapsed_ms, .5, .95, .99) by (span.threadnote.context_brief.scope, span.threadnote.context_brief.citations_bucket)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2379,7 +2379,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.citation_coverage != nil && span.threadnote.context_brief.citation_result != nil } | count_over_time() by (span.threadnote.context_brief.citation_coverage, span.threadnote.context_brief.citation_result)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.citation_coverage != nil && span.threadnote.context_brief.citation_result != nil } | count_over_time() by (span.threadnote.context_brief.citation_coverage, span.threadnote.context_brief.citation_result)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2441,7 +2441,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.citation_unknown_reason != nil } | count_over_time() by (span.threadnote.context_brief.citation_unknown_reason)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.citation_unknown_reason != nil } | count_over_time() by (span.threadnote.context_brief.citation_unknown_reason)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2503,7 +2503,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.exact_citations_bucket != nil && span.threadnote.context_brief.relocated_citations_bucket != nil && span.threadnote.context_brief.stale_citations_bucket != nil && span.threadnote.context_brief.unknown_citations_bucket != nil } | count_over_time() by (span.threadnote.context_brief.exact_citations_bucket, span.threadnote.context_brief.relocated_citations_bucket, span.threadnote.context_brief.stale_citations_bucket, span.threadnote.context_brief.unknown_citations_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.exact_citations_bucket != nil && span.threadnote.context_brief.relocated_citations_bucket != nil && span.threadnote.context_brief.stale_citations_bucket != nil && span.threadnote.context_brief.unknown_citations_bucket != nil } | count_over_time() by (span.threadnote.context_brief.exact_citations_bucket, span.threadnote.context_brief.relocated_citations_bucket, span.threadnote.context_brief.stale_citations_bucket, span.threadnote.context_brief.unknown_citations_bucket)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2514,7 +2514,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.citations_bucket != nil && span.threadnote.context_brief.cited_memories_bucket != nil && span.threadnote.context_brief.repositories_validated_bucket != nil && span.threadnote.context_brief.cache_hits_bucket != nil } | count_over_time() by (span.threadnote.context_brief.citations_bucket, span.threadnote.context_brief.cited_memories_bucket, span.threadnote.context_brief.repositories_validated_bucket, span.threadnote.context_brief.cache_hits_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.citations_bucket != nil && span.threadnote.context_brief.cited_memories_bucket != nil && span.threadnote.context_brief.repositories_validated_bucket != nil && span.threadnote.context_brief.cache_hits_bucket != nil } | count_over_time() by (span.threadnote.context_brief.citations_bucket, span.threadnote.context_brief.cited_memories_bucket, span.threadnote.context_brief.repositories_validated_bucket, span.threadnote.context_brief.cache_hits_bucket)",
             "queryType": "traceql",
             "refId": "B",
             "tableType": "traces"
@@ -2576,7 +2576,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.scope != nil && span.threadnote.context_brief.output_truncated != nil } | count_over_time() by (span.threadnote.context_brief.scope, span.threadnote.context_brief.output_truncated)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.scope != nil && span.threadnote.context_brief.output_truncated != nil } | count_over_time() by (span.threadnote.context_brief.scope, span.threadnote.context_brief.output_truncated)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2638,7 +2638,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.context_brief.scope != nil } | count_over_time() by (resource.service.version, span.threadnote.context_brief.scope)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.context_brief.scope != nil } | count_over_time() by (resource.service.version, span.threadnote.context_brief.scope)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2700,7 +2700,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome != \"success\" && span.threadnote.outcome != \"interrupted\" && span.threadnote.context_brief.scope != nil } | count_over_time() by (span.threadnote.context_brief.scope, span.threadnote.outcome, span.error.type)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome != \"success\" && span.threadnote.outcome != \"interrupted\" && span.threadnote.context_brief.scope != nil } | count_over_time() by (span.threadnote.context_brief.scope, span.threadnote.outcome, span.error.type)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2711,7 +2711,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome != \"success\" && span.threadnote.outcome != \"interrupted\" && span.threadnote.context_brief.scope = nil } | count_over_time() by (span.threadnote.outcome, span.error.type)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome != \"success\" && span.threadnote.outcome != \"interrupted\" && span.threadnote.context_brief.scope = nil } | count_over_time() by (span.threadnote.outcome, span.error.type)",
             "queryType": "traceql",
             "refId": "B",
             "tableType": "traces"
@@ -2773,7 +2773,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && resource.threadnote.telemetry.schema_version = 6 && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.context_brief.contract != nil && span.threadnote.context_brief.mode != nil && span.threadnote.outcome != nil } | count_over_time() by (span.threadnote.context_brief.contract, span.threadnote.context_brief.mode, span.threadnote.outcome)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.context_brief.contract != nil && span.threadnote.context_brief.mode != nil && span.threadnote.outcome != nil } | count_over_time() by (span.threadnote.context_brief.contract, span.threadnote.context_brief.mode, span.threadnote.outcome)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2835,7 +2835,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && resource.threadnote.telemetry.schema_version = 6 && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.contract = \"code-anchored-v3\" && span.threadnote.context_brief.code_anchor_coverage != nil && span.threadnote.context_brief.code_anchor_gap != nil && span.threadnote.context_brief.gap_class != nil && span.threadnote.context_brief.recovery_present != nil } | count_over_time() by (span.threadnote.context_brief.code_anchor_coverage, span.threadnote.context_brief.code_anchor_gap, span.threadnote.context_brief.gap_class, span.threadnote.context_brief.recovery_present)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.contract = \"code-anchored-v3\" && span.threadnote.context_brief.code_anchor_coverage != nil && span.threadnote.context_brief.code_anchor_gap != nil && span.threadnote.context_brief.gap_class != nil && span.threadnote.context_brief.recovery_present != nil } | count_over_time() by (span.threadnote.context_brief.code_anchor_coverage, span.threadnote.context_brief.code_anchor_gap, span.threadnote.context_brief.gap_class, span.threadnote.context_brief.recovery_present)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2897,7 +2897,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && resource.threadnote.telemetry.schema_version = 6 && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.contract != nil && span.threadnote.context_brief.mode != nil && span.threadnote.context_brief.returned_lane != nil } | count_over_time() by (span.threadnote.context_brief.contract, span.threadnote.context_brief.mode, span.threadnote.context_brief.returned_lane)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.contract != nil && span.threadnote.context_brief.mode != nil && span.threadnote.context_brief.returned_lane != nil } | count_over_time() by (span.threadnote.context_brief.contract, span.threadnote.context_brief.mode, span.threadnote.context_brief.returned_lane)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -2959,7 +2959,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && resource.threadnote.telemetry.schema_version = 6 && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.contract = \"code-anchored-v3\" && span.threadnote.context_brief.code_anchors_requested_bucket != nil && span.threadnote.context_brief.code_anchors_resolved_bucket != nil && span.threadnote.context_brief.code_anchors_matched_memories_bucket != nil } | count_over_time() by (span.threadnote.context_brief.code_anchors_requested_bucket, span.threadnote.context_brief.code_anchors_resolved_bucket, span.threadnote.context_brief.code_anchors_matched_memories_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"completion\" && (span.threadnote.operation = \"context_brief\" || span.threadnote.operation = \"context.brief\") && span.threadnote.outcome = \"success\" && span.threadnote.context_brief.contract = \"code-anchored-v3\" && span.threadnote.context_brief.code_anchors_requested_bucket != nil && span.threadnote.context_brief.code_anchors_resolved_bucket != nil && span.threadnote.context_brief.code_anchors_matched_memories_bucket != nil } | count_over_time() by (span.threadnote.context_brief.code_anchors_requested_bucket, span.threadnote.context_brief.code_anchors_resolved_bucket, span.threadnote.context_brief.code_anchors_matched_memories_bucket)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -3021,7 +3021,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && resource.threadnote.telemetry.schema_version = 6 && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase = \"memory.code-anchor-finalization\" && span.threadnote.code_anchor_finalization.trigger != nil && span.threadnote.code_anchor_finalization.result != nil } | count_over_time() by (span.threadnote.code_anchor_finalization.trigger, span.threadnote.code_anchor_finalization.result)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase = \"memory.code-anchor-finalization\" && span.threadnote.code_anchor_finalization.trigger != nil && span.threadnote.code_anchor_finalization.result != nil } | count_over_time() by (span.threadnote.code_anchor_finalization.trigger, span.threadnote.code_anchor_finalization.result)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -3083,7 +3083,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && resource.threadnote.telemetry.schema_version = 6 && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase = \"memory.code-anchor-finalization\" && span.threadnote.code_anchor_finalization.scanned_bucket != nil && span.threadnote.code_anchor_finalization.matched_bucket != nil && span.threadnote.code_anchor_finalization.finalized_bucket != nil && span.threadnote.code_anchor_finalization.pending_bucket != nil } | count_over_time() by (span.threadnote.code_anchor_finalization.scanned_bucket, span.threadnote.code_anchor_finalization.matched_bucket, span.threadnote.code_anchor_finalization.finalized_bucket, span.threadnote.code_anchor_finalization.pending_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase = \"memory.code-anchor-finalization\" && span.threadnote.code_anchor_finalization.scanned_bucket != nil && span.threadnote.code_anchor_finalization.matched_bucket != nil && span.threadnote.code_anchor_finalization.finalized_bucket != nil && span.threadnote.code_anchor_finalization.pending_bucket != nil } | count_over_time() by (span.threadnote.code_anchor_finalization.scanned_bucket, span.threadnote.code_anchor_finalization.matched_bucket, span.threadnote.code_anchor_finalization.finalized_bucket, span.threadnote.code_anchor_finalization.pending_bucket)",
             "queryType": "traceql",
             "refId": "A",
             "tableType": "traces"
@@ -3094,7 +3094,7 @@
               "uid": "grafanacloud-traces"
             },
             "metricsQueryType": "range",
-            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && resource.threadnote.telemetry.schema_version = 6 && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase = \"memory.code-anchor-finalization\" && span.threadnote.code_anchor_finalization.conflict_bucket != nil && span.threadnote.code_anchor_finalization.failed_bucket != nil && span.threadnote.code_anchor_finalization.latency_ms_bucket != nil } | count_over_time() by (span.threadnote.code_anchor_finalization.conflict_bucket, span.threadnote.code_anchor_finalization.failed_bucket, span.threadnote.code_anchor_finalization.latency_ms_bucket)",
+            "query": "{ resource.service.name = \"threadnote\" && resource.service.version != \"0.0.0-canary\" && (resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7) && span:name = \"threadnote.anonymous-diagnostic\" && span.threadnote.event = \"checkpoint\" && span.threadnote.phase = \"memory.code-anchor-finalization\" && span.threadnote.code_anchor_finalization.conflict_bucket != nil && span.threadnote.code_anchor_finalization.failed_bucket != nil && span.threadnote.code_anchor_finalization.latency_ms_bucket != nil } | count_over_time() by (span.threadnote.code_anchor_finalization.conflict_bucket, span.threadnote.code_anchor_finalization.failed_bucket, span.threadnote.code_anchor_finalization.latency_ms_bucket)",
             "queryType": "traceql",
             "refId": "B",
             "tableType": "traces"

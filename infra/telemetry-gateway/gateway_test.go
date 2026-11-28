@@ -843,7 +843,7 @@ func TestCanonicalTelemetryPayloadRejectsSchemaMixingAndInvalidV2Shapes(t *testi
 			resourceAttribute(request, "threadnote.telemetry.schema_version").Value = intAnyValue(1)
 		}},
 		{name: "unknown schema version", mutate: func(request *collectortracepb.ExportTraceServiceRequest) {
-			resourceAttribute(request, "threadnote.telemetry.schema_version").Value = intAnyValue(7)
+			resourceAttribute(request, "threadnote.telemetry.schema_version").Value = intAnyValue(8)
 		}},
 		{name: "wrong schema version type", mutate: func(request *collectortracepb.ExportTraceServiceRequest) {
 			resourceAttribute(request, "threadnote.telemetry.schema_version").Value = stringAnyValue("2")
@@ -1213,6 +1213,50 @@ func TestSchemaV4RejectsEveryV5OnlyContextBriefField(t *testing.T) {
 			}
 			if _, validationError := canonicalTelemetryPayload(payload, schemas); validationError == nil {
 				t.Fatal("schema v4 accepted a v5-only Context Brief phase")
+			}
+		})
+	}
+}
+
+func TestCanonicalTelemetryPayloadV7RecallShape(t *testing.T) {
+	schemas, err := loadTelemetrySchemas()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		version   int64
+		operation string
+		remove    string
+		wantError bool
+	}{
+		{name: "recall completion", version: 7, operation: "recall"},
+		{name: "MCP recall completion", version: 7, operation: "recall_context"},
+		{name: "frozen prior schema", version: 6, operation: "recall", wantError: true},
+		{name: "unrelated completion", version: 7, operation: "health", wantError: true},
+		{name: "partial count set", version: 7, operation: "recall", remove: "threadnote.recall.read_current_bucket", wantError: true},
+		{name: "stale duration without build", version: 7, operation: "recall", remove: "threadnote.recall.refresh_build_ms_bucket", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := telemetryRequestWithSchema(validTelemetryRequest(), test.version)
+			span := request.ResourceSpans[0].ScopeSpans[0].Spans[0]
+			spanAttribute(request, "threadnote.operation").Value = stringAnyValue(test.operation)
+			for key, value := range map[string]string{
+				"threadnote.recall.read_current_bucket":       "2^0",
+				"threadnote.recall.read_compaction_bucket":    "0",
+				"threadnote.recall.read_refreshable_bucket":   "0",
+				"threadnote.recall.read_serving_older_bucket": "0",
+				"threadnote.recall.refresh_build_ms_bucket":   "2^13",
+				"threadnote.recall.refresh_stale_ms_bucket":   "2^14",
+			} {
+				span.Attributes = append(span.Attributes, &commonpb.KeyValue{Key: key, Value: stringAnyValue(value)})
+			}
+			if test.remove != "" {
+				removeSpanAttribute(request, test.remove)
+			}
+			err := validateTelemetryRequest(request, schemas.byVersion[int(test.version)])
+			if (err != nil) != test.wantError {
+				t.Fatalf("validation error = %v, want error %t", err, test.wantError)
 			}
 		})
 	}

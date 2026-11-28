@@ -23,11 +23,13 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {systemLayer} from '../../src/effect/runtime-bootstrap.js';
 import {runIndexRebuild, runIndexStatus} from '../../src/search/commands.js';
+import {readRecallVectorStatusDetails} from '../../src/lifecycle.js';
 import {
   observeRecallEmbeddingDemand,
   readRecallEmbeddingDemand,
   requestRecallEmbeddingsReceipt,
 } from '@threadnote/recall/background/demand';
+import {stepRecallVectorPreparation} from '@threadnote/recall/background/vector-step';
 import {CliOutput} from '../../src/effect/cli/output.js';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
@@ -35,7 +37,7 @@ import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {InferenceInterrupted} from '@threadnote/inference/engine/errors';
 import {writeModelSelection} from '@threadnote/inference/models/selection';
-import {expireRecallIndexValidation, recallIndexStatus} from '@threadnote/recall/index';
+import {expireRecallIndexValidation, loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
 import {vectorIndexStatus} from '@threadnote/recall/vector-index';
 import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
 import {runRecallVectorCompaction} from '@threadnote/recall/vector/compaction';
@@ -211,6 +213,14 @@ const fixture = Effect.gen(function* () {
       }),
     ),
   );
+  const background = Effect.gen(function* () {
+    yield* loadRecallIndexData(config, {includeInactive: false, memoryIds: []});
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const outcome = yield* stepRecallVectorPreparation(config, manifest, Effect.succeed(true));
+      if (outcome.state === 'current') return;
+    }
+    return yield* Effect.die('The test background refresh did not converge.');
+  }).pipe(Effect.provideService(LocalModelStore, store), Effect.provideService(LocalModelRuntime, runtime));
   return {
     fs,
     home,
@@ -219,6 +229,7 @@ const fixture = Effect.gen(function* () {
     output,
     run,
     status,
+    background,
     addExternal,
     embeddedInputs: () => embeddedInputs,
     failEmbedding: () => {
@@ -283,14 +294,64 @@ describe('index storage status', () => {
         const f = yield* fixture;
         yield* f.run();
         const held = yield* heldCompaction(f.home);
+        f.output.length = 0;
+        yield* f.status;
+        const running = EffectArray.findFirst(f.output, EffectString.startsWith(`${manifest.id}\t`));
+        expect(Option.getOrUndefined(running)).toContain('compaction running selected\tread state current');
         yield* held.release;
         expect(yield* Fiber.join(held.fiber)).toMatchObject({state: 'complete'});
         f.output.length = 0;
         yield* f.status;
         const line = EffectArray.findFirst(f.output, EffectString.startsWith(`${manifest.id}\t`));
         expect(Option.getOrUndefined(line)).toMatch(
-          /\tready\t1 chunks\t.+\tfile \d.* (B|KiB|MiB)\treclaimable \d.* (B|KiB|MiB)\tcompaction complete selected$/u,
+          /\tready\t1 chunks\t.+\tfile \d.* (B|KiB|MiB)\treclaimable \d.* (B|KiB|MiB)\tcompaction complete selected\t/u,
         );
+        expect(Option.getOrUndefined(line)).toMatch(
+          /read state current; waiting 0; last refresh full, changed 1, copied chunks 0, reused chunks 0, embedded chunks 1, build \d+ ms, stale unknown$/u,
+        );
+      }),
+    ),
+  );
+
+  effectIt.effect('shows an older generation and counts only memories still present in the mask', () =>
+    test(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.background;
+        yield* f.fs.remove(f.resource);
+        const path = yield* Path.Path;
+        const changed = path.join(path.dirname(f.resource), 'added.md');
+        yield* f.fs.writeFileString(changed, '# Added\n\nThe changed vector is still pending.');
+        yield* expireRecallIndexValidation(f.home, false, [
+          'threadnote://resources/repos/demo/document.md',
+          'threadnote://resources/repos/demo/added.md',
+        ]);
+        yield* loadRecallIndexData(f.config, {includeInactive: false, memoryIds: []});
+        yield* f.status;
+        const line = Option.getOrUndefined(
+          EffectArray.findFirst(f.output, EffectString.startsWith(`${manifest.id}\t`)),
+        );
+        expect(line).toContain('read state serving-older; waiting 1; last refresh full');
+        expect(line).not.toContain('lexical-only reason');
+      }),
+    ),
+  );
+
+  effectIt.effect('does not classify a replaced vector generation as current', () =>
+    test(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.run();
+        const previous = yield* vectorIndexStatus(f.home, manifest);
+        yield* f.fs.writeFileString(f.resource, '# Updated\n\nA different resource now has vectors.');
+        yield* f.run();
+        const current = yield* vectorIndexStatus(f.home, manifest);
+        expect(current.ready).toBe(true);
+        expect(current.generation).not.toBe(previous.generation);
+        const lexical = yield* recallIndexStatus(f.config);
+        const report = yield* readRecallVectorStatusDetails(f.config, manifest, lexical, previous);
+        expect(report.state).toBe('unknown');
+        expect(report.detail).toContain('inspection reason vector generation changed during inspection');
       }),
     ),
   );

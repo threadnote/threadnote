@@ -3,10 +3,11 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {isFileLockTimeout} from '@threadnote/platform/file/lock';
+import {recallIndexStatus} from '@threadnote/recall/index';
 import {loadRecallVectorAuthorizationKey, purgeVectorIndex, vectorIndexStatus} from '@threadnote/recall/vector-index';
 import {recallVectorCompactionRunning, recallVectorStorageReport} from '@threadnote/recall/vector/compaction';
 import {formatBytes} from '../code_graph/materialization_output.js';
-import {prepareRecallIndexes} from '../lifecycle.js';
+import {prepareRecallIndexes, readRecallVectorStatusDetails} from '../lifecycle.js';
 
 class SearchCommandError extends Schema.TaggedError<SearchCommandError, {readonly brand: unique symbol}>()(
   'SearchCommandError',
@@ -59,8 +60,12 @@ export const runIndexRebuild = Effect.fn('index.command.rebuild')(function* (
 export const runIndexStatus = Effect.fn('index.command.status')(function* (config: RuntimeConfig) {
   const catalog = yield* LocalModelCatalog;
   const selection = yield* readModelSelection(config.agentContextHome);
+  const lexical = yield* recallIndexStatus(config, false).pipe(
+    Effect.orElseSucceed(() => ({documentCount: 0, ready: false})),
+  );
   for (const manifest of yield* catalog.list('embedding')) {
     const status = yield* vectorIndexStatus(config.agentContextHome, manifest);
+    const read = yield* readRecallVectorStatusDetails(config, manifest, lexical, status);
     const selected = selectedEmbeddingModelId(selection, 'recall') === manifest.id ? ' selected' : '';
     const report = yield* recallVectorStorageReport(config.agentContextHome, manifest.id);
     const compaction = report?.compaction;
@@ -69,11 +74,10 @@ export const runIndexStatus = Effect.fn('index.command.status')(function* (confi
         ? ''
         : `\tfile ${formatBytes(report.fileBytes + report.walBytes)}\treclaimable ${formatBytes(report.reclaimableBytes)}` +
           `\tcompaction ${compaction === undefined ? 'none' : compaction.state + (compaction.reason ? ` (${compaction.reason})` : '')}`;
-    yield* Console.log(
-      status.ready
-        ? `${manifest.id}\tready\t${status.chunkCount} chunks\t${status.generation}${storage}${selected}`
-        : `${manifest.id}\tunavailable\t${status.reason ?? 'unknown'}${storage}${selected}`,
-    );
+    const index = status.ready
+      ? `${manifest.id}\tready\t${status.chunkCount} chunks\t${status.generation}${storage}${selected}`
+      : `${manifest.id}\tunavailable\t${status.reason ?? 'unknown'}${storage}${selected}`;
+    yield* Console.log(`${index}\t${read.detail}`);
   }
 });
 

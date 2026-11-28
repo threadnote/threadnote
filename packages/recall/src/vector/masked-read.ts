@@ -4,7 +4,7 @@ import {hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {readRecallMaskLexicalSnapshot, type RecallMaskLexicalInputs} from '../index/change_set.js';
 import {useRecallDatabaseReadOnly} from '../index/read_policy.js';
 import type {RecallSqlPredicate} from '../index/scope.js';
-import {recallIndexStatus, type RecallIndexConfig} from '../index.js';
+import {recallIndexStatus, type RecallIndexConfig, type RecallIndexStatus} from '../index.js';
 import {RECALL_MASKED_READ_MAX_URIS, RecallReadyReadBoundary} from '../read_boundary.js';
 import type {recallVectorStorage} from '../vector-index.js';
 import {
@@ -199,7 +199,9 @@ export const readRecallVectorGroupMembers = Effect.fn('recall.readVectorGroupMem
  * decision was servable for another lexical generation, so a publication raced the caller's generation.
  */
 export type RecallVectorMaskRead =
-  {readonly state: 'served'; readonly mask: RecallVectorMask} | {readonly state: 'refused'} | {readonly state: 'moved'};
+  | {readonly state: 'served'; readonly mask: RecallVectorMask}
+  | {readonly state: 'refused'; readonly reason: Extract<RecallMaskedReadDecision, {servable: false}>['reason']}
+  | {readonly state: 'moved'};
 
 export const readRecallVectorMask = (
   storage: VectorMaskStorage,
@@ -222,12 +224,33 @@ export const readRecallVectorMask = (
   }).pipe(
     Effect.map((decision): RecallVectorMaskRead =>
       !decision.servable
-        ? {state: 'refused'}
+        ? {state: 'refused', reason: decision.reason}
         : decision.mask.contentGeneration === read.requestedGeneration
           ? {state: 'served', mask: decision.mask}
           : {state: 'moved'},
     ),
   );
+
+/** Removed memories remain in the exclusion mask but cannot wait for new vectors. */
+export const countCurrentRecallMask = Effect.fn('recall.countCurrentVectorMask')(function* (
+  lexical: RecallIndexStatus,
+  mask: RecallVectorMask,
+) {
+  if (lexical.databasePath === undefined || lexical.generation !== mask.contentGeneration) return undefined;
+  if (mask.uris.length === 0) return 0;
+  return yield* useRecallDatabaseReadOnly(
+    lexical.databasePath,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const [row] = yield* sql.unsafe<{readonly waiting_count: number}>(
+        `SELECT (SELECT COUNT(*) FROM documents WHERE uri IN (${sqlPlaceholders(mask.uris.length)})) AS waiting_count
+         FROM metadata WHERE key = 'content_generation' AND value = ?`,
+        [...mask.uris, mask.contentGeneration],
+      );
+      return row?.waiting_count;
+    }),
+  ).pipe(Effect.orElseSucceed(() => undefined));
+});
 
 /** URI exclusion for the native selection. No masked URIs gives no clause. */
 export function recallVectorMaskPredicate(

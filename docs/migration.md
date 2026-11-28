@@ -106,6 +106,12 @@ Lexical and vector recall are immediately available after install or repair comp
 under `~/.threadnote/indexes/`; canonical memories and resources remain ordinary files under
 `~/.threadnote/data/<account>`.
 
+## Incremental recall vectors
+
+An existing vector database works after the update. If the previous generation lacks an authorization identity, the background refresh uses a full walk.
+`threadnote index status` and `threadnote doctor --dry-run` show `last refresh none` until the first refresh completes.
+If you purge the vector database, the purge also removes its refresh history.
+
 ## Release-engineering reference: 4.7 to 5.0 evidence comparison
 
 This section is release-engineering reference, not a user migration procedure. The optional local release-readiness procedure preserves a separate 4.7 capture and requires the

@@ -71,6 +71,7 @@ import {
   type RecallIndexStatus,
 } from '@threadnote/recall/index';
 import {readSeedManifest, uriSegment} from '@threadnote/workspace/manifest';
+import {lexicalRefreshDisposition} from '@threadnote/recall/mcp/refresh';
 import {deferredCodeAnchorDoctorCheck} from './memory/deferred/code_anchor.js';
 import {migrateThreadnoteStorageLayout} from './migration/layout.js';
 import {applyLegacyInstallationCleanup, planLegacyInstallationCleanup} from './migration/legacy-installations.js';
@@ -82,15 +83,19 @@ import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inferenc
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {
   loadRecallVectorAuthorizationKey,
+  readLastRecallVectorRefresh,
   rebuildVectorIndex,
   VectorCorpusGenerationChanged,
   vectorIndexStatus,
+  type VectorIndexStatus,
 } from '@threadnote/recall/vector-index';
 import {
+  readVectorIndexReport,
   type VectorIndexGenerationReadiness,
+  type VectorIndexReadReport,
   vectorIndexGenerationReadiness,
-  vectorIndexMatchesGeneration,
 } from '@threadnote/recall/vector/semantic-read';
+import type {RecallVectorRefreshRecord} from '@threadnote/recall/diagnostics';
 import {
   codeGraphDoctorCheck,
   type CodeGraphMaintenanceProgress,
@@ -1183,20 +1188,49 @@ function embeddingModelCheck(config: RuntimeConfig) {
   });
 }
 
+function formatRecallVectorStatusDetails(report: VectorIndexReadReport, refresh?: RecallVectorRefreshRecord): string {
+  const detail = `read state ${report.state}; waiting ${report.waitingCount ?? 'unknown'}`;
+  const reason =
+    report.reason === undefined
+      ? ''
+      : `; ${report.state === 'unknown' ? 'inspection reason' : 'lexical-only reason'} ${report.reason}`;
+  if (refresh === undefined) return `${detail}${reason}; last refresh none`;
+  const stale = refresh.staleDurationMilliseconds === undefined ? 'unknown' : `${refresh.staleDurationMilliseconds} ms`;
+  return (
+    `${detail}${reason}; last refresh ${refresh.kind}, changed ${refresh.changedCount}, ` +
+    `copied chunks ${refresh.copiedChunkCount}, reused chunks ${refresh.reusedChunkCount}, ` +
+    `embedded chunks ${refresh.embeddedChunkCount}, build ${refresh.durationMilliseconds} ms, stale ${stale}`
+  );
+}
+
+export const readRecallVectorStatusDetails = Effect.fn('lifecycle.recallVectorStatusDetails')(function* (
+  config: RuntimeConfig,
+  manifest: LocalModelManifest,
+  lexical: RecallIndexStatus,
+  vector: VectorIndexStatus,
+) {
+  const report: VectorIndexReadReport =
+    lexical.ready && lexical.generation !== undefined
+      ? yield* readVectorIndexReport(config, manifest, {...lexical, generation: lexical.generation}, vector)
+      : {
+          state: lexicalRefreshDisposition(lexical) === 'refreshable' ? 'refreshable' : 'structurally-unavailable',
+          reason: 'lexical index unavailable',
+        };
+  const refresh = yield* readLastRecallVectorRefresh(config.agentContextHome, manifest);
+  return {state: report.state, detail: formatRecallVectorStatusDetails(report, refresh)};
+});
+
 function vectorRecallIndexCheck(config: RuntimeConfig, lexicalStatus: RecallIndexStatus) {
   return Effect.gen(function* () {
-    if (!lexicalStatus.ready || !lexicalStatus.generation) {
-      return {
-        detail: 'unavailable until the lexical recall index is ready',
-        name: 'vector recall index',
-        status: 'fail' as const,
-      };
-    }
     const selection = yield* readModelSelection(config.agentContextHome);
     const modelId = selectedEmbeddingModelId(selection, 'recall');
     if (!modelId) {
+      const detail =
+        lexicalStatus.ready && lexicalStatus.generation
+          ? 'unavailable until the core embedding model is installed'
+          : 'unavailable until the lexical recall index is ready';
       return {
-        detail: 'unavailable until the core embedding model is installed',
+        detail: `${detail}\n  ${formatRecallVectorStatusDetails({state: 'structurally-unavailable', reason: 'no embedding model selected'})}`,
         name: 'vector recall index',
         status: 'fail' as const,
       };
@@ -1204,31 +1238,29 @@ function vectorRecallIndexCheck(config: RuntimeConfig, lexicalStatus: RecallInde
     const catalog = yield* LocalModelCatalog;
     const manifest = yield* catalog.get(modelId);
     const status = yield* vectorIndexStatus(config.agentContextHome, manifest);
-    const currentGeneration =
-      status.ready &&
-      (yield* vectorIndexMatchesGeneration(
-        config.agentContextHome,
-        manifest,
-        lexicalStatus.generation,
-        yield* loadRecallVectorAuthorizationKey(config),
-      ));
+    const read = yield* readRecallVectorStatusDetails(config, manifest, lexicalStatus, status);
+    // Keep the primary check line stable for the development installer's failure classifier.
+    const check = (detail: string, severity: DoctorCheck['status']): DoctorCheck => ({
+      detail: `${detail}\n  ${read.detail}`,
+      name: 'vector recall index',
+      status: severity,
+    });
+    if (!lexicalStatus.ready || !lexicalStatus.generation)
+      return check('unavailable until the lexical recall index is ready', 'fail');
+    if (read.state === 'current')
+      return check(`${status.chunkCount} chunk(s); ${manifest.id}; generation ${status.generation ?? 'unknown'}`, 'ok');
+    if (read.state === 'unknown') return check(`${manifest.id}; run \`threadnote doctor\` again`, 'warn');
+    if (read.state === 'compaction') return check(`${manifest.id}; lexical recall available during compaction`, 'warn');
     const demand = yield* readRecallEmbeddingDemand(config).pipe(Effect.option);
     const queued = Option.isSome(demand) && demand.value?.desired !== undefined;
-    const readiness = yield* vectorIndexGenerationReadiness(
-      config.agentContextHome,
-      manifest,
-      lexicalStatus.generation,
-      yield* loadRecallVectorAuthorizationKey(config),
-    );
-    if (!currentGeneration && queued && (status.ready || status.reason === 'not built') && readiness !== 'corrupt') {
+    if (queued && read.state !== 'structurally-unavailable') {
       const observed = yield* recallEmbeddingObservedState(config, recallEmbeddingModelIdentity(manifest));
       const control = yield* recallEmbeddingWorkerControlState(config.agentContextHome);
       if (control.state === 'legacy-owner' || control.state === 'unavailable')
-        return {
-          detail: `${manifest.id}; ${control.state === 'legacy-owner' ? 'blocked by a legacy or unverified worker; wait for its owner to release it and restart the compatible runtime' : 'worker control unavailable; run `threadnote repair`'}; lexical recall available`,
-          name: 'vector recall index',
-          status: 'fail' as const,
-        };
+        return check(
+          `${manifest.id}; ${control.state === 'legacy-owner' ? 'blocked by a legacy or unverified worker; wait for its owner to release it and restart the compatible runtime' : 'worker control unavailable; run `threadnote repair`'}; lexical recall available`,
+          'fail',
+        );
       const detail =
         observed.state === 'running'
           ? 'background embeddings running'
@@ -1241,29 +1273,16 @@ function vectorRecallIndexCheck(config: RuntimeConfig, lexicalStatus: RecallInde
                 : observed.state === 'blocked' || observed.state === 'corrupt'
                   ? `${observed.state}: ${observed.reason ?? 'inspect embedding demand'}; run \`threadnote repair\``
                   : 'queued for a safe background capacity slot';
-      return {
-        detail: `${manifest.id}; ${detail}; lexical recall available`,
-        name: 'vector recall index',
-        status: observed.state === 'blocked' || observed.state === 'corrupt' ? ('fail' as const) : ('warn' as const),
-      };
+      return check(
+        `${manifest.id}; ${detail}; lexical recall available`,
+        observed.state === 'blocked' || observed.state === 'corrupt' ? 'fail' : 'warn',
+      );
     }
-    return status.ready
-      ? currentGeneration
-        ? {
-            detail: `${status.chunkCount} chunk(s); ${manifest.id}; generation ${status.generation ?? 'unknown'}`,
-            name: 'vector recall index',
-            status: 'ok' as const,
-          }
-        : {
-            detail: `${manifest.id}; stale; canonical documents changed; run \`threadnote repair\``,
-            name: 'vector recall index',
-            status: 'fail' as const,
-          }
-      : {
-          detail: `${manifest.id}; ${status.reason ?? 'not built'}; run \`threadnote index rebuild\``,
-          name: 'vector recall index',
-          status: 'fail' as const,
-        };
+    if (read.state === 'serving-older')
+      return check(`${manifest.id}; semantic recall serves an older generation`, 'warn');
+    if (status.ready)
+      return check(`${manifest.id}; stale; canonical documents changed; run \`threadnote repair\``, 'fail');
+    return check(`${manifest.id}; ${status.reason ?? 'not built'}; run \`threadnote index rebuild\``, 'fail');
   });
 }
 

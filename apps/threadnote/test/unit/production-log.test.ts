@@ -633,6 +633,7 @@ describe('recall production diagnostics', () => {
         reusedChunkCount: 2,
         embeddedChunkCount: 4,
         durationMilliseconds: 12,
+        staleDurationMilliseconds: 69,
       } as const;
       yield* emitRecallDiagnostic(home, {event: 'recall.vector-build', scope: 'active', ...build});
       const content = yield* fs.readFileString(productionLogPath(path, home));

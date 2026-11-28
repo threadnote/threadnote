@@ -214,6 +214,22 @@ threadnote index status
 threadnote index verify
 ```
 
+`threadnote index status` and `threadnote doctor --dry-run` report the vector index read state.
+
+| State                      | Meaning                                                                                                                          |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `current`                  | The vector generation covers the current lexical index.                                                                          |
+| `serving-older`            | Recall uses an earlier vector generation for unchanged memories. Changed and new memories stay available through lexical recall. |
+| `refreshable`              | Recall uses lexical results until a refresh can publish the vectors.                                                             |
+| `compaction`               | Recall uses lexical results if the vector database cannot serve them during compaction.                                          |
+| `structurally-unavailable` | A required index or model is unavailable. Check the doctor report for a repair action.                                           |
+
+The `waiting` count gives the number of known memories that wait for vectors. It shows `unknown` when the index cannot verify the count.
+If a vector publication overlaps an inspection, the read state can show `unknown`. Run the command again.
+`last refresh` shows the build kind, memory count, chunk counts, and build duration.
+The stale duration is the time from the first uncovered lexical publication to the vector publication.
+It shows `unknown` if the change log cannot establish that time.
+
 The initial model download requires HTTPS access to the manifest’s pinned repository revision and resumes after an
 interruption. Repeat installs preserve a verified existing model. A checksum mismatch deletes the invalid partial file
 and never activates it. Lexical recall remains available if native inference is temporarily unavailable, while

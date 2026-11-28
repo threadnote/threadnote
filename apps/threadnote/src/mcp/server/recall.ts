@@ -125,6 +125,7 @@ import {
 } from '@threadnote/recall/warning';
 import {withProductionPhaseTiming} from '../../effect/production_log.js';
 import {withAnonymousTelemetryPhase} from '../../effect/telemetry.js';
+import {recordRecallVectorRefreshAnonymousTelemetry} from '../../telemetry/recall_vector_refresh.js';
 import type {ApplyMemoryCandidateInput} from '../../memory/candidate_apply_contract.js';
 import {
   buildRecallIndexSelectionCandidates,
@@ -1247,6 +1248,7 @@ function runRecallTool(
         let recallSections = yield* prepareSections();
         const baselineSections = recallSections;
         const baselineNoticeCount = sections.length;
+        let observedReadState: typeof semanticResult.readState;
         let semanticPhaseOutcome: 'success' | 'unavailable' | 'timed-out' | 'failure' = 'unavailable';
         yield* withMcpProgressHeartbeat(
           progress,
@@ -1286,6 +1288,7 @@ function runRecallTool(
                           ? 'timed-out'
                           : 'failure';
                   semanticResult = semanticRetrieval.result;
+                  observedReadState = semanticResult.readState;
                   appendSemanticWarning(semanticResult);
                   yield* warmRecallReranker(
                     config.agentContextHome,
@@ -1433,6 +1436,7 @@ function runRecallTool(
           ),
           progressTiming.heartbeatMilliseconds,
         );
+        yield* recordRecallVectorRefreshAnonymousTelemetry(config.agentContextHome, observedReadState);
         const {semanticSection, exactTail} = recallSections;
         if (semanticSection) sections.push(semanticSection);
         if (exactTail) sections.push(exactTail);

@@ -90,9 +90,9 @@ const DashboardSchema = Schema.Struct({
 const basePredicates = ['resource.service.name = "threadnote"', 'span:name = "threadnote.anonymous-diagnostic"'];
 const canaryExclusionPredicate = 'resource.service.version != "0.0.0-canary"';
 const graphSchemaPredicate =
-  '(resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6)';
+  '(resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7)';
 const boundedGraphSchemaPredicate =
-  'resource.threadnote.telemetry.schema_version >= 2 && resource.threadnote.telemetry.schema_version <= 6';
+  'resource.threadnote.telemetry.schema_version >= 2 && resource.threadnote.telemetry.schema_version <= 7';
 
 const graphLifecyclePredicates = [
   canaryExclusionPredicate,
@@ -103,14 +103,15 @@ const graphLifecyclePredicates = [
 ];
 
 const genericSchemaPredicate =
-  '(resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6)';
+  '(resource.threadnote.telemetry.schema_version = 1 || resource.threadnote.telemetry.schema_version = 2 || resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7)';
 const autoUpdateSchemaPredicate =
-  '(resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6)';
+  '(resource.threadnote.telemetry.schema_version = 3 || resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7)';
 const querySchemaPredicate =
-  '(resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6)';
+  '(resource.threadnote.telemetry.schema_version = 4 || resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7)';
 const contextBriefSchemaPredicate =
-  '(resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6)';
-const schemaV6Predicate = 'resource.threadnote.telemetry.schema_version = 6';
+  '(resource.threadnote.telemetry.schema_version = 5 || resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7)';
+const schemaV6Predicate =
+  '(resource.threadnote.telemetry.schema_version = 6 || resource.threadnote.telemetry.schema_version = 7)';
 const contextBriefOperationPredicate =
   '(span.threadnote.operation = "context_brief" || span.threadnote.operation = "context.brief")';
 const finalizationPhasePredicate = 'span.threadnote.phase = "memory.code-anchor-finalization"';
@@ -894,20 +895,18 @@ describe('Threadnote Grafana dashboard', () => {
         }
         for (const source of [commands, telemetryDocs, websiteDocs]) expect(source).toContain('delta');
         expect(telemetryDocs).toContain('https://telemetry.threadnote.io/v1/traces');
-        expect(telemetryDocs).toContain('requires consent version 6');
-        expect(telemetryDocs).toMatch(
-          /version 1, version 2, version 3, version 4, or version 5\s+opt-in fails closed/u,
-        );
+        expect(telemetryDocs).toContain('requires consent version 7');
+        expect(telemetryDocs).toContain('autoAccept: true');
         for (const excludedQueryDetail of ['query text', 'symbol names', 'exact file/symbol/edge counts']) {
           expect(telemetryDocs).toContain(excludedQueryDetail);
         }
-        expect(gatewayReadme).toContain('Existing operation panels admit schema versions 1, 2, 3, 4, 5, and 6');
-        expect(gatewayReadme).toContain('Graph-build panels admit versions 2, 3, 4, 5, and 6');
-        expect(gatewayReadme).toContain('Graph-query panels admit versions 4, 5, and 6');
-        expect(gatewayReadme).toContain('before sending sixteen traces');
-        expect(productionRunbook).toContain('gateway, sixteen-trace/six-version canary, and dashboard gates');
-        expect(productionRunbook).toContain('until all sixteen stored protobufs');
-        expect(productionRunbook).toMatch(/consent-v1\/v2\/v3\/v4\/v5 configurations\s+must fail closed/u);
+        expect(gatewayReadme).toContain('Existing operation panels admit schema versions 1, 2, 3, 4, 5, 6, and 7');
+        expect(gatewayReadme).toContain('Graph-build panels admit versions 2, 3, 4, 5, 6, and 7');
+        expect(gatewayReadme).toContain('Graph-query panels admit versions 4, 5, 6, and 7');
+        expect(gatewayReadme).toContain('seventeen traces');
+        expect(productionRunbook).toContain('gateway, seventeen-trace/seven-version canary, and dashboard gates');
+        expect(productionRunbook).toContain('until all seventeen stored protobufs');
+        expect(productionRunbook).toContain('consent-v7');
         expect(commands).toContain('endpoint === DEFAULT_TELEMETRY_ENDPOINT');
       }),
     );

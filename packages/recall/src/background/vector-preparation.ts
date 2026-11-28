@@ -146,8 +146,8 @@ export const recallVectorTarget = Effect.fn('recall.vectorTarget')(function* <E,
       const generation = `${yield* Clock.currentTimeMillis}-${EffectString.slice(0, 8)(yield* (yield* SecureRandom.SecureRandom).uuidV4())}`;
       yield* sql`INSERT INTO vector_generations (generation,job_id,corpus_generation,model_id,model_sha256,dimensions,embedding_recipe,chunker_version,normalized,chunk_count,state,created_at,scope_mapping_version)
       VALUES (${generation},${delta ? deltaJob : job},${source.generation},${manifest.id},${manifest.sha256},${manifest.dimensions},${recallVectorStorage.recipe(manifest)},${RECALL_CHUNKER_VERSION},'l2',0,'building',${DateTime.formatIso(yield* DateTime.now)},1)`;
-      yield* sql`INSERT INTO idle_recall_targets (generation,phase,base_generation,copy_stage)
-      VALUES (${generation},'metadata',${delta ? delta.base.generation : null},${delta ? 'chunks' : null})`;
+      yield* sql`INSERT INTO idle_recall_targets (generation,phase,base_generation,copy_stage,embedded_chunks)
+      VALUES (${generation},'metadata',${delta ? delta.base.generation : null},${delta ? 'chunks' : null},0)`;
       for (const uri of delta ? delta.changed : [])
         yield* sql`INSERT INTO idle_recall_delta_uris (generation,uri) VALUES (${generation},${uri})`;
       // The copy must end with exactly the base chunks and aliases outside the changed set.

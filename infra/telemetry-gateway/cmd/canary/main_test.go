@@ -17,7 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestCanaryPostsAndProvesFrozenV1ThroughV5AndCurrentV6(t *testing.T) {
+func TestCanaryPostsAndProvesFrozenV1ThroughV6AndCurrentV7(t *testing.T) {
 	started := time.Unix(1_700_000_000, 0)
 	traces := canaryTestTraces()
 	byTraceID := make(map[string]canaryTrace, len(traces))
@@ -409,10 +409,21 @@ func TestStoredTraceParserTreatsOnlyAnEmptyTraceAsPending(t *testing.T) {
 	}
 }
 
+func TestStoredRecallCompletionPreservesV7Buckets(t *testing.T) {
+	trace := fixedTrace(7, canaryTraceRecallCompletion)
+	state, err := inspectStoredTrace(tempoResponse(buildEnvelope(trace, time.Now())), trace)
+	if err != nil || state != storedTraceMatched {
+		t.Fatalf("state = %d, error = %v, want matched", state, err)
+	}
+}
+
 func fixedTrace(schemaVersion uint64, kind canaryTraceKind) canaryTrace {
 	marker := byte(1)
 	sessionID := "tns_000102030405060708090a0b0c0d0e0f"
 	switch {
+	case schemaVersion == 7 && kind == canaryTraceRecallCompletion:
+		marker = 17
+		sessionID = "tns_17171717171717171717171717171717"
 	case schemaVersion == 6 && kind == canaryTraceContextCodeLinkedMemoryCheckpoint:
 		marker = 14
 		sessionID = "tns_d0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
@@ -488,6 +499,7 @@ func canaryTestTraces() []canaryTrace {
 		fixedTrace(6, canaryTraceContextCodeLinkedMemoryCheckpoint),
 		fixedTrace(6, canaryTraceContextCompletion),
 		fixedTrace(6, canaryTraceCodeAnchorFinalizationCheckpoint),
+		fixedTrace(7, canaryTraceRecallCompletion),
 	}
 }
 

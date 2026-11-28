@@ -48,6 +48,14 @@ export interface RecallVectorBuildOutcome {
   readonly embeddedChunkCount: number;
 }
 
+/** The counts and elapsed times of a published refresh. */
+export interface RecallVectorRefreshRecord extends RecallVectorBuildOutcome {
+  /** From target creation to activation; a build can span many steps and processes. */
+  readonly durationMilliseconds: number;
+  /** From the first uncovered lexical publication, if the change log can prove it. */
+  readonly staleDurationMilliseconds?: number;
+}
+
 /** Counts, closed reasons and error values only; the log writer reduces `error` to a safe type label. */
 export type RecallDiagnostic =
   | (RecallLexicalRefreshOutcome & {
@@ -55,11 +63,9 @@ export type RecallDiagnostic =
       readonly scope: RecallDiagnosticScope;
       readonly durationMilliseconds: number;
     })
-  | (RecallVectorBuildOutcome & {
+  | (RecallVectorRefreshRecord & {
       readonly event: 'recall.vector-build';
       readonly scope: RecallDiagnosticScope;
-      /** From target creation to activation; a build can span many steps and processes. */
-      readonly durationMilliseconds: number;
     })
   | {
       readonly event: 'recall.lexical-refresh-failed';

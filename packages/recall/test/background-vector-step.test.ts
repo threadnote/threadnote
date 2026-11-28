@@ -19,9 +19,12 @@ import {RECALL_CHUNKER_VERSION} from '../src/chunker.js';
 import * as EffectString from 'effect/String';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
+import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {Database} from 'bun:sqlite';
 import {Array as EffectArray, Clock, Effect, FileSystem, Layer, Option, Path} from 'effect';
 import type {SecureRandom} from 'effect/crypto';
+import {TestClock} from 'effect/testing';
 import {describe, expect, vi} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -36,11 +39,20 @@ import {loadRecallIndexData, expireRecallIndexValidation} from '../src/index.js'
 import {
   vectorIndexStatus,
   ensureVectorIndex,
+  rebuildVectorIndex,
+  readLastRecallVectorRefresh,
+  purgeVectorIndex,
   vectorIndexDatabaseFilename,
   recallVectorStorage,
 } from '../src/vector-index.js';
 import {vectorIndexGenerationReadiness, selectedSemanticScores} from '../src/vector/semantic-read.js';
 import {runRecallVectorPreparationBatch, stepRecallVectorPreparation} from '../src/background/vector-step.js';
+import {
+  confirmRecallVectorRefresh,
+  readLastRecallVectorRefreshRecord,
+  recallVectorLockPath,
+  recordRecallVectorRefresh,
+} from '../src/vector/storage.js';
 
 const manifest = {
   ...Option.getOrThrow(EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.role === 'embedding')),
@@ -123,8 +135,10 @@ const fixture = Effect.gen(function* () {
     generate: () => Effect.die('unexpected generation'),
     rerank: () => Effect.die('unexpected rerank'),
   });
-  const step = () =>
-    stepRecallVectorPreparation(config, manifest, Effect.succeed(true)).pipe(
+  const step = (
+    stillDesired: Effect.Effect<boolean, unknown, FileSystem.FileSystem | Path.Path> = Effect.succeed(true),
+  ) =>
+    stepRecallVectorPreparation(config, manifest, stillDesired).pipe(
       Effect.provideService(LocalModelStore, store),
       Effect.provideService(LocalModelRuntime, runtime),
     );
@@ -166,6 +180,169 @@ const fixture = Effect.gen(function* () {
 });
 
 describe('resumable recall vector preparation', () => {
+  effectIt.effect('retains full and delta refresh counts and durations across retirement', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      const second = path.join(path.dirname(f.resource), 'stable.md');
+      yield* f.fs.writeFileString(f.resource, 'First document');
+      yield* f.fs.writeFileString(second, 'Independent stable document');
+      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toBeUndefined();
+
+      yield* TestClock.setTime(5_000);
+      yield* f.step();
+      yield* TestClock.setTime(7_000);
+      yield* f.finish;
+      expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toEqual({
+        kind: 'full',
+        changedCount: 2,
+        copiedChunkCount: 0,
+        reusedChunkCount: 0,
+        embeddedChunkCount: 2,
+        durationMilliseconds: 2_000,
+      });
+
+      yield* TestClock.setTime(8_000);
+      yield* f.fs.writeFileString(f.resource, 'A different body for the first document');
+      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      yield* TestClock.setTime(10_000);
+      yield* f.step();
+      yield* TestClock.setTime(14_000);
+      yield* f.finish;
+      expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toEqual({
+        kind: 'delta',
+        changedCount: 1,
+        copiedChunkCount: 1,
+        reusedChunkCount: 0,
+        embeddedChunkCount: 1,
+        durationMilliseconds: 4_000,
+        staleDurationMilliseconds: 6_000,
+      });
+
+      yield* TestClock.setTime(15_000);
+      yield* forceRecallFullVectorWalk(f.config);
+      yield* f.step();
+      yield* TestClock.setTime(18_000);
+      yield* f.finish;
+      expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toEqual({
+        kind: 'full',
+        changedCount: 2,
+        copiedChunkCount: 0,
+        reusedChunkCount: 2,
+        embeddedChunkCount: 0,
+        durationMilliseconds: 3_000,
+      });
+
+      yield* purgeVectorIndex(f.home, manifest.id);
+      expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toBeUndefined();
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect('removes a refresh record when the post-activation fence rejects the publication', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.fs.writeFileString(f.resource, 'One short document.');
+      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      yield* f.stepUntil('embed');
+      const pendingRecord = Effect.acquireUseRelease(
+        Effect.sync(() => new Database(f.filename, {readonly: true})),
+        db =>
+          Effect.sync(() => {
+            if (!db.query("SELECT 1 FROM sqlite_master WHERE name = 'recall_vector_refreshes'").get()) return false;
+            return db.query('SELECT 1 FROM recall_vector_refreshes WHERE verified = 0').get() != null;
+          }),
+        db => Effect.sync(() => db.close()),
+      );
+      const modelLock = recallVectorLockPath(yield* Path.Path, f.home, manifest.id);
+      const stillDesired = Effect.gen(function* () {
+        if (!(yield* pendingRecord)) return true;
+        expect(yield* f.fs.exists(modelLock)).toBe(true);
+        expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toBeUndefined();
+        return false;
+      });
+      expect(yield* f.step(stillDesired).pipe(Effect.result)).toMatchObject({
+        _tag: 'Failure',
+        failure: {_tag: 'RecallVectorPreparationChanged'},
+      });
+      expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toBeUndefined();
+      expect(yield* pendingRecord).toBe(false);
+      yield* f.finish;
+      expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toMatchObject({
+        kind: 'full',
+        embeddedChunkCount: 1,
+      });
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect('bounds abandoned refresh rows without pruning verified history', () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const record = {
+        kind: 'full',
+        copiedChunkCount: 0,
+        reusedChunkCount: 0,
+        embeddedChunkCount: 1,
+        durationMilliseconds: 1,
+      } as const;
+      for (let changedCount = 1; changedCount <= 16; changedCount++) {
+        const sequence = yield* recordRecallVectorRefresh(sql, {...record, changedCount});
+        yield* confirmRecallVectorRefresh(sql, sequence);
+      }
+      for (let changedCount = 17; changedCount <= 33; changedCount++) {
+        yield* recordRecallVectorRefresh(sql, {...record, changedCount});
+      }
+      expect(yield* readLastRecallVectorRefreshRecord(sql)).toEqual({...record, changedCount: 16});
+      expect(
+        yield* sql`SELECT verified, COUNT(*) AS count FROM recall_vector_refreshes
+        GROUP BY verified ORDER BY verified`,
+      ).toEqual([
+        {verified: 0, count: 16},
+        {verified: 1, count: 16},
+      ]);
+    }).pipe(provideFixtureLayer(SqliteClient.layer({filename: ':memory:'}))),
+  );
+
+  effectIt.effect('counts embedded chunks from a committed foreground batch after an interruption', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      let inputs = 0;
+      const runtime = LocalModelRuntime.of({
+        ...f.runtime,
+        embedMany: ({inputs: batch}) =>
+          Effect.sync(() => {
+            inputs += batch.length;
+            return EffectArray.map(batch, embeddingForInput);
+          }),
+      });
+      const rebuild = (interruptAfterBatch: boolean) =>
+        rebuildVectorIndex(f.config, manifest, f.index.candidates, {
+          corpusGeneration: f.index.generation,
+          onProgress: progress =>
+            interruptAfterBatch && progress.phase === 'embedding' && progress.completed > 0
+              ? Effect.interrupt
+              : Effect.void,
+        }).pipe(Effect.provideService(LocalModelStore, f.store), Effect.provideService(LocalModelRuntime, runtime));
+
+      expect(yield* Effect.exit(rebuild(true))).toMatchObject({_tag: 'Failure'});
+      const alreadyEmbedded = inputs;
+      expect(alreadyEmbedded).toBeGreaterThan(0);
+      expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toBeUndefined();
+
+      const result = yield* rebuild(false);
+      expect(inputs).toBe(alreadyEmbedded);
+      expect(result).toMatchObject({
+        embeddedChunkCount: alreadyEmbedded,
+        reusedChunkCount: 0,
+      });
+      expect(yield* readLastRecallVectorRefresh(f.home, manifest)).toMatchObject({
+        kind: 'full',
+        embeddedChunkCount: alreadyEmbedded,
+        reusedChunkCount: 0,
+      });
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
   effectIt.effect('stops preparation at the time budget and omits an unfinished resolution denominator', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -249,11 +426,12 @@ describe('resumable recall vector preparation', () => {
     Effect.gen(function* () {
       const f = yield* fixture;
       const path = yield* Path.Path;
-      // Memories carry a content hash; more of them than one batch of copied rows.
+      // Each document has one chunk and one alias. 51 documents cross the 100-row copy boundary.
+      const documentCount = 51;
       yield* f.fs.remove(f.resource);
       const memories = path.join(f.home, 'data/local/user/test/memories/durable/projects/threadnote');
       yield* f.fs.makeDirectory(memories, {recursive: true});
-      for (let index = 0; index < 120; index++)
+      for (let index = 0; index < documentCount; index++)
         yield* f.fs.writeFileString(
           path.join(memories, `${index}.md`),
           formatMemoryDocument(
@@ -273,8 +451,8 @@ describe('resumable recall vector preparation', () => {
       yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
       const reads = yield* recordRecallBodyReads;
       yield* f.finish;
-      expect(reads).toHaveLength(120);
-      expect(new Set(reads).size).toBe(120);
+      expect(reads).toHaveLength(documentCount);
+      expect(new Set(reads).size).toBe(documentCount);
       const identities = Effect.sync(() => {
         const db = new Database(f.filename, {readonly: true});
         try {
@@ -284,24 +462,43 @@ describe('resumable recall vector preparation', () => {
           db.close();
         }
       });
-      expect(yield* identities).toBe(120);
+      expect(yield* identities).toBe(documentCount);
       const published = yield* vectorSnapshot(f.filename);
       yield* forceRecallFullVectorWalk(f.config);
       reads.length = 0;
       const inputs = f.inputs();
-      let hydrateSteps = 0;
+      const copiedCounts = new Set<number>();
+      let reachedCurrent = false;
       for (let turn = 0; turn < 500; turn++) {
         const result = yield* f.step();
-        if (result.phase === 'hydrate') hydrateSteps++;
-        if (result.state === 'current') break;
+        if (result.phase === 'hydrate') {
+          copiedCounts.add(
+            yield* Effect.acquireUseRelease(
+              Effect.sync(() => new Database(f.filename, {readonly: true})),
+              db =>
+                Effect.sync(
+                  () =>
+                    db
+                      .query<{count: number}, [string]>(
+                        'SELECT COUNT(*) AS count FROM vector_chunks WHERE generation = ?',
+                      )
+                      .get(result.generation)!.count,
+                ),
+              db => Effect.sync(() => db.close()),
+            ),
+          );
+        }
+        if (result.state === 'current') {
+          reachedCurrent = true;
+          break;
+        }
       }
+      expect(reachedCurrent).toBe(true);
       expect(reads).toEqual([]);
       expect(f.inputs()).toBe(inputs);
-      // Bounded batches: one chunk and one alias row per document, at most 100 rows per step.
-      expect(hydrateSteps).toBeGreaterThanOrEqual(3);
-      expect(hydrateSteps).toBeLessThan(10);
+      expect([...copiedCounts]).toEqual([50, 51]);
       expect(yield* vectorSnapshot(f.filename)).toEqual(published);
-      expect(yield* identities).toBe(120);
+      expect(yield* identities).toBe(documentCount);
     }).pipe(provideFixtureLayer(platform)),
   );
   effectIt.effect('batches lightweight checkpoints while making at most one native request', () =>
@@ -1044,11 +1241,18 @@ function cleanBuildEquivalent(words: readonly string[], repeats: number) {
       ...f.runtime,
       embedMany: ({inputs}) => Effect.succeed(EffectArray.map(inputs, embeddingForInput)),
     });
-    yield* ensureVectorIndex({agentContextHome: cleanHome}, manifest, index.candidates, {
+    const built = yield* ensureVectorIndex({agentContextHome: cleanHome}, manifest, index.candidates, {
       corpusGeneration: index.generation,
     }).pipe(Effect.provideService(LocalModelStore, f.store), Effect.provideService(LocalModelRuntime, cleanRuntime));
     const path = yield* Path.Path;
     const cleanFilename = path.join(cleanHome, 'indexes/vectors', manifest.id, vectorIndexDatabaseFilename());
     expect(yield* vectorSnapshot(f.filename)).toEqual(yield* vectorSnapshot(cleanFilename));
+    expect(yield* readLastRecallVectorRefresh(cleanHome, manifest)).toMatchObject({
+      kind: 'full',
+      changedCount: index.candidates.length,
+      copiedChunkCount: 0,
+      reusedChunkCount: 0,
+      embeddedChunkCount: built.chunkCount,
+    });
   }).pipe(provideFixtureLayer(platform));
 }

@@ -16,7 +16,7 @@ import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Deferred, Effect, Fiber, FileSystem, Option, Path, Ref, Schema} from 'effect';
+import {Cause, Deferred, Effect, Fiber, FileSystem, Metric, Option, Path, Ref, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as LockBoundary from '@threadnote/platform/file/lock';
 import * as RefreshBoundary from '@threadnote/recall/mcp/refresh';
@@ -47,7 +47,13 @@ import {
   scheduleMcpRecallBackgroundRefresh,
 } from '@threadnote/recall/mcp/refresh';
 import {prepareRecallSections} from '@threadnote/recall/runtime';
-import {loadMcpRecallSemanticScoresResult, loadRecallSemanticScoresResult} from '@threadnote/recall/semantic_scores';
+import {
+  loadMcpRecallSemanticScoresResult,
+  loadRecallSemanticScoresResult,
+  recallSemanticReadCount,
+} from '@threadnote/recall/semantic_scores';
+import * as RecallCompaction from '@threadnote/recall/vector/compaction';
+import * as SemanticReadBoundary from '@threadnote/recall/vector/semantic-read';
 import {
   ensureVectorIndex,
   loadRecallVectorAuthorizationKey,
@@ -222,6 +228,66 @@ const concurrentRefreshFixture = (callers: number, failOneEnqueue = false) =>
   );
 
 describe('MCP recall background vector refresh', () => {
+  effectIt.effect('counts each semantic read state once across CLI and MCP results', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* makeDetachedRefreshFixtureHome(fs, 'threadnote-semantic-read-count-');
+      const config = {account: 'local', agentContextHome: home, user: 'tester'};
+      const runtime = fakeRuntime((inputs, dimensions) =>
+        Effect.succeed(EffectArray.map(inputs, () => unitVector(dimensions))),
+      );
+      yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+      yield* Effect.gen(function* () {
+        const snapshot = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(SemanticReadBoundary, 'selectedSemanticScoreSnapshot')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+        const compaction = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(RecallCompaction, 'semanticReadDuringCompaction')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+        const corpusGeneration = 'fixture-generation';
+        const scores = new Map<string, number>();
+        snapshot.mockReturnValueOnce(Effect.succeed({corpusGeneration, readiness: 'current', scores}));
+        const current = yield* loadRecallSemanticScoresResult(config, 'alpha', 5);
+        expect(current.readState).toBe('current');
+
+        snapshot.mockReturnValueOnce(Effect.succeed({corpusGeneration, readiness: 'serving-older', scores}));
+        const older = yield* loadMcpRecallSemanticScoresResult(config, 'alpha', 5);
+        expect(older.result.readState).toBe('serving-older');
+
+        snapshot.mockReturnValueOnce(Effect.succeed({corpusGeneration, readiness: 'stale', scores: undefined}));
+        const refreshable = yield* loadMcpRecallSemanticScoresResult(config, 'alpha', 5);
+        expect(refreshable.result.readState).toBe('refreshable');
+
+        snapshot.mockReturnValueOnce(Effect.die('read failed during compaction'));
+        compaction.mockReturnValue(Effect.succeed(true));
+        const duringCompaction = yield* loadMcpRecallSemanticScoresResult(config, 'alpha', 5);
+        expect(duringCompaction.result.readState).toBe('compaction');
+
+        const count = yield* Metric.value(recallSemanticReadCount);
+        expect(count.occurrences).toEqual(
+          new Map([
+            ['current', 1],
+            ['serving-older', 1],
+            ['refreshable', 1],
+            ['compaction', 1],
+          ]),
+        );
+      }).pipe(
+        Effect.provideService(LocalModelRuntime, runtime),
+        Effect.provideService(LocalModelStore, installedModelStore(home)),
+        Effect.provideService(Metric.MetricRegistry, new Map()),
+        Effect.provideService(
+          RecallReadyReadBoundary,
+          RecallReadyReadBoundary.of({
+            read: () => Effect.die('Unexpected worker call'),
+          }),
+        ),
+      );
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('retains a new event when canonical invalidation makes the closing lexical status stale', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

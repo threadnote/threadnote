@@ -219,6 +219,7 @@ const ProductionLogDiagnosticEntry = Schema.Union([
     reusedChunkCount: diagnosticCount,
     embeddedChunkCount: diagnosticCount,
     durationMilliseconds: diagnosticCount,
+    staleDurationMilliseconds: Schema.optionalKey(diagnosticCount),
   }),
   Schema.Struct({
     ...diagnosticBase,

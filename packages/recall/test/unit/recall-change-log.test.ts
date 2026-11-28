@@ -16,7 +16,7 @@ import {loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/reca
 import {
   RECALL_CHANGE_LOG_MAX_PUBLICATIONS,
   readRecallChangesSince,
-  readRecallFirstPublicationAfter,
+  readRecallRefreshChanges,
   recordRecallChangeLog,
 } from '../../src/index/change_log.js';
 import {initializeRecallDatabase} from '../../src/index/schema.js';
@@ -175,13 +175,13 @@ effectIt.effect('stamps each header with the publication time, also with zero en
         {published_at: 5_000, entry_count: 0},
       ]);
       expect(yield* readRecallChangesSince(sql, 'g1')).toEqual({state: 'known', contentGeneration: 'g2', changed: []});
-      expect(yield* readRecallFirstPublicationAfter(sql, 'g1')).toEqual(Option.some({publishedAtMillis: 5_000}));
+      expect(yield* readRecallRefreshChanges(sql, 'g1')).toEqual({changedCount: 0, publishedAtMillis: 5_000});
       // An unchanged generation writes no header and keeps the chain.
       yield* TestClock.setTime(9_000);
       yield* publish('g2', [], []);
       expect(yield* sql`SELECT COUNT(*) AS count FROM recall_change_publications`).toEqual([{count: 2}]);
-      expect(yield* readRecallFirstPublicationAfter(sql, 'g1')).toEqual(Option.some({publishedAtMillis: 5_000}));
-      expect(yield* readRecallFirstPublicationAfter(sql, 'g0')).toEqual(Option.none());
+      expect(yield* readRecallRefreshChanges(sql, 'g1')).toEqual({changedCount: 0, publishedAtMillis: 5_000});
+      expect(yield* readRecallRefreshChanges(sql, 'g0')).toBeUndefined();
     }),
   ),
 );

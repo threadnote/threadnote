@@ -367,10 +367,12 @@ describe('delta vector generation', () => {
       for (const table of buildTables)
         expect(yield* f.query(`SELECT COUNT(*) AS count FROM ${table}`)).toEqual([{count: 0}]);
       const build = {event: 'recall.vector-build', scope: 'active', durationMilliseconds: 0} as const;
+      const delta = {...build, kind: 'delta', staleDurationMilliseconds: 0} as const;
+      // An initial walk counts the indexed documents. Later records count distinct lexical changes.
       expect(f.diagnostics).toEqual([
-        {...build, kind: 'full', changedCount: 0, copiedChunkCount: 0, reusedChunkCount: 0, embeddedChunkCount: 134},
-        {...build, kind: 'delta', changedCount: 1, copiedChunkCount: 133, reusedChunkCount: 0, embeddedChunkCount: 0},
-        {...build, kind: 'delta', changedCount: 4, copiedChunkCount: 128, reusedChunkCount: 4, embeddedChunkCount: 2},
+        {...build, kind: 'full', changedCount: 9, copiedChunkCount: 0, reusedChunkCount: 0, embeddedChunkCount: 134},
+        {...delta, changedCount: 1, copiedChunkCount: 133, reusedChunkCount: 0, embeddedChunkCount: 0},
+        {...delta, changedCount: 3, copiedChunkCount: 128, reusedChunkCount: 4, embeddedChunkCount: 2},
       ]);
     }).pipe(provideFixtureLayer(services)),
   );
@@ -436,7 +438,7 @@ describe('delta vector generation', () => {
         // still holds the other chunks; with no ready generation it reads every body.
         if (fault === 'base-not-ready') expect(f.reads).toHaveLength(6);
         else expect([...f.reads].sort()).toEqual([memoryUri('big'), memoryUri('m2')]);
-        expect(f.diagnostics.at(-1)).toMatchObject({kind: 'full', changedCount: 0});
+        expect(f.diagnostics.at(-1)).toMatchObject({kind: 'full', changedCount: 1, staleDurationMilliseconds: 0});
         expect(yield* vectorSnapshot(f.filename)).toEqual(yield* f.fullWalkSnapshot);
       }).pipe(provideFixtureLayer(services)),
     );
@@ -534,6 +536,7 @@ describe('delta vector generation', () => {
         reusedChunkCount: 3,
         embeddedChunkCount: 1,
         durationMilliseconds: 0,
+        staleDurationMilliseconds: 0,
       });
       // The replaced target goes in bounded steps, and only after the newer target serves.
       expect(EffectArray.some(observed, row => row.replacedChunks > 0 && row.replacedChunks < 132)).toBe(true);

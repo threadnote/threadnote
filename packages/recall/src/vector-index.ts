@@ -1,7 +1,7 @@
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Clock, Context, DateTime, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
+import {Cause, Clock, Context, DateTime, Effect, Exit, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -9,6 +9,15 @@ import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {recallIndexScopeProject} from './eligibility.js';
+import {emitRecallDiagnostic, type RecallVectorRefreshRecord} from './diagnostics.js';
+import {openRecallVectorPreparationSource} from './index/vector-preparation-source.js';
+import {
+  confirmRecallVectorRefresh,
+  readLastRecallVectorRefreshRecord,
+  recallVectorRefreshRecord,
+  recordRecallVectorRefresh,
+  removeRecallVectorRefresh,
+} from './vector/storage.js';
 import {recallApprovedAuthoritative} from './index/eligibility.js';
 import type {RecallCandidate} from './rank.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -184,7 +193,7 @@ export const verifyCurrentCorpusGeneration = Effect.fn('vectorIndex.verifyCurren
 });
 
 export const rebuildVectorIndex = Effect.fn('vectorIndex.rebuild')(function* <R = never>(
-  config: {readonly agentContextHome: string},
+  config: VectorReadConfig,
   manifest: LocalModelManifest,
   candidates: readonly RecallCandidate[],
   options: VectorIndexBuildOptions<R> = {},
@@ -197,7 +206,7 @@ export const rebuildVectorIndex = Effect.fn('vectorIndex.rebuild')(function* <R 
 });
 
 export const ensureVectorIndex = Effect.fn('vectorIndex.ensure')(function* <R = never>(
-  config: {readonly agentContextHome: string},
+  config: VectorReadConfig,
   manifest: LocalModelManifest,
   candidates: readonly RecallCandidate[],
   options: VectorIndexBuildOptions<R> = {},
@@ -274,13 +283,14 @@ const currentVectorIndexStatus = Effect.fn('vectorIndex.currentStatus')(function
 });
 
 const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(function* <R = never>(
-  config: {readonly agentContextHome: string},
+  config: VectorReadConfig,
   manifest: LocalModelManifest,
   candidates: readonly RecallCandidate[],
   options: VectorIndexBuildOptions<R> = {},
   preparedChunks?: readonly VectorChunkMapping[],
   preparedAliases?: readonly VectorAliasMapping[],
 ) {
+  const startedAt = DateTime.formatIso(yield* DateTime.now);
   yield* verifyCurrentCorpusGeneration(manifest, options);
   if (manifest.role !== 'embedding' || !manifest.dimensions) {
     return yield* VectorIndexOperationError.make({message: `Model ${manifest.id} is not an embedding model.`});
@@ -310,6 +320,12 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* initializeVectorDatabase(sql);
+      yield* sql.unsafe(`CREATE TABLE IF NOT EXISTS recall_foreground_embedded_chunks (
+        generation TEXT NOT NULL,
+        chunk_id TEXT NOT NULL,
+        PRIMARY KEY(generation, chunk_id),
+        FOREIGN KEY(generation, chunk_id) REFERENCES vector_chunks(generation, chunk_id) ON DELETE CASCADE
+      ) WITHOUT ROWID`);
       const activeResult = yield* selectActiveGeneration(sql).pipe(Effect.result);
       const active =
         Result.isSuccess(activeResult) &&
@@ -376,6 +392,53 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
       yield* pruneUnreferencedVectorValues(sql);
 
       const reusableChunkCount = yield* countVectorRows(sql, building.generation);
+      const previousCorpus = active?.corpus_generation ?? undefined;
+      const changes =
+        previousCorpus === undefined || config.account === undefined || config.user === undefined
+          ? undefined
+          : yield* openRecallVectorPreparationSource({
+              ...config,
+              account: config.account,
+              user: config.user,
+            }).pipe(
+              Effect.flatMap(source =>
+                source.generation === options.corpusGeneration
+                  ? source.readRefreshChanges(previousCorpus)
+                  : Effect.as(Effect.void, undefined),
+              ),
+              Effect.orElseSucceed(() => undefined),
+            );
+      const activateFull = (generation: VectorGenerationRow, count: number, embedded: number, createdAt: string) =>
+        activateVectorGenerationFenced(
+          sql,
+          generation.generation,
+          count,
+          options.corpusGeneration,
+          manifest,
+          options,
+          Effect.map(Clock.currentTimeMillis, now =>
+            recallVectorRefreshRecord(
+              {
+                kind: 'full',
+                changedCount: changes?.changedCount ?? candidates.length,
+                copiedChunkCount: 0,
+                reusedChunkCount: count - embedded,
+                embeddedChunkCount: embedded,
+              },
+              createdAt,
+              now,
+              changes?.publishedAtMillis,
+            ),
+          ),
+        ).pipe(
+          Effect.flatMap(refresh =>
+            emitRecallDiagnostic(config.agentContextHome, {
+              event: 'recall.vector-build',
+              scope: 'active',
+              ...refresh,
+            }),
+          ),
+        );
       if (building.state === 'ready' && reusableChunkCount === chunks.length) {
         yield* options.onProgress?.({
           completed: 0,
@@ -384,14 +447,7 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
           total: 0,
         }) ?? Effect.void;
         yield* options.onProgress?.({chunkCount: reusableChunkCount, phase: 'activating'}) ?? Effect.void;
-        yield* activateVectorGenerationFenced(
-          sql,
-          building.generation,
-          reusableChunkCount,
-          options.corpusGeneration,
-          manifest,
-          options,
-        );
+        yield* activateFull(building, reusableChunkCount, 0, startedAt);
         yield* pruneVectorGenerations(sql, building.generation);
         yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
         return vectorStatus(building, manifest.id, reusableChunkCount, 0, reusableChunkCount);
@@ -454,18 +510,14 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
           message: `Vector generation ${building.generation} has ${finalChunkCount}/${chunks.length} chunks.`,
         });
       }
+      const [counts] = yield* sql<{readonly count: number}>`SELECT COUNT(*) AS count
+        FROM recall_foreground_embedded_chunks WHERE generation = ${building.generation}`;
+      const embedded = counts?.count ?? 0;
       yield* options.onProgress?.({chunkCount: finalChunkCount, phase: 'activating'}) ?? Effect.void;
-      yield* activateVectorGenerationFenced(
-        sql,
-        building.generation,
-        finalChunkCount,
-        options.corpusGeneration,
-        manifest,
-        options,
-      );
+      yield* activateFull(building, finalChunkCount, embedded, building.created_at);
       yield* pruneVectorGenerations(sql, building.generation);
       yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
-      return vectorStatus(building, manifest.id, finalChunkCount, embeddedChunkCount, reusableChunkCount);
+      return vectorStatus(building, manifest.id, finalChunkCount, embedded, finalChunkCount - embedded);
     }),
   );
   yield* removeLegacyVectorSidecars(fs, path, root);
@@ -532,6 +584,25 @@ export const vectorIndexStatus = Effect.fn('vectorIndex.status')(function* (
     ready: true,
   } satisfies VectorIndexStatus;
 });
+
+/** Read optional history without requiring a new database or a write lock. */
+export const readLastRecallVectorRefresh = Effect.fn('vectorIndex.readLastRefresh')(
+  function* (home: string, manifest: Pick<VectorReadModel, 'id'>) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const databasePath = vectorDatabasePath(path, home, manifest.id);
+    if (!(yield* fs.exists(databasePath))) return undefined;
+    return yield* useVectorDatabaseReadOnly(
+      databasePath,
+      Effect.flatMap(SqlClient.SqlClient, readLastRecallVectorRefreshRecord),
+    );
+  },
+  Effect.orElseSucceed(() => undefined),
+  Effect.catchCauseIf(
+    cause => !Cause.hasInterrupts(cause),
+    () => Effect.as(Effect.void, undefined),
+  ),
+);
 
 export const purgeVectorIndex = Effect.fn('vectorIndex.purge')(function* (home: string, modelId: string) {
   const fs = yield* FileSystem.FileSystem;
@@ -651,6 +722,8 @@ const initializeVectorDatabase = Effect.fn('vectorIndex.initializeDatabase')(fun
   const versions = yield* sql.unsafe<{readonly user_version: number}>('PRAGMA user_version');
   const version = Number(versions[0]?.user_version ?? 0);
   if (version !== 0 && version !== VECTOR_INDEX_DATABASE_VERSION) {
+    yield* sql.unsafe('DROP TABLE IF EXISTS recall_vector_refreshes');
+    yield* sql.unsafe('DROP TABLE IF EXISTS recall_foreground_embedded_chunks');
     yield* sql.unsafe('DROP TABLE IF EXISTS vector_pointer');
     yield* sql.unsafe('DROP TABLE IF EXISTS vector_aliases');
     yield* sql.unsafe('DROP TABLE IF EXISTS vector_chunks');
@@ -1028,6 +1101,15 @@ function insertVectorRows(sql: SqlClient.SqlClient, rows: readonly VectorInsertR
              )}`,
             mappings.flat(),
           );
+          // A resumed build still owns these inputs. Chunk deletion also removes its inference marker.
+          yield* sql.unsafe(
+            `INSERT OR IGNORE INTO recall_foreground_embedded_chunks (generation, chunk_id)
+             VALUES ${EffectArray.join(
+               EffectArray.map(mappings, () => '(?, ?)'),
+               ', ',
+             )}`,
+            EffectArray.flatMap(mappings, ([generation, chunkId]) => [generation, chunkId]),
+          );
         }),
       );
     }
@@ -1079,39 +1161,50 @@ const activateVectorGenerationFenced = Effect.fn('vectorIndex.activateGeneration
   corpusGeneration: string | undefined,
   manifest: LocalModelManifest,
   options: VectorCorpusGenerationOptions<R>,
+  measureRefresh: Effect.Effect<RecallVectorRefreshRecord>,
 ) {
   yield* verifyCurrentCorpusGeneration(manifest, options);
-  yield* sql.withTransaction(
-    Effect.gen(function* () {
-      yield* sql`
-        UPDATE vector_generations
-        SET
-          state = 'ready',
-          chunk_count = ${chunkCount},
-          corpus_generation = ${corpusGeneration ?? null}
-        WHERE generation = ${generation}
-      `;
-      // Keep the vector write transaction open across the last pre-commit
-      // observation. The post-commit check below handles the remaining
-      // cross-database gap without ever pruning the previous generation first.
-      yield* verifyCurrentCorpusGeneration(manifest, options);
-      yield* sql`
-        INSERT INTO vector_pointer (singleton, generation)
-        VALUES (1, ${generation})
-        ON CONFLICT(singleton) DO UPDATE SET generation = excluded.generation
-      `;
-    }),
-  );
-  const postActivationFence = yield* verifyCurrentCorpusGeneration(manifest, options).pipe(Effect.result);
-  if (Result.isFailure(postActivationFence)) {
-    yield* sql.withTransaction(
+  return yield* Effect.acquireUseRelease(
+    sql.withTransaction(
       Effect.gen(function* () {
-        yield* sql.unsafe('DELETE FROM vector_pointer WHERE singleton = 1 AND generation = ?', [generation]);
-        yield* sql`UPDATE vector_generations SET state = 'building' WHERE generation = ${generation}`;
+        yield* sql`
+          UPDATE vector_generations
+          SET state = 'ready', chunk_count = ${chunkCount}, corpus_generation = ${corpusGeneration ?? null}
+          WHERE generation = ${generation}
+        `;
+        // Keep the vector transaction open across the last pre-commit observation.
+        yield* verifyCurrentCorpusGeneration(manifest, options);
+        yield* sql`
+          INSERT INTO vector_pointer (singleton, generation)
+          VALUES (1, ${generation})
+          ON CONFLICT(singleton) DO UPDATE SET generation = excluded.generation
+        `;
+        const refresh = yield* measureRefresh;
+        return {refresh, sequence: yield* recordRecallVectorRefresh(sql, refresh)};
       }),
-    );
-    return yield* Effect.fail(postActivationFence.failure);
-  }
+    ),
+    ({refresh, sequence}) =>
+      Effect.gen(function* () {
+        yield* verifyCurrentCorpusGeneration(manifest, options);
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* confirmRecallVectorRefresh(sql, sequence);
+            yield* sql`DELETE FROM recall_foreground_embedded_chunks WHERE generation = ${generation}`;
+          }),
+        );
+        return refresh;
+      }),
+    ({sequence}, exit) =>
+      Exit.isSuccess(exit)
+        ? Effect.void
+        : sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`DELETE FROM vector_pointer WHERE singleton = 1 AND generation = ${generation}`;
+              yield* sql`UPDATE vector_generations SET state = 'building' WHERE generation = ${generation}`;
+              yield* removeRecallVectorRefresh(sql, sequence);
+            }),
+          ),
+  );
 });
 
 const pruneVectorGenerations = Effect.fn('vectorIndex.pruneGenerations')(function* (

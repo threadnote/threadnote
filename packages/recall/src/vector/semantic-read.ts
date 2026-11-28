@@ -43,8 +43,18 @@ import {
   type RecallVectorReadModel,
   type RecallVectorReadState,
 } from '../read_boundary.js';
-import {currentRecallCorpusGeneration, readRecallIndexData, type RecallIndexConfig} from '../index.js';
-import {readRecallVectorMask, recallMaskedReadCompatible, recallVectorMaskPredicate} from './masked-read.js';
+import {
+  currentRecallCorpusGeneration,
+  readRecallIndexData,
+  type RecallIndexConfig,
+  type RecallIndexStatus,
+} from '../index.js';
+import {
+  countCurrentRecallMask,
+  readRecallVectorMask,
+  recallMaskedReadCompatible,
+  recallVectorMaskPredicate,
+} from './masked-read.js';
 import {requiredNativeVectorReader, runNativeVectorRead} from './native-reader.js';
 import type {NativeVectorReadRequest} from './native-reader-contract.js';
 import {
@@ -59,10 +69,11 @@ import {
   VectorIndexCorrupt,
   type VectorCorpusGenerationOptions,
   type VectorGenerationRow,
+  type VectorIndexStatus,
   type VectorReadConfig,
   type VectorReadModel,
 } from '../vector-index.js';
-import {requestRecallVectorCompactionWhenDue} from './compaction.js';
+import {recallVectorCompactionRunning, requestRecallVectorCompactionWhenDue} from './compaction.js';
 
 /** The read side of the vector index: readiness, the opening of a semantic read, and its scores. */
 const wireVectorModel = (manifest: VectorReadModel): RecallVectorReadModel => ({
@@ -97,6 +108,12 @@ const throughVectorReadBoundary = Effect.fn('vectorIndex.throughReadyReadBoundar
 
 /** `serving-older`: the active generation is older but compatible and serves a masked read; not current. */
 export type VectorIndexGenerationReadiness = RecallVectorReadiness;
+
+export interface VectorIndexReadReport {
+  readonly state: 'current' | 'serving-older' | 'refreshable' | 'compaction' | 'structurally-unavailable' | 'unknown';
+  readonly waitingCount?: number;
+  readonly reason?: string;
+}
 
 /** Semantic fences run in the caller's ambient context, outside the native snapshot.
  * Build/promotion callbacks retain their separate vector-SqlClient transaction context.
@@ -176,20 +193,70 @@ export const vectorIndexGenerationReadiness = Effect.fn('vectorIndex.generationR
   const active = yield* readActiveVectorGeneration(home, manifest).pipe(Effect.result);
   if (Result.isFailure(active)) return 'corrupt' as const;
   if (!active.success) return 'missing' as const;
-  if (
-    generationMatchesCorpus(active.success, manifest, corpusGeneration) &&
-    (authorizationKey === undefined ||
-      recallVectorPreparationMatches(
-        active.success.job_id,
-        recallVectorPreparationIdentity(corpusGeneration, authorizationKey, manifest.id, embeddingRecipe(manifest)),
-      ))
-  )
+  if (vectorGenerationIsCurrent(active.success, manifest, corpusGeneration, authorizationKey))
     return 'current' as const;
   // A readiness-only call runs the masked decision once; a read derives the readiness from its state instead.
   if (readConfig === undefined || active.success.corpus_generation === corpusGeneration) return 'stale' as const;
   const masked = yield* maskedVectorRead(readConfig, manifest, active.success, authorizationKey, corpusGeneration);
   return masked.state === 'served' ? ('serving-older' as const) : ('stale' as const);
 });
+
+/** Inspect the index read state without embedding a query or opening any memory body. */
+export const readVectorIndexReport = Effect.fn('vectorIndex.readReport')(function* (
+  config: RecallIndexConfig,
+  manifest: VectorReadModel,
+  lexical: RecallIndexStatus & {readonly generation: string},
+  vector: VectorIndexStatus,
+): Effect.fn.Return<VectorIndexReadReport, unknown, FileSystem.FileSystem | Path.Path> {
+  const home = config.agentContextHome;
+  const compactionReport = recallVectorCompactionRunning(home, manifest.id).pipe(
+    Effect.map(running => (running ? ({state: 'compaction', reason: 'compaction'} as const) : undefined)),
+    Effect.orElseSucceed(() => undefined),
+  );
+  if (!vector.ready && vector.reason !== 'not built') {
+    return (yield* compactionReport) ?? {state: 'structurally-unavailable', reason: 'vector index unreadable'};
+  }
+  const active = yield* readActiveVectorGeneration(home, manifest).pipe(Effect.result);
+  if (Result.isFailure(active)) {
+    return (yield* compactionReport) ?? {state: 'structurally-unavailable', reason: 'vector index unreadable'};
+  }
+  if (active.success?.generation !== vector.generation) {
+    return {state: 'unknown', reason: 'vector generation changed during inspection'};
+  }
+  if (!active.success)
+    return {state: 'refreshable', waitingCount: lexical.documentCount, reason: 'vector index not built'};
+  const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
+  if (vectorGenerationIsCurrent(active.success, manifest, lexical.generation, authorizationKey)) {
+    return {state: 'current', waitingCount: 0};
+  }
+  const masked = yield* maskedVectorRead(config, manifest, active.success, authorizationKey, lexical.generation);
+  if (masked.state === 'served') {
+    const waitingCount = yield* countCurrentRecallMask(lexical, masked.mask);
+    return {state: 'serving-older', ...(waitingCount === undefined ? {} : {waitingCount})};
+  }
+  if (masked.state === 'moved') return {state: 'refreshable', reason: 'lexical generation changed'};
+  if (masked.reason === 'unreadable') {
+    const compaction = yield* compactionReport;
+    if (compaction !== undefined) return compaction;
+  }
+  return {state: 'refreshable', reason: masked.reason};
+});
+
+function vectorGenerationIsCurrent(
+  active: VectorGenerationRow,
+  manifest: VectorReadModel,
+  corpusGeneration: string,
+  authorizationKey: string | undefined,
+): boolean {
+  return (
+    generationMatchesCorpus(active, manifest, corpusGeneration) &&
+    (authorizationKey === undefined ||
+      recallVectorPreparationMatches(
+        active.job_id,
+        recallVectorPreparationIdentity(corpusGeneration, authorizationKey, manifest.id, embeddingRecipe(manifest)),
+      ))
+  );
+}
 
 /**
  * The one opening of a semantic read for a lexical generation, in process and in the ready-read worker.

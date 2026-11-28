@@ -246,13 +246,18 @@ export const readRecallChangesSince = Effect.fn('recall.readChangesSince')(funct
   return knownChangeSet(current, changed);
 });
 
-/** `publishedAtMillis` (epoch ms) of the first publication after `fromGeneration`; none when unknown or current. */
-export const readRecallFirstPublicationAfter = Effect.fn('recall.readFirstPublicationAfter')(function* (
+/** Collect counts and time from one lexical read transaction without loading individual change rows. */
+export const readRecallRefreshChanges = Effect.fn('recall.readRefreshChanges')(function* (
   sql: SqlClient.SqlClient,
   fromGeneration: string,
 ) {
   const chain = yield* recallChangeChain(sql, fromGeneration);
-  return Option.flatMap(chain, ({headers}) =>
-    Option.map(Option.fromNullishOr(headers[0]?.published_at), publishedAtMillis => ({publishedAtMillis})),
+  if (Option.isNone(chain)) return undefined;
+  const first = chain.value.headers[0];
+  if (first === undefined) return {changedCount: 0};
+  const rows = yield* sql.unsafe<{readonly count: number}>(
+    `SELECT COUNT(DISTINCT uri) AS count FROM ${ENTRY_TABLE} WHERE publication_sequence >= ?`,
+    [first.sequence],
   );
+  return {changedCount: rows[0]?.count ?? 0, publishedAtMillis: first.published_at};
 });

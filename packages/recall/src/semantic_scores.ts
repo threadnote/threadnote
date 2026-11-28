@@ -2,7 +2,7 @@ import {isServableVectorReadiness, RecallReadyReadBoundary, type RecallSemanticP
 import {CallerReadCancellation, hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {recallPreflightSkipsSemanticRead} from './vector/negative-readiness.js';
 import {Array as EffectArray} from 'effect';
-import {Cause, Clock, Console, Effect, Option, Result, Schema} from 'effect';
+import {Cause, Clock, Console, Effect, Metric, Option, Result, Schema} from 'effect';
 import {recallIndexPreselectionLimit} from '@threadnote/recall/results';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
@@ -32,7 +32,15 @@ export const SEMANTIC_GENERATION_RETRY_LIMIT = 2;
 export const MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS = 30_000;
 export const MCP_RECALL_SEMANTIC_TIMEOUT_COOLDOWN_MILLISECONDS = 60_000;
 
+export type RecallSemanticReadState = 'current' | 'serving-older' | 'refreshable' | 'compaction';
+
+export const recallSemanticReadCount = Metric.frequency('recall.semantic_read_count');
+
+const countRecallSemanticRead = (result: RecallSemanticScoresResult) =>
+  result.readState === undefined ? Effect.void : Metric.update(recallSemanticReadCount, result.readState);
+
 export interface RecallSemanticScoresResult {
+  readonly readState?: RecallSemanticReadState;
   /** For a masked read, the lexical generation of its mask, not the served vector corpus. */
   readonly corpusGeneration: Option.Option<string>;
   readonly scores: Option.Option<ReadonlyMap<string, number>>;
@@ -60,9 +68,11 @@ type McpReadOnlySemanticScoresAttempt =
 
 export function emptyRecallSemanticScoresResult(
   warning: Option.Option<string> = Option.none(),
+  readState?: RecallSemanticReadState,
 ): RecallSemanticScoresResult {
   return {
     corpusGeneration: Option.none(),
+    ...(readState === undefined ? {} : {readState}),
     scores: Option.none(),
     warning,
   };
@@ -123,7 +133,7 @@ const mcpRecallSemanticRetrievalGate = createMcpRecallSemanticRetrievalGate();
  * MCP recall uses only the already-active lexical/vector generations. It never
  * builds, repairs, or retries derived storage while a client request is open.
  */
-export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemanticScoresResult')(function* (
+const readMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemanticScoresResult')(function* (
   config: RecallRuntimeConfig,
   query: string,
   limit: number,
@@ -139,7 +149,7 @@ export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemant
     semanticReadDuringCompaction(config),
   );
   const compaction = {
-    result: emptyRecallSemanticScoresResult(Option.some(RECALL_SEMANTIC_COMPACTION_NOTICE)),
+    result: emptyRecallSemanticScoresResult(Option.some(RECALL_SEMANTIC_COMPACTION_NOTICE), 'compaction'),
     status: 'unavailable',
   } satisfies McpRecallSemanticScoresResult;
   if (attempt.status === 'compaction') return compaction;
@@ -167,10 +177,13 @@ export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemant
     return (
       Result.isSuccess(queued)
         ? {
-            result: emptyRecallSemanticScoresResult(Option.some(staleReadRefreshWarning(queued.success))),
+            result: emptyRecallSemanticScoresResult(
+              Option.some(staleReadRefreshWarning(queued.success)),
+              'refreshable',
+            ),
             status: 'unavailable',
           }
-        : {result: emptyRecallSemanticScoresResult(Option.some(queued.failure)), status: 'failed'}
+        : {result: emptyRecallSemanticScoresResult(Option.some(queued.failure), 'refreshable'), status: 'failed'}
     ) satisfies McpRecallSemanticScoresResult;
   }
   if (attempt.value.state === 'structurally-unavailable') {
@@ -189,6 +202,9 @@ export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemant
     status: 'available',
   } satisfies McpRecallSemanticScoresResult;
 });
+
+export const loadMcpRecallSemanticScoresResult = (...args: Parameters<typeof readMcpRecallSemanticScoresResult>) =>
+  readMcpRecallSemanticScoresResult(...args).pipe(Effect.tap(({result}) => countRecallSemanticRead(result)));
 
 const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemanticScoresAttempt')(function* (
   config: RecallRuntimeConfig,
@@ -314,6 +330,7 @@ const servedSemanticResult = Effect.fn('recall.servedSemanticResult')(function* 
         : Option.some(queued.failure);
   return {
     corpusGeneration: Option.some(read.corpusGeneration),
+    readState: read.readiness,
     scores: Option.some(read.scores),
     warning,
   } satisfies RecallSemanticScoresResult;
@@ -365,7 +382,7 @@ export const loadRecallSemanticScoresResult = Effect.fn('recall.loadSemanticScor
       )
     ) {
       yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
-      return undefined;
+      return emptyRecallSemanticScoresResult(Option.none(), 'refreshable');
     }
     const semanticLimit = recallIndexPreselectionLimit(limit);
     return yield* loadCurrentSemanticScores(config, manifest, query, semanticLimit, eligibility, allowedUriScopes);
@@ -378,10 +395,12 @@ export const loadRecallSemanticScoresResult = Effect.fn('recall.loadSemanticScor
           Effect.map(compaction =>
             emptyRecallSemanticScoresResult(
               Option.some(compaction ? RECALL_SEMANTIC_COMPACTION_NOTICE : semanticRecallFailureWarning(cause)),
+              compaction ? 'compaction' : undefined,
             ),
           ),
         ),
     ),
+    Effect.tap(countRecallSemanticRead),
   );
 });
 
@@ -436,13 +455,10 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
   // Every unserved read keeps the refresh queued.
   yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
   const corpusGeneration = read?.corpusGeneration ?? lexicalGeneration;
-  return corpusGeneration === undefined
-    ? undefined
-    : ({
-        corpusGeneration: Option.some(corpusGeneration),
-        scores: Option.none(),
-        warning: Option.none(),
-      } satisfies RecallSemanticScoresResult);
+  return {
+    ...emptyRecallSemanticScoresResult(Option.none(), 'refreshable'),
+    corpusGeneration: Option.fromUndefinedOr(corpusGeneration),
+  };
 });
 
 export const loadRecallSemanticScores = Effect.fn('recall.loadSemanticScores')(function* (
