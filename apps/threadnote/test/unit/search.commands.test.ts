@@ -22,7 +22,7 @@ import {cryptoLayer} from '@threadnote/platform/crypto';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {systemLayer} from '../../src/effect/runtime-bootstrap.js';
-import {runIndexRebuild} from '../../src/search/commands.js';
+import {runIndexRebuild, runIndexStatus} from '../../src/search/commands.js';
 import {
   observeRecallEmbeddingDemand,
   readRecallEmbeddingDemand,
@@ -38,6 +38,9 @@ import {writeModelSelection} from '@threadnote/inference/models/selection';
 import {expireRecallIndexValidation, recallIndexStatus} from '@threadnote/recall/index';
 import {vectorIndexStatus} from '@threadnote/recall/vector-index';
 import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
+import {runRecallVectorCompaction} from '@threadnote/recall/vector/compaction';
+import {RecallVectorCompactionThresholds} from '@threadnote/recall/vector/sqlite-pages';
+import {Database} from 'bun:sqlite';
 import {
   ExternalSourcePolicy,
   externalDocumentManifestUri,
@@ -198,6 +201,16 @@ const fixture = Effect.gen(function* () {
       yield* fs.writeFileString(name, text);
     }
   });
+  const status = Console.consoleWith(parent =>
+    runIndexStatus(config).pipe(
+      Effect.provideService(Console.Console, {
+        ...parent,
+        log: (...args) => {
+          output.push(EffectArray.join(EffectArray.map(args, String), ' '));
+        },
+      }),
+    ),
+  );
   return {
     fs,
     home,
@@ -205,6 +218,7 @@ const fixture = Effect.gen(function* () {
     resource,
     output,
     run,
+    status,
     addExternal,
     embeddedInputs: () => embeddedInputs,
     failEmbedding: () => {
@@ -228,6 +242,86 @@ const test = <A, E, R>(program: Effect.Effect<A, E, R>) =>
   Effect.scoped(Layer.build(platform).pipe(Effect.flatMap(context => program.pipe(Effect.provide(context))))).pipe(
     TestClock.withLive,
   );
+
+/** Free pages above test-sized thresholds; a compaction whose free-space probe waits for `release`. */
+const heldCompaction = (home: string) =>
+  Effect.gen(function* () {
+    yield* Effect.sync(() => {
+      const db = new Database(`${home}/indexes/vectors/${manifest.id}/vectors-v5.sqlite`);
+      try {
+        db.exec('CREATE TABLE padding (body BLOB)');
+        for (let row = 0; row < 256; row++) db.query('INSERT INTO padding VALUES (?)').run(new Uint8Array(16 * 1024));
+        db.exec('DROP TABLE padding');
+      } finally {
+        db.close();
+      }
+    });
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const system = yield* SystemInfo;
+    const fiber = yield* runRecallVectorCompaction(home, manifest).pipe(
+      Effect.provideService(RecallVectorCompactionThresholds, {
+        minimumReclaimableBytes: 1024 * 1024,
+        minimumReclaimableRatio: 0.2,
+        safetyMarginBytes: 0,
+      }),
+      Effect.provideService(SystemInfo, {
+        ...system,
+        availableDiskBytes: () =>
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)), Effect.as(1e15)),
+      }),
+      Effect.forkChild,
+    );
+    yield* Deferred.await(entered);
+    return {fiber, release: Deferred.succeed(release, undefined)};
+  });
+
+describe('index storage status', () => {
+  effectIt.effect('shows the file size, the reclaimable size and the compaction state', () =>
+    test(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.run();
+        const held = yield* heldCompaction(f.home);
+        yield* held.release;
+        expect(yield* Fiber.join(held.fiber)).toMatchObject({state: 'complete'});
+        f.output.length = 0;
+        yield* f.status;
+        const line = EffectArray.findFirst(f.output, EffectString.startsWith(`${manifest.id}\t`));
+        expect(Option.getOrUndefined(line)).toMatch(
+          /\tready\t1 chunks\t.+\tfile \d.* (B|KiB|MiB)\treclaimable \d.* (B|KiB|MiB)\tcompaction complete selected$/u,
+        );
+      }),
+    ),
+  );
+
+  effectIt.effect('stops a rebuild that cannot take the vector lock from a compaction and names it', () =>
+    Effect.scoped(
+      Layer.build(platform).pipe(
+        Effect.flatMap(context =>
+          Effect.gen(function* () {
+            const f = yield* fixture;
+            yield* TestClock.withLive(f.run());
+            const held = yield* TestClock.withLive(heldCompaction(f.home));
+            const rebuild = yield* f.run().pipe(Effect.result, Effect.forkChild);
+            // The rebuild waits up to 120 seconds for the lock; the test clock runs that wait out.
+            for (let turn = 0; turn < 400 && rebuild.pollUnsafe() === undefined; turn++) {
+              yield* TestClock.withLive(Effect.sleep('10 millis'));
+              yield* TestClock.adjust('1 second');
+            }
+            const result = yield* Fiber.join(rebuild);
+            yield* held.release;
+            yield* Fiber.join(held.fiber);
+            expect(result).toMatchObject({
+              failure: {_tag: 'SearchCommandError', message: expect.stringContaining('compaction')},
+            });
+            expect((yield* vectorIndexStatus(f.home, manifest)).ready).toBe(true);
+          }).pipe(Effect.provide(context)),
+        ),
+      ),
+    ),
+  );
+});
 
 describe('foreground index rebuild', () => {
   effectIt.effect('waits for embedding and verifies both indexes before reporting ready', () =>

@@ -62,6 +62,7 @@ import {
   type VectorReadConfig,
   type VectorReadModel,
 } from '../vector-index.js';
+import {requestRecallVectorCompactionWhenDue} from './compaction.js';
 
 /** The read side of the vector index: readiness, the opening of a semantic read, and its scores. */
 const wireVectorModel = (manifest: VectorReadModel): RecallVectorReadModel => ({
@@ -260,6 +261,8 @@ export const selectedSemanticScoreSnapshot = Effect.fn('vectorIndex.selectedSema
   const path = yield* Path.Path;
   const databasePath = vectorDatabasePath(path, config.agentContextHome, manifest.id);
   if (!(yield* fs.exists(databasePath))) return undefined;
+  // Compaction needs no vector demand: a read checks the free pages, rate-limited, and queues maintenance.
+  yield* requestRecallVectorCompactionWhenDue(config.agentContextHome, manifest.id);
   const store = yield* LocalModelStore;
   const runtime = yield* LocalModelRuntime;
   const status = yield* store.status(config.agentContextHome, manifest);

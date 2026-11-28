@@ -31,24 +31,28 @@ const RECALL_DELTA_TARGET_COLUMNS = [
   ['purging', 'INTEGER NOT NULL DEFAULT 0 CHECK(purging IN (0, 1))'],
 ] as const;
 
-/** Same model writer as manual builds, held only around one bounded metadata/payload transaction. */
-export function withRecallVectorWrite<A, E, R>(
-  config: RecallEmbeddingScope,
-  manifest: LocalModelManifest,
-  program: Effect.Effect<A, E, R | SqlClient.SqlClient>,
-) {
+/** The model writer lock of manual builds, background builds and compaction; it never creates the home. */
+export function recallVectorLockPath(path: Path.Path, home: string, modelId: string) {
+  return path.join(home, 'locks', 'indexes', 'vectors', modelId + '.lock');
+}
+
+/**
+ * Lock only, with no connection or transaction: a compaction runs `VACUUM`, which SQLite refuses inside a
+ * transaction, under the same lock as a build write.
+ */
+export function withRecallVectorLock<A, E, R>(home: string, modelId: string, program: Effect.Effect<A, E, R>) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    if (!(yield* fs.exists(config.agentContextHome))) return yield* preparationChanged();
-    const filename = recallVectorStorage.databasePath(path, config.agentContextHome, manifest.id);
+    if (!(yield* fs.exists(home))) return yield* preparationChanged();
+    const filename = recallVectorStorage.databasePath(path, home, modelId);
     for (const directory of [
-      path.join(config.agentContextHome, 'indexes'),
-      path.join(config.agentContextHome, 'indexes', 'vectors'),
+      path.join(home, 'indexes'),
+      path.join(home, 'indexes', 'vectors'),
       path.dirname(filename),
-      path.join(config.agentContextHome, 'locks'),
-      path.join(config.agentContextHome, 'locks', 'indexes'),
-      path.join(config.agentContextHome, 'locks', 'indexes', 'vectors'),
+      path.join(home, 'locks'),
+      path.join(home, 'locks', 'indexes'),
+      path.join(home, 'locks', 'indexes', 'vectors'),
     ]) {
       yield* fs
         .makeDirectory(directory, {mode: 0o700})
@@ -60,7 +64,7 @@ export function withRecallVectorWrite<A, E, R>(
     }
     return yield* withExclusiveFileLock(
       fs,
-      path.join(config.agentContextHome, 'locks', 'indexes', 'vectors', manifest.id + '.lock'),
+      recallVectorLockPath(path, home, modelId),
       {
         createParentDirectory: false,
         heartbeatIntervalMilliseconds: 1000,
@@ -68,6 +72,24 @@ export function withRecallVectorWrite<A, E, R>(
         staleAfterMilliseconds: 60_000,
         waitTimeoutMilliseconds: 1000,
       },
+      program,
+    );
+  });
+}
+
+/** Same model writer as manual builds, held only around one bounded metadata/payload transaction. */
+export function withRecallVectorWrite<A, E, R>(
+  config: RecallEmbeddingScope,
+  manifest: LocalModelManifest,
+  program: Effect.Effect<A, E, R | SqlClient.SqlClient>,
+) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const filename = recallVectorStorage.databasePath(path, config.agentContextHome, manifest.id);
+    return yield* withRecallVectorLock(
+      config.agentContextHome,
+      manifest.id,
       Effect.gen(function* () {
         const existed = yield* fs.exists(filename);
         if (!existed && ((yield* fs.exists(filename + '-wal')) || (yield* fs.exists(filename + '-shm'))))

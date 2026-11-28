@@ -10,7 +10,11 @@ import {
 } from '@threadnote/recall/index';
 import {Array as EffectArray, Clock, Context, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
-import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
+import {
+  BackgroundInferenceAdmission,
+  BackgroundInferenceAdmissionUnavailable,
+  BackgroundInferenceDeferred,
+} from '@threadnote/inference/background/admission';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -24,6 +28,11 @@ import {
   type RecallEmbeddingScope,
 } from '@threadnote/recall/background/demand';
 import {RecallVectorSourceChanged, runRecallVectorPreparationBatch} from '@threadnote/recall/background/vector-step';
+import {
+  completeRecallVectorCompactionDemand,
+  requestRecallVectorCompactionWhenDue,
+  runRecallVectorCompaction,
+} from '@threadnote/recall/vector/compaction';
 import {emitRecallDiagnostic, recallDiagnosticScope} from '@threadnote/recall/diagnostics';
 
 import {
@@ -249,8 +258,11 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
         (yield* completeRecallEmbeddingDemand(scope, desired.token, desired.revision).pipe(
           Effect.mapError(controlUnavailable),
         ))
-      )
+      ) {
+        // Builds retire generations, so free pages appear here; compaction runs as its own maintenance unit.
+        yield* requestRecallVectorCompactionWhenDue(scope.agentContextHome, selected.id, 'build');
         return {state: 'complete', delay: 0};
+      }
       yield* observe('queued', 'checkpoint', 0);
       return {state: 'checkpointed', delay: 50};
     }
@@ -279,6 +291,40 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
     yield* persistObservation('queued', 'retry-backoff', failed, (yield* Clock.currentTimeMillis) + delay);
     return {state: 'deferred', reason: 'retry-backoff', delay};
   });
+});
+
+/**
+ * Maintenance-only demand: one admitted compaction unit per entry, without vector demand. An admission or lock
+ * deferral keeps the entry for a later pass; every other outcome is recorded by the unit and ends the entry.
+ * VACUUM and its `complete` record are the unit's only uninterruptible step; a batch deadline that lands in the
+ * verification after it leaves the recorded `complete`, and the next pass finds the cooldown.
+ */
+export const runRecallVectorCompactionWorkerUnit = Effect.fn('recall.vectorCompactionWorkerUnit')(function* (
+  home: string,
+  modelId: string,
+) {
+  const admission = yield* BackgroundInferenceAdmission;
+  const catalog = yield* LocalModelCatalog;
+  const manifest = Option.getOrUndefined(yield* catalog.get(modelId).pipe(Effect.option));
+  const done = completeRecallVectorCompactionDemand(home, modelId).pipe(
+    Effect.as({state: 'complete', delay: 0} satisfies RecallEmbeddingWorkerUnitResult),
+  );
+  if (manifest?.role !== 'embedding') return yield* done;
+  const outcome = yield* admission
+    .runBatch(home, 'recall', runRecallVectorCompaction(home, manifest))
+    .pipe(Effect.result);
+  const deferred = (reason: string) =>
+    ({state: 'deferred', reason, delay: 2000}) satisfies RecallEmbeddingWorkerUnitResult;
+  if (outcome._tag === 'Failure')
+    return Schema.is(BackgroundInferenceDeferred)(outcome.failure) ||
+      Schema.is(BackgroundInferenceAdmissionUnavailable)(outcome.failure)
+      ? deferred('admission')
+      : yield* done;
+  // A batch-deadline deferral reruns once and then finds the cooldown that the unit recorded.
+  if (outcome.success.state === 'deferred') return deferred(outcome.success.reason);
+  if (outcome.success.value.state === 'skipped' && outcome.success.value.reason === 'lock-busy')
+    return deferred('lock-busy');
+  return yield* done;
 });
 
 /** Compatibility wrapper for a single explicit scope; the home process round-robins units. */

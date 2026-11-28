@@ -10,6 +10,7 @@ import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {vectorIndexGenerationReadiness} from '../vector/semantic-read.js';
+import {RECALL_SEMANTIC_COMPACTION_NOTICE, semanticReadDuringCompaction} from '../vector/compaction.js';
 import {
   currentRecallCorpusGeneration,
   expireRecallIndexValidation,
@@ -172,7 +173,10 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
       if (readiness === 'corrupt')
         return {
           state: 'deferred' as const,
-          repair: 'Vector storage validation failed; run `threadnote index rebuild`.',
+          // A read that a compaction holds is not damage, so it gets the notice and no rebuild hint.
+          repair: (yield* semanticReadDuringCompaction(config))
+            ? RECALL_SEMANTIC_COMPACTION_NOTICE
+            : 'Vector storage validation failed; run `threadnote index rebuild`.',
         };
       return yield* deferRecallEmbeddings(config);
     }).pipe(

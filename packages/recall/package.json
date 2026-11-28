@@ -42,6 +42,8 @@
     "./threshold": "./src/threshold.ts",
     "./tokenize": "./src/tokenize.ts",
     "./vector-index": "./src/vector-index.ts",
+    "./vector/compaction": "./src/vector/compaction.ts",
+    "./vector/sqlite-pages": "./src/vector/sqlite-pages.ts",
     "./vector/negative-readiness": "./src/vector/negative-readiness.ts",
     "./vector/semantic-read": "./src/vector/semantic-read.ts",
     "./warning": "./src/warning.ts",

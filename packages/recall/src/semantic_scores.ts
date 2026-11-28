@@ -12,6 +12,8 @@ import {currentRecallCorpusGeneration, readRecallIndexData, recallIndexStatus} f
 import {type RecallEligibilityPolicy} from './eligibility.js';
 import {VectorCorpusGenerationChanged, VectorIndexCorrupt} from './vector-index.js';
 import {selectedSemanticScoreSnapshot} from './vector/semantic-read.js';
+import {RECALL_SEMANTIC_COMPACTION_NOTICE, semanticReadDuringCompaction} from './vector/compaction.js';
+export {RECALL_SEMANTIC_COMPACTION_NOTICE, semanticReadDuringCompaction};
 import {
   catchRecallRefreshEnqueueUnavailable,
   lexicalRefreshDisposition,
@@ -42,7 +44,8 @@ export type BoundedRecallSemanticRetrieval<A> =
   | {readonly cause: Cause.Cause<unknown>; readonly status: 'failed'}
   | {readonly status: 'timed-out'};
 
-export type GatedRecallSemanticRetrieval<A> = BoundedRecallSemanticRetrieval<A> | {readonly status: 'cooldown'};
+export type GatedRecallSemanticRetrieval<A> =
+  BoundedRecallSemanticRetrieval<A> | {readonly status: 'cooldown'} | {readonly status: 'compaction'};
 
 export interface McpRecallSemanticScoresResult {
   readonly result: RecallSemanticScoresResult;
@@ -92,16 +95,19 @@ export function boundedRecallSemanticRetrieval<A, E, R>(
 export function createMcpRecallSemanticRetrievalGate() {
   const retryAfterByRuntime = new WeakMap<object, {readonly deadline: bigint}>();
   const cooldownNanos = BigInt(MCP_RECALL_SEMANTIC_TIMEOUT_COOLDOWN_MILLISECONDS) * 1_000_000n;
-  return <A, E, R>(
+  /** A timeout that `duringCompaction` explains is the compaction's: it starts no cooldown. */
+  return <A, E, R, R2 = never>(
     runtime: object,
     retrieval: Effect.Effect<A, E, R>,
-  ): Effect.Effect<GatedRecallSemanticRetrieval<A>, E, R> =>
+    duringCompaction: Effect.Effect<boolean, never, R2> = Effect.succeed(false),
+  ): Effect.Effect<GatedRecallSemanticRetrieval<A>, E, R | R2> =>
     Effect.gen(function* () {
       if (yield* CallerReadCancellation) return yield* boundedRecallSemanticRetrieval(retrieval);
       const now = yield* Clock.monotonicTimeNanos;
       const previousCooldown = retryAfterByRuntime.get(runtime);
       if (previousCooldown && previousCooldown.deadline > now) return {status: 'cooldown'} as const;
       const result = yield* boundedRecallSemanticRetrieval(retrieval);
+      if (result.status === 'timed-out' && (yield* duringCompaction)) return {status: 'compaction'} as const;
       if (result.status === 'timed-out') {
         retryAfterByRuntime.set(runtime, {deadline: (yield* Clock.monotonicTimeNanos) + cooldownNanos});
       } else if (retryAfterByRuntime.get(runtime) === previousCooldown) {
@@ -130,7 +136,13 @@ export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemant
   const attempt = yield* mcpRecallSemanticRetrievalGate(
     runtime,
     loadReadOnlySemanticScoresAttempt(config, query, semanticLimit, eligibility, allowedUriScopes, preflight),
+    semanticReadDuringCompaction(config),
   );
+  const compaction = {
+    result: emptyRecallSemanticScoresResult(Option.some(RECALL_SEMANTIC_COMPACTION_NOTICE)),
+    status: 'unavailable',
+  } satisfies McpRecallSemanticScoresResult;
+  if (attempt.status === 'compaction') return compaction;
   if (attempt.status === 'cooldown') {
     return {
       result: emptyRecallSemanticScoresResult(Option.some(semanticRecallCooldownWarning())),
@@ -144,6 +156,7 @@ export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemant
     } satisfies McpRecallSemanticScoresResult;
   }
   if (attempt.status === 'failed') {
+    if (yield* semanticReadDuringCompaction(config)) return compaction;
     return {
       result: emptyRecallSemanticScoresResult(Option.some(semanticRecallFailureWarning(attempt.cause))),
       status: 'failed',
@@ -161,6 +174,7 @@ export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemant
     ) satisfies McpRecallSemanticScoresResult;
   }
   if (attempt.value.state === 'structurally-unavailable') {
+    if (yield* semanticReadDuringCompaction(config)) return compaction;
     return {
       result: emptyRecallSemanticScoresResult(Option.some(semanticRecallStructuralWarning())),
       status: 'failed',
@@ -359,7 +373,14 @@ export const loadRecallSemanticScoresResult = Effect.fn('recall.loadSemanticScor
     Effect.map(result => result ?? emptyRecallSemanticScoresResult()),
     Effect.catchCauseIf(
       cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
-      cause => Effect.succeed(emptyRecallSemanticScoresResult(Option.some(semanticRecallFailureWarning(cause)))),
+      cause =>
+        semanticReadDuringCompaction(config).pipe(
+          Effect.map(compaction =>
+            emptyRecallSemanticScoresResult(
+              Option.some(compaction ? RECALL_SEMANTIC_COMPACTION_NOTICE : semanticRecallFailureWarning(cause)),
+            ),
+          ),
+        ),
     ),
   );
 });

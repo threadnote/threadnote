@@ -18,6 +18,11 @@ import {
 } from '@threadnote/recall/background/demand';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
 import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
+import {readRecallVectorCompactionState} from '@threadnote/recall/vector/compaction';
+import {RecallVectorCompactionThresholds} from '@threadnote/recall/vector/sqlite-pages';
+import {selectedSemanticScores} from '@threadnote/recall/vector/semantic-read';
+import {vectorIndexDatabaseFilename} from '@threadnote/recall/vector-index';
+import {Database} from 'bun:sqlite';
 import {scheduleMcpRecallBackgroundRefresh} from '@threadnote/recall/mcp/refresh';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -109,6 +114,71 @@ const fixture = Effect.gen(function* () {
   };
 });
 describe('recall embedding worker', () => {
+  effectIt.effect('compacts a file above the threshold after one recall, with no vector demand or write', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      const provideModels = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+        program.pipe(
+          Effect.provideService(LocalModelStore, f.store),
+          Effect.provideService(LocalModelRuntime, f.runtime),
+        );
+      expect(yield* f.run.pipe(Effect.provideService(BackgroundInferenceAdmission, immediate))).toEqual({
+        state: 'complete',
+      });
+      expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
+      const home = yield* f.fs.realPath(f.config.agentContextHome);
+      const database = path.join(home, 'indexes/vectors', manifest.id, vectorIndexDatabaseFilename());
+      yield* Effect.sync(() => {
+        const db = new Database(database);
+        try {
+          db.exec('CREATE TABLE padding (body BLOB); BEGIN');
+          for (let row = 0; row < 256; row++) db.query('INSERT INTO padding VALUES (?)').run(new Uint8Array(16 * 1024));
+          db.exec('COMMIT; DROP TABLE padding; PRAGMA wal_checkpoint(TRUNCATE)');
+        } finally {
+          db.close();
+        }
+      });
+      const before = Number((yield* f.fs.stat(database)).size);
+      const canonicalBefore = yield* f.fs.readFileString(f.resource);
+
+      // One recall, and no write, queues the maintenance.
+      yield* provideModels(selectedSemanticScores(f.config, 'synthetic worker document')).pipe(Effect.ignore);
+      let nonce: string | undefined;
+      yield* wakeBackgroundWorker({
+        home,
+        ...recallEmbeddingWorkerPaths(path, home),
+        version: yield* getThreadnoteVersion(),
+        protocol: RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION,
+        launch: value =>
+          Effect.sync(() => {
+            nonce = value;
+            return true;
+          }),
+      });
+      expect(nonce).toBeDefined();
+      yield* provideModels(recallEmbeddingWorkerHomeProgram(home, nonce!)).pipe(
+        Effect.provideService(BackgroundInferenceAdmission, immediate),
+        Effect.timeout('10 seconds'),
+      );
+      expect(yield* readRecallVectorCompactionState(home, manifest.id)).toMatchObject({state: 'complete'});
+      expect(Number((yield* f.fs.stat(database)).size)).toBeLessThan(before / 2);
+      expect(yield* f.fs.exists(path.join(home, 'recall/vector-compaction-demand-v1', manifest.id + '.json'))).toBe(
+        false,
+      );
+      expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
+      expect(yield* f.fs.readFileString(f.resource)).toBe(canonicalBefore);
+    }).pipe(
+      Effect.provideService(RecallVectorCompactionThresholds, {
+        minimumReclaimableBytes: 1024 * 1024,
+        minimumReclaimableRatio: 0.2,
+        safetyMarginBytes: 0,
+      }),
+      TestClock.withLive,
+      provideTestLayer(Layer.merge(base, TestCommandExecutorLayer.pipe(Layer.provide(base)))),
+    ),
+  );
+
   effectIt.effect('resumes a persisted request in an independent worker and clears only verified current demand', () =>
     Effect.gen(function* () {
       const f = yield* fixture;

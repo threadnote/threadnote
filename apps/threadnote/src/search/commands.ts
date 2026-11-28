@@ -2,7 +2,10 @@ import {Console, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
+import {isFileLockTimeout} from '@threadnote/platform/file/lock';
 import {loadRecallVectorAuthorizationKey, purgeVectorIndex, vectorIndexStatus} from '@threadnote/recall/vector-index';
+import {recallVectorCompactionRunning, recallVectorStorageReport} from '@threadnote/recall/vector/compaction';
+import {formatBytes} from '../code_graph/materialization_output.js';
 import {prepareRecallIndexes} from '../lifecycle.js';
 
 class SearchCommandError extends Schema.TaggedError<SearchCommandError, {readonly brand: unique symbol}>()(
@@ -41,7 +44,16 @@ export const runIndexRebuild = Effect.fn('index.command.rebuild')(function* (
       });
     }
   });
-  yield* prepareRecallIndexes(config, manifest, authorizationKey, verifyInputs);
+  yield* prepareRecallIndexes(config, manifest, authorizationKey, verifyInputs).pipe(
+    Effect.catchIf(isFileLockTimeout, error =>
+      Effect.gen(function* () {
+        if (!(yield* recallVectorCompactionRunning(config.agentContextHome, modelId))) return yield* error;
+        return yield* SearchCommandError.make({
+          message: `A compaction of vector index ${modelId} holds its lock. Try \`threadnote index rebuild\` again when it finishes.`,
+        });
+      }),
+    ),
+  );
 });
 
 export const runIndexStatus = Effect.fn('index.command.status')(function* (config: RuntimeConfig) {
@@ -50,10 +62,17 @@ export const runIndexStatus = Effect.fn('index.command.status')(function* (confi
   for (const manifest of yield* catalog.list('embedding')) {
     const status = yield* vectorIndexStatus(config.agentContextHome, manifest);
     const selected = selectedEmbeddingModelId(selection, 'recall') === manifest.id ? ' selected' : '';
+    const report = yield* recallVectorStorageReport(config.agentContextHome, manifest.id);
+    const compaction = report?.compaction;
+    const storage =
+      report === undefined
+        ? ''
+        : `\tfile ${formatBytes(report.fileBytes + report.walBytes)}\treclaimable ${formatBytes(report.reclaimableBytes)}` +
+          `\tcompaction ${compaction === undefined ? 'none' : compaction.state + (compaction.reason ? ` (${compaction.reason})` : '')}`;
     yield* Console.log(
       status.ready
-        ? `${manifest.id}\tready\t${status.chunkCount} chunks\t${status.generation}${selected}`
-        : `${manifest.id}\tunavailable\t${status.reason ?? 'unknown'}${selected}`,
+        ? `${manifest.id}\tready\t${status.chunkCount} chunks\t${status.generation}${storage}${selected}`
+        : `${manifest.id}\tunavailable\t${status.reason ?? 'unknown'}${storage}${selected}`,
     );
   }
 });
