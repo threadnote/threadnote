@@ -11,6 +11,8 @@ import {
   recallMemoryLinkMatchesResult,
 } from './index/result.js';
 import * as SqlClient from 'effect/sql/SqlClient';
+import {SqlError} from 'effect/sql/SqlError';
+import {FileLockTimeout} from '@threadnote/platform/file/lock';
 import {
   readRecallPublishedMetadataHint,
   readyRecallSelectionPolicy,
@@ -53,8 +55,14 @@ import {
 import {selectRecallCodeLinks, type RecallCodeLinkQueryOptions} from './code_links.js';
 import {selectRecallMemoryLinks, type RecallMemoryLinkQueryOptions} from './memory/links.js';
 import * as RecallIndexIdentity from './index/identity.js';
-import {useRecallDatabase, withCanonicalResourceMutationLock, withRecallIndexLock} from './index/locks.js';
 import {
+  useRecallDatabase,
+  withCanonicalResourceMutationLock,
+  withRecallCommitFence,
+  withRecallIndexLock,
+} from './index/locks.js';
+import {
+  failFastIdentityPreparation,
   normalizeRecallIdentityPreparation,
   readRecallIdentityAdmissionCut,
   RecallIdentityAdmissionBusy,
@@ -551,6 +559,7 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
 interface RecallIndexActivation {
   readonly expectedActiveDatabasePath: string;
   readonly relativeDatabasePath: string;
+  readonly markPublished: () => void;
 }
 
 const recoverRecallIndex = Effect.fn('recall.recoverIndex')(function* (
@@ -576,6 +585,7 @@ const recoverRecallIndex = Effect.fn('recall.recoverIndex')(function* (
     `${options.includeInactive ? 'with-inactive' : 'active'}-${generation}.sqlite`,
   );
   const replacementPath = path.join(recallIndexRoot(path, config.agentContextHome), relativeDatabasePath);
+  let published = false;
   yield* fs.makeDirectory(path.dirname(replacementPath), {recursive: true, mode: 0o700});
   return yield* executeRecallIndexQuery(
     replacementPath,
@@ -585,6 +595,9 @@ const recoverRecallIndex = Effect.fn('recall.recoverIndex')(function* (
     {
       expectedActiveDatabasePath: failedDatabasePath,
       relativeDatabasePath,
+      markPublished: () => {
+        published = true;
+      },
     },
   ).pipe(
     normalizeRecallIdentityPreparation,
@@ -599,6 +612,16 @@ const recoverRecallIndex = Effect.fn('recall.recoverIndex')(function* (
             message: `Lexical recall index recovery failed: ${Cause.pretty(firstCause)}; replacement failed: ${Cause.pretty(secondCause)}`,
           }),
         ),
+    ),
+    Effect.ensuring(
+      Effect.suspend(() =>
+        published
+          ? Effect.void
+          : removeRecallDatabaseAuxiliaryFiles(fs, replacementPath).pipe(
+              Effect.ignore,
+              Effect.andThen(fs.remove(replacementPath, {force: true}).pipe(Effect.ignore)),
+            ),
+      ),
     ),
   );
 });
@@ -1593,9 +1616,19 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
   const marker = yield* readStaleMarker(fs, staleMarkerBasePath);
   const canonical = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
   if (!activation && !required(metadata, marker, canonical)) return yield* skipped;
-  const fenced = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    withRecallIndexLock(fs, recallIndexLockPath(path, config.agentContextHome, options.includeInactive), () =>
-      withCanonicalResourceMutationLock(fs, path, config.agentContextHome, config.account, effect),
+  const deferContention = !(yield* failFastIdentityPreparation);
+  const publicationFence = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    withRecallIndexLock(
+      fs,
+      recallIndexLockPath(path, config.agentContextHome, options.includeInactive),
+      () => withCanonicalResourceMutationLock(fs, path, config.agentContextHome, config.account, effect),
+      undefined,
+      false,
+    ).pipe(
+      Effect.catchIf(
+        error => deferContention && Schema.is(FileLockTimeout)(error),
+        () => Effect.fail(recallRefreshSuperseded()),
+      ),
     );
   const capture = () =>
     Effect.gen(function* () {
@@ -1607,14 +1640,15 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
       );
       if (activeDatabasePath !== (activation?.expectedActiveDatabasePath ?? databasePath))
         return yield* recallRefreshSuperseded();
-      return yield* captureRecallRefreshCut(sql, fs, path, config, options.includeInactive, {
+      return yield* captureRecallRefreshCut(fs, path, config, options.includeInactive, {
         databasePath,
         activeDatabasePath,
         staleMarkerBasePath,
         pointerPath: recallIndexPointerPath(path, config.agentContextHome, options.includeInactive),
       });
     });
-  const base = yield* fenced(capture());
+  // Read SQLite before taking any file lock. The prewrite metadata check protects this observation.
+  const base = {...(yield* publicationFence(capture())), metadata};
   if (!activation && !required(base.metadata, base.staleMarker, base.canonicalMutationGeneration))
     return yield* skipped;
   const forceReasons = recallRefreshForceReasons(options.forceRefresh === true, base.metadata);
@@ -1666,45 +1700,74 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
       removed: prepared.refreshCounts.removedSourceCount,
       total: prepared.refreshCounts.changedSourceCount,
     }) ?? Effect.void;
-    const documentCount = yield* fenced(
-      Effect.gen(function* () {
-        yield* verifyRecallSourceInputs(prepared.sourceInputs);
-        const count = yield* sql.withTransaction(
-          Effect.gen(function* () {
-            if ((yield* capture()).seal !== base.seal) return yield* recallRefreshSuperseded();
-            return yield* publishPreparedRecallDatabase(sql, config, options.includeInactive, prepared);
-          }),
-        );
-        if (activation) {
-          yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
-          yield* sql.unsafe('PRAGMA journal_mode = DELETE');
-          yield* removeRecallDatabaseAuxiliaryFiles(fs, databasePath);
-          yield* writeActiveRecallDatabasePointer(
-            fs,
-            path,
-            config.agentContextHome,
-            options.includeInactive,
-            activation.relativeDatabasePath,
-          );
-        }
-        const observedMarker = base.staleMarker;
-        if (observedMarker && base.metadata.get('stale_generation') !== observedMarker.generation)
-          yield* clearStaleMarkerInvalidations(fs, staleMarkerBasePath, observedMarker).pipe(
-            Effect.catch(error =>
-              emitRecallDiagnostic(config.agentContextHome, {
-                event: 'recall.invalidation-failed',
-                scope: recallDiagnosticScope(options.includeInactive),
-                stage: 'marker-clear',
-                invalidatedUriCount: observedMarker.invalidatedUris.length,
-                error,
+    const apply = Effect.gen(function* () {
+      if (recallMetadataCut(yield* loadRecallMetadata(sql)) !== recallMetadataCut(base.metadata))
+        return yield* recallRefreshSuperseded();
+      return yield* publishPreparedRecallDatabase(sql, config, options.includeInactive, prepared);
+    });
+    const checkFileCut = Effect.gen(function* () {
+      if ((yield* capture()).seal !== base.seal) return yield* recallRefreshSuperseded();
+    });
+    // Checkpoint I/O must not run as part of the final COMMIT while both file locks are held.
+    yield* sql.unsafe('PRAGMA wal_autocheckpoint = 0');
+    const documentCount = yield* (
+      activation
+        ? sql.withTransaction(apply)
+        : withRecallCommitFence(publicationFence, enter =>
+            sql.withTransaction(
+              Effect.gen(function* () {
+                const count = yield* apply;
+                yield* verifyRecallSourceInputs(prepared.sourceInputs);
+                yield* enter;
+                yield* checkFileCut;
+                return count;
               }),
             ),
-          );
-        yield* fs.chmod(databasePath, 0o600);
-        yield* removeLegacyRecallIndexArtifacts(fs, path, config.agentContextHome, RECALL_INDEX_DATABASE_VERSION);
-        return count;
-      }),
+          )
+    ).pipe(
+      Effect.catchIf(
+        error => deferContention && Schema.is(SqlError)(error) && error.reason._tag === 'LockTimeoutError',
+        () => Effect.fail(recallRefreshSuperseded()),
+      ),
     );
+    if (activation) {
+      yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
+      yield* sql.unsafe('PRAGMA journal_mode = DELETE');
+      yield* removeRecallDatabaseAuxiliaryFiles(fs, databasePath);
+      yield* verifyRecallSourceInputs(prepared.sourceInputs);
+      yield* publicationFence(
+        checkFileCut.pipe(
+          Effect.andThen(
+            writeActiveRecallDatabasePointer(
+              fs,
+              path,
+              config.agentContextHome,
+              options.includeInactive,
+              activation.relativeDatabasePath,
+            ).pipe(
+              Effect.tap(() => Effect.sync(activation.markPublished)),
+              Effect.uninterruptible,
+            ),
+          ),
+        ),
+      );
+    } else {
+      yield* sql.unsafe('PRAGMA wal_checkpoint(PASSIVE)').pipe(Effect.ignore);
+    }
+    const observedMarker = base.staleMarker;
+    if (observedMarker && base.metadata.get('stale_generation') !== observedMarker.generation)
+      yield* clearStaleMarkerInvalidations(fs, staleMarkerBasePath, observedMarker).pipe(
+        Effect.catch(error =>
+          emitRecallDiagnostic(config.agentContextHome, {
+            event: 'recall.invalidation-failed',
+            scope: recallDiagnosticScope(options.includeInactive),
+            stage: 'marker-clear',
+            invalidatedUriCount: observedMarker.invalidatedUris.length,
+            error,
+          }),
+        ),
+      );
+    yield* removeLegacyRecallIndexArtifacts(fs, path, config.agentContextHome, RECALL_INDEX_DATABASE_VERSION);
     yield* emitRecallLexicalRefresh(
       config.agentContextHome,
       options.includeInactive,

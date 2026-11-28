@@ -1,7 +1,7 @@
 import {SecureRandom} from 'effect/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError} from 'effect';
+import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError, Tracer} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
@@ -17,6 +17,8 @@ import {
   requestRecallEmbeddings,
 } from '@threadnote/recall/background/demand';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
+import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
+import {writeFileSync} from 'node:fs';
 import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector/semantic-read';
 import {readRecallVectorCompactionState} from '@threadnote/recall/vector/compaction';
 import {RecallVectorCompactionThresholds} from '@threadnote/recall/vector/sqlite-pages';
@@ -347,6 +349,42 @@ describe('recall embedding worker', () => {
       expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeUndefined();
       expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
     }).pipe(TestClock.withLive, provideTestLayer(base)),
+  );
+
+  effectIt.effect('keeps embedding demand queued after lexical publication is superseded', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      const accountLock = resourceAccountMutationLockPath(
+        path,
+        yield* f.fs.realPath(f.config.agentContextHome),
+        f.config.account,
+      );
+      const owner = JSON.stringify({processId: process.pid, token: 'synthetic-embedding-account-owner', version: 1});
+      const delegate = yield* Effect.tracer;
+      const tracer = Tracer.make({
+        span(options) {
+          if (options.name === 'recall.publishPreparedDatabase') writeFileSync(accountLock, owner, {flag: 'wx'});
+          return delegate.span(options);
+        },
+      });
+      const unit = yield* makeRecallEmbeddingWorker().pipe(
+        Effect.provideService(BackgroundInferenceAdmission, immediate),
+        Effect.provideService(LocalModelStore, f.store),
+        Effect.provideService(LocalModelRuntime, f.runtime),
+      );
+      expect(
+        yield* unit(f.config).pipe(
+          Effect.withTracer(tracer),
+          Effect.ensuring(f.fs.remove(accountLock, {force: true}).pipe(Effect.ignore)),
+        ),
+      ).toEqual({state: 'checkpointed', reason: 'source-changed', delay: 50});
+      expect((yield* readRecallEmbeddingDemand(f.config))?.observation).toMatchObject({
+        state: 'queued',
+        reason: 'source-changed',
+        failures: 0,
+      });
+    }).pipe(provideTestLayer(base), TestClock.withLive),
   );
   effectIt.effect('keeps an in-flight build across ten stale reads and publishes it', () =>
     Effect.gen(function* () {

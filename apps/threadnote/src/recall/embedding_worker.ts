@@ -277,6 +277,7 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
     }
     if (
       Schema.is(RecallVectorSourceChanged)(error) ||
+      Schema.is(RecallIndexSourceChanged)(error) ||
       (yield* readRecallEmbeddingDemand(scope))?.desired?.revision !== desired.revision
     ) {
       yield* observe('queued', 'source-changed', 0);
