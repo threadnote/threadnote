@@ -11,13 +11,14 @@ import {
   authoredActionFixture,
   runProviderActionPreview,
   runProviderReadiness,
-  uniqueFixtureAction,
+  readFixtureActionListing,
   type QualificationCli,
 } from './provider-fixture.js';
 import {expectedFixtureSources} from './writer-fixture.js';
 import {SemanticAgentQuery} from '../../../src/semantic/agent_query_protocol.js';
 import {SemanticAgentChangeRequest} from '../../../src/semantic/agent_change_protocol.js';
 import {nativeTypeScriptAssetPins} from '@threadnote/graph/typescript_native_asset_pins';
+import {createSemanticProposal, proposalPage, type ProposalPage} from '@threadnote/semantic/proposals';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {observeCandidateTransport} from './transport-lifecycle.js';
@@ -260,11 +261,14 @@ describe('final combined qualification preparation', () => {
       }
     }
   });
-  it('authors finite actions and refuses ambiguous or unsafe public listings', () => {
+  it('authors finite actions and refuses invalid or unsafe public listings', () => {
     const expected = {
       python: ['action_case.py', 'def selected() -> int:\n    return 1\n\n_ = selected()\n'],
       go: ['action_case.go', 'package demo\n\nfunc actionCase() {\n\tx := 1\n\t_ = x\n}\n'],
-      rust: ['src/action_case.rs', 'pub fn invoke() { missing_one(); }\n\nfn missing_one() {\n    todo!()\n}\n'],
+      rust: [
+        'src/action_case.rs',
+        'fn keep_reference(_value: &i32) {}\npub fn action_total() { keep_reference(&37_i32); }\n',
+      ],
       java: ['src/main/java/demo/ActionCase.java', 'package demo;\nclass ActionCase {}\n'],
     } as const;
     for (const language of ['python', 'go', 'rust', 'java'] as const) {
@@ -292,17 +296,17 @@ describe('final combined qualification preparation', () => {
       observation: {uri: 'file:///fixture/a.py', content: EffectString.repeat(64)('b')},
       choices: [choice],
     };
-    expect(uniqueFixtureAction(listing).choices[0].choiceHandle).toBe(choice.choiceHandle);
+    expect(readFixtureActionListing(listing).choices[0].choiceHandle).toBe(choice.choiceHandle);
     for (const choices of [
       [],
-      [choice, {...choice, choiceHandle: EffectString.repeat(64)('c')}],
+      [choice, choice],
       [{...choice, command: true}],
       [{...choice, disabled: 'disabled'}],
       [{...choice, qualified: false}],
       [{...choice, blocker: 'resource-operation'}],
       [{...choice, kind: 'source.organizeImports'}],
     ])
-      expect(() => uniqueFixtureAction({...listing, choices})).toThrow();
+      expect(() => readFixtureActionListing({...listing, choices})).toThrow();
     expect(protocolCapabilities(listing)).toEqual([choice.choiceHandle]);
     expect(JSON.stringify(redactCapabilities(listing))).not.toContain(choice.choiceHandle);
     expect(expectedFixtureSources({'a.py': 'UnsavedName'})).toEqual({'a.py': 'RenamedName'});
@@ -311,7 +315,7 @@ describe('final combined qualification preparation', () => {
     expect(() => expectedFixtureSources({'a.py': 'before'}, {'foreign.py': 'after'})).toThrow();
   });
 
-  it('keeps client choices separate and rejects engine bytes different from the authored V2 action', async () => {
+  it('selects the single complete authored action independently on both transports', async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), 'tn11-action-preview-')));
     const action = authoredActionFixture('python');
     const hash = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -330,10 +334,27 @@ describe('final combined qualification preparation', () => {
       await writeFile(join(directory, action.file), action.before);
       const info = await lstat(join(directory, action.file), {bigint: true});
       const uri = pathToFileURL(join(directory, action.file)).href;
-      const observation = {uri, content: hash(action.before)};
+      const observation = {
+        version: 1,
+        repository: 'fixture',
+        worktree: pathToFileURL(directory).href,
+        project: pathToFileURL(directory).href,
+        configuration: hash('configuration'),
+        toolchain: hash('toolchain'),
+        provider: {id: 'basedpyright', version: '1.40.2', generation: 1},
+        view: {kind: 'disk', id: 'fixture', owner: 'fixture', epoch: 0},
+        uri,
+        content: hash(action.before),
+        documentVersion: null,
+        projectEpoch: 0,
+      };
       const range = {start: {line: 3, character: 0}, end: {line: 3, character: 10}};
       let selections = 0,
-        wrongAfter = false;
+        wrongAfter = false,
+        alternativeMatches = false,
+        malformedAlternative = false,
+        mismatchedAfter = false;
+      const retained = new Map<string, ProposalPage>();
       const respond = (channel: 'cli' | 'mcp', stage: string, request: Record<string, unknown>): unknown => {
         if (stage === 'query') Schema.decodeUnknownSync(SemanticAgentQuery, {onExcessProperty: 'error'})(request);
         else if (stage !== 'apply')
@@ -343,6 +364,8 @@ describe('final combined qualification preparation', () => {
           });
         const ownChoice = EffectString.repeat(64)(channel === 'cli' ? '1' : '2');
         const ownProposal = EffectString.repeat(64)(channel === 'cli' ? '3' : '4');
+        const alternativeChoice = EffectString.repeat(64)(channel === 'cli' ? '5' : '6');
+        const alternativeProposal = EffectString.repeat(64)(channel === 'cli' ? '7' : '8');
         if (stage === 'query')
           return {
             status: 'ok',
@@ -350,69 +373,97 @@ describe('final combined qualification preparation', () => {
             evidence: {observation},
             items: [{id: EffectString.repeat(64)('d'), range}],
           };
-        if (stage === 'prepare' && !request.choiceHandle)
+        if (stage === 'prepare' && !request.choiceHandle) {
+          const choice = (choiceHandle: string) => ({
+            choiceHandle,
+            title: 'Resolve unused call result',
+            kind: 'quickfix',
+            command: false,
+            disabled: null,
+            qualified: true,
+            blocker: null,
+          });
           return {
             status: 'choices',
             applicable: false,
             writerAuthorityRequired: true,
             observation,
-            choices: [
-              {
-                choiceHandle: ownChoice,
-                title: 'Discard call result',
-                kind: 'quickfix',
-                command: false,
-                disabled: null,
-                qualified: true,
-                blocker: null,
-              },
-            ],
+            choices:
+              channel === 'cli'
+                ? [choice(alternativeChoice), choice(ownChoice)]
+                : [choice(ownChoice), choice(alternativeChoice)],
           };
+        }
         if (stage === 'prepare') {
           selections++;
-          expect(request.choiceHandle).toBe(ownChoice);
+          expect([ownChoice, alternativeChoice]).toContain(request.choiceHandle);
           expect(request.diagnosticIds).toEqual([EffectString.repeat(64)('d')]);
           expect(request.only).toEqual(['quickfix']);
-          const edits = [{range, newText: '_ = selected()'}];
-          const manifest = {
-            version: 2,
-            operation: 'code-action',
-            qualification: 'qualified-text-only',
-            operations: [{kind: 'text', uri, target: 0, edits}],
-            targets: [
-              {
-                observation,
-                edits,
-                precondition: {
-                  rawDigest: hash(action.before),
-                  sourceKind: 'disk',
-                  physicalIdentity: JSON.stringify([String(info.dev), String(info.ino)]),
+          const main = request.choiceHandle === ownChoice;
+          const id = main ? ownProposal : alternativeProposal;
+          const replacement = (main ? !wrongAfter : alternativeMatches)
+            ? '_ = selected()'
+            : 'selected()  # pyright: ignore';
+          const edits = [{range, newText: replacement}];
+          const proposal = createSemanticProposal(
+            {
+              version: 2,
+              operation: 'code-action',
+              qualification: 'qualified-text-only',
+              evidence: {observation, basis: 'semantic', scope: 'fixture', completeness: 'complete', limitations: []},
+              operations: [{kind: 'text', uri, target: 0, version: null, edits}],
+              targets: [
+                {
+                  observation,
+                  beforeText: action.before,
+                  edits,
+                  precondition: {
+                    rawDigest: hash(action.before),
+                    sourceKind: 'disk',
+                    encoding: 'utf-8',
+                    owner: observation.view.owner,
+                    documentVersion: null,
+                    physicalIdentity: JSON.stringify([String(info.dev), String(info.ino)]),
+                  },
                 },
-              },
-            ],
-          };
+              ],
+            },
+            hash,
+          );
+          const page = proposalPage(proposal, {maxBytes: 8192});
+          const after = page.chunks.at(-1)!;
+          expect(page.next).toBeNull();
+          expect(after.kind).toBe('after');
+          const offset = page.chunks.length - 1;
+          retained.set(id, {
+            ...page,
+            offset,
+            chunks: [mismatchedAfter && !main ? {...after, text: action.after} : after],
+          });
           return {
             status: 'ok',
             applicable: false,
             writerAuthorityRequired: true,
             targetCount: 1,
-            handle: {id: ownProposal, capability: ownProposal, digest: EffectString.repeat(64)('e')},
+            handle: {id, capability: id, digest: proposal.digest},
+            page: {...page, next: offset, chunks: page.chunks.slice(0, offset)},
+          };
+        }
+        if (stage === 'status') {
+          const handle = Schema.decodeUnknownSync(Schema.Struct({id: Schema.String}))(request.handle);
+          expect([ownProposal, alternativeProposal]).toContain(handle.id);
+          const page = retained.get(handle.id)!;
+          expect(request.offset).toBe(page.offset);
+          return {
+            status: 'ok',
+            applicable: false,
+            writerAuthorityRequired: true,
             page: {
-              digest: EffectString.repeat(64)('e'),
-              offset: 0,
-              next: null,
-              chunkCount: 3,
-              chunks: [
-                {kind: 'manifest', text: JSON.stringify(manifest)},
-                {kind: 'before', target: 0, text: action.before},
-                {
-                  kind: 'after',
-                  target: 0,
-                  text: wrongAfter
-                    ? 'unrelated engine bytes'
-                    : 'def selected() -> int:\n    return 1\n\n_ = selected()\n',
-                },
-              ],
+              ...page,
+              chunkCount:
+                malformedAlternative && channel === 'mcp' && handle.id === alternativeProposal
+                  ? page.chunkCount + 1
+                  : page.chunkCount,
             },
           };
         }
@@ -441,24 +492,7 @@ describe('final combined qualification preparation', () => {
         };
       };
       const results: unknown[] = [];
-      const prepared = await runProviderActionPreview(
-        input,
-        directory,
-        sources,
-        action,
-        run,
-        client,
-        promise => promise,
-        Date.now() + 10000,
-        results,
-      );
-      expect(prepared.handle.id).toBe(EffectString.repeat(64)('3'));
-      expect(selections).toBe(2);
-      expect(results).toMatchObject([{status: 'passed', fullScenarioQualified: false}]);
-      expect(JSON.stringify(results)).not.toContain(EffectString.repeat(64)('1'));
-      expect(await readFile(join(directory, action.file), 'utf8')).toBe(action.before);
-      wrongAfter = true;
-      await expect(
+      const preview = (records: unknown[] = []) =>
         runProviderActionPreview(
           input,
           directory,
@@ -468,9 +502,26 @@ describe('final combined qualification preparation', () => {
           client,
           promise => promise,
           Date.now() + 10000,
-          [],
-        ),
-      ).rejects.toThrow('Complete exact authored bytes');
+          records,
+        );
+      const prepared = await preview(results);
+      expect(prepared.handle.id).toBe(EffectString.repeat(64)('3'));
+      expect(selections).toBe(4);
+      expect(results).toMatchObject([{status: 'passed', fullScenarioQualified: false}]);
+      expect(JSON.stringify(results)).not.toContain(EffectString.repeat(64)('1'));
+      expect(await readFile(join(directory, action.file), 'utf8')).toBe(action.before);
+      wrongAfter = true;
+      await expect(preview()).rejects.toThrow('No action matches the complete authored preview');
+      wrongAfter = false;
+      alternativeMatches = true;
+      await expect(preview()).rejects.toThrow('More than one action matches the complete authored preview');
+      alternativeMatches = false;
+      malformedAlternative = true;
+      await expect(preview()).rejects.toThrow('Stable proposal digest and contiguous pages');
+      malformedAlternative = false;
+      wrongAfter = true;
+      mismatchedAfter = true;
+      await expect(preview()).rejects.toThrow('stored after-image does not match derived image');
       expect(await readFile(join(directory, action.file), 'utf8')).toBe(action.before);
     } finally {
       await rm(directory, {recursive: true, force: true});

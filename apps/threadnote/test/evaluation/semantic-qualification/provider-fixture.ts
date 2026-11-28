@@ -16,6 +16,7 @@ import {
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {isJsonObject} from '@threadnote/platform/json';
+import {createSemanticProposal} from '@threadnote/semantic/proposals';
 import {semanticTreeDigest, semanticSdkDigest} from '../../../src/semantic/fingerprint.js';
 import {
   javaPreparedModelJson,
@@ -35,6 +36,7 @@ import {checkProbeDefinition, checkProbeReferences} from '../../../../../tools/s
 import {checkProposalStatusTransportParity} from './transport-oracle.js';
 import type {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {SemanticReadinessResult} from '../../../src/semantic/agent_query_protocol.js';
+import {semanticActionChoiceLimits} from '../../../src/semantic/action_choices.js';
 
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const common = {
@@ -262,11 +264,11 @@ export function authoredActionFixture(language: ProviderInputs['language']) {
       };
     case 'rust':
       return {
-        id: 'generate-missing-local-function',
+        id: 'borrow-integer-argument',
         file: 'src/action_case.rs',
-        line: 0,
-        before: 'pub fn invoke() { missing_one(); }\n',
-        after: 'pub fn invoke() { missing_one(); }\n\nfn missing_one() {\n    todo!()\n}\n',
+        line: 1,
+        before: 'fn keep_reference(_value: &i32) {}\npub fn action_total() { keep_reference(37_i32); }\n',
+        after: 'fn keep_reference(_value: &i32) {}\npub fn action_total() { keep_reference(&37_i32); }\n',
       };
     case 'java':
       return {
@@ -935,13 +937,15 @@ async function verifyFixtureProposal(
   action = false,
   onPage: (pages: number) => void = () => {},
 ) {
-  assert.equal(prepared.targetCount, EffectRecord.keys(expected).length, 'Exact complete authored target count');
   let pages = 0;
   const chunks: (typeof Page.Type.chunks)[number][] = [];
   let page = prepared.page;
   for (;;) {
     assert.ok(
-      page.digest === prepared.handle.digest && page.offset === chunks.length,
+      page.digest === prepared.handle.digest &&
+        page.offset === chunks.length &&
+        page.chunkCount === prepared.page.chunkCount &&
+        page.chunks.length > 0,
       'Stable proposal digest and contiguous pages',
     );
     chunks.push(...page.chunks);
@@ -951,7 +955,10 @@ async function verifyFixtureProposal(
     if (page.next === null) break;
     assert.ok(page.next === chunks.length && page.next > page.offset, 'Monotonic proposal continuation');
     const next = await status(page.next);
-    assert.ok(isJsonObject(next));
+    assert.ok(
+      isJsonObject(next) && next.status === 'ok' && next.applicable === false && next.writerAuthorityRequired === true,
+      'Current read-only proposal continuation',
+    );
     page = Schema.decodeUnknownSync(Page)(next.page);
   }
   assert.equal(chunks.length, page.chunkCount, 'All proposal chunks retrieved');
@@ -961,32 +968,10 @@ async function verifyFixtureProposal(
       '',
     );
   const raw: unknown = JSON.parse(chunkText(EffectArray.filter(chunks, chunk => chunk.kind === 'manifest')));
-  const manifest = Schema.decodeUnknownSync(Schema.Struct({targets: Schema.Array(Target)}))(raw);
+  assert.ok(isJsonObject(raw) && EffectArray.isArray(raw.targets), 'Complete proposal manifest');
+  const targets = Schema.decodeUnknownSync(Schema.Array(Target))(raw.targets);
+  assert.equal(prepared.targetCount, targets.length, 'Exact complete proposal target count');
   if (action) {
-    const v2 = Schema.decodeUnknownSync(
-      Schema.Struct({
-        version: Schema.Literal(2),
-        operation: Schema.Literal('code-action'),
-        qualification: Schema.Literal('qualified-text-only'),
-        operations: Schema.Array(
-          Schema.Struct({
-            kind: Schema.Literal('text'),
-            uri: Schema.String,
-            target: Schema.Finite,
-            edits: Schema.Array(Schema.Unknown).check(Schema.isMinLength(1)),
-          }),
-        ).check(Schema.isMinLength(1)),
-        targets: Schema.Array(
-          Schema.Struct({observation: Schema.Struct({uri: Schema.String}), edits: Schema.Array(Schema.Unknown)}),
-        ),
-      }),
-    )(raw);
-    assert.equal(v2.operations.length, v2.targets.length, 'One complete text operation per authored target');
-    assert.equal(
-      new Set(EffectArray.map(v2.operations, operation => operation.target)).size,
-      v2.targets.length,
-      'No duplicate or omitted V2 operation target',
-    );
     for (const chunk of chunks)
       assert.ok(
         chunk.kind === 'manifest'
@@ -995,37 +980,34 @@ async function verifyFixtureProposal(
               Number.isSafeInteger(chunk.target) &&
               chunk.target != null &&
               chunk.target >= 0 &&
-              chunk.target < v2.targets.length,
+              chunk.target < targets.length,
         'No foreign action chunk',
       );
-    for (const operation of v2.operations) {
-      const target = v2.targets[operation.target];
-      assert.ok(
-        target && operation.uri === target.observation.uri && isDeepStrictEqual(operation.edits, target.edits),
-        'Complete V2 text operations match targets',
-      );
-    }
   }
   const expectedUris = EffectArray.map(
     EffectRecord.keys(expected),
     name => pathToFileURL(join(project, name)).href,
   ).sort();
-  assert.ok(
-    isDeepStrictEqual(EffectArray.map(manifest.targets, target => target.observation.uri).sort(), expectedUris),
-    'Exact complete target identity set',
-  );
-  for (let index = 0; index < manifest.targets.length; index++) {
-    const target = manifest.targets[index];
+  const targetUris = EffectArray.map(targets, target => target.observation.uri);
+  assert.equal(new Set(targetUris).size, targetUris.length, 'No duplicate proposal targets');
+  let matches = isDeepStrictEqual(targetUris.sort(), expectedUris);
+  if (!action) assert.ok(matches, 'Exact complete target identity set');
+  const actionTargets: Record<string, unknown>[] = [];
+  for (const [index, target] of targets.entries()) {
     const found = EffectArray.findFirst(
-      EffectRecord.keys(expected),
+      EffectRecord.keys(sources),
       name => pathToFileURL(join(project, name)).href === target.observation.uri,
     );
     assert.ok(found._tag === 'Some', 'No foreign proposal target');
     const name = found.value;
-    const before = chunkText(EffectArray.filter(chunks, chunk => chunk.target === index && chunk.kind === 'before'));
-    const after = chunkText(EffectArray.filter(chunks, chunk => chunk.target === index && chunk.kind === 'after'));
+    const beforeChunks = EffectArray.filter(chunks, chunk => chunk.target === index && chunk.kind === 'before');
+    const afterChunks = EffectArray.filter(chunks, chunk => chunk.target === index && chunk.kind === 'after');
+    assert.ok(beforeChunks.length && afterChunks.length, 'Complete proposal source chunks');
+    const before = chunkText(beforeChunks),
+      after = chunkText(afterChunks);
     assert.equal(before, sources[name], 'Complete original proposal bytes');
-    assert.equal(after, expected[name], 'Complete exact authored bytes');
+    if (!action) assert.equal(after, expected[name], 'Complete exact authored bytes');
+    matches &&= after === expected[name];
     const identity = await lstat(join(project, name), {bigint: true});
     assert.ok(
       target.precondition.rawDigest === hash(before) &&
@@ -1034,8 +1016,20 @@ async function verifyFixtureProposal(
         target.precondition.physicalIdentity === JSON.stringify([identity.dev.toString(), identity.ino.toString()]),
       'Exact raw-byte physical source preconditions',
     );
+    if (action) {
+      const entry: unknown = raw.targets[index];
+      assert.ok(isJsonObject(entry) && !('beforeText' in entry) && !('afterText' in entry), 'Paged action target');
+      actionTargets.push({...entry, beforeText: before, afterText: after});
+    }
   }
-  return pages;
+  if (action) {
+    const proposal = createSemanticProposal({...raw, targets: actionTargets, digest: prepared.handle.digest}, hash);
+    assert.ok(
+      proposal.version === 2 && proposal.qualification === 'qualified-text-only',
+      'Qualified V2 action preview',
+    );
+  }
+  return {pages, matches};
 }
 
 /** The independent expected before/after bytes cover every provider-returned target and operation. */
@@ -1091,7 +1085,7 @@ export async function runProviderPreview(
   results.push(record);
   const prepared = Schema.decodeUnknownSync(Prepared)(cli.value);
   assert.equal(prepared.targetCount, EffectRecord.keys(sources).length, 'Every fixture file in complete proposal');
-  record.pages = await verifyFixtureProposal(
+  await verifyFixtureProposal(
     project,
     sources,
     EffectRecord.fromEntries(
@@ -1166,17 +1160,18 @@ const Choice = Schema.Struct({
   blocker: Schema.Null,
 });
 
-/** No first-choice/title heuristic: the exact diagnostic query must offer exactly one safe choice. */
-export function uniqueFixtureAction(value: unknown) {
+/** The product returns the complete bounded listing or refuses it. */
+export function readFixtureActionListing(value: unknown) {
   const listing = Schema.decodeUnknownSync(
     Schema.Struct({
       status: Schema.Literal('choices'),
       applicable: Schema.Literal(false),
       writerAuthorityRequired: Schema.Literal(true),
-      choices: Schema.Array(Choice).check(Schema.isBetweenLength(1, 1)),
+      choices: Schema.Array(Choice).check(Schema.isBetweenLength(1, semanticActionChoiceLimits.maxChoices)),
       observation: Schema.Struct({uri: Schema.String, content: digest}),
     }),
   )(value);
+  assert.equal(new Set(EffectArray.map(listing.choices, choice => choice.choiceHandle)).size, listing.choices.length);
   return listing;
 }
 
@@ -1287,10 +1282,35 @@ export async function runProviderActionPreview(
         : callMcp('semantic_change_prepare', body);
     const listed = await prepare(request);
     record.clients.push({channel, stage: 'listing', result: redactCapabilities(listed)});
-    const listing = uniqueFixtureAction(listed);
+    const listing = readFixtureActionListing(listed);
     assert.equal(listing.observation.uri, uri, 'Action listing exact target');
     assert.equal(listing.observation.content, hash(action.before), 'Action listing exact source');
-    const choice = listing.choices[0];
+    await unchanged();
+    let match:
+      {choice: typeof Choice.Type; selected: unknown; prepared: typeof Prepared.Type; pages: number} | undefined;
+    for (const choice of listing.choices) {
+      const selected = await prepare({...request, choiceHandle: choice.choiceHandle});
+      const prepared = Schema.decodeUnknownSync(Prepared)(selected);
+      const status = async (offset: number) =>
+        channel === 'cli'
+          ? (await run(['semantic', 'change', 'status', '--json'], {...common, handle: prepared.handle, offset})).value
+          : callMcp('semantic_change_status', {...common, handle: prepared.handle, offset});
+      const preview = await verifyFixtureProposal(
+        project,
+        sources,
+        {[action.file]: action.after},
+        prepared,
+        status,
+        true,
+      );
+      await unchanged();
+      if (preview.matches) {
+        assert.ok(!match, 'More than one action matches the complete authored preview');
+        match = {choice, selected, prepared, pages: preview.pages};
+      }
+    }
+    assert.ok(match, 'No action matches the complete authored preview');
+    const {choice, selected, prepared, pages} = match;
     const semantics = {
       range,
       only: request.only,
@@ -1303,15 +1323,7 @@ export async function runProviderActionPreview(
     };
     if (channel === 'cli') cliSelection = semantics;
     else assert.ok(isDeepStrictEqual(semantics, cliSelection), 'CLI/MCP selected action/query semantic parity');
-    await unchanged();
-    const selected = await prepare({...request, choiceHandle: listing.choices[0].choiceHandle});
     record.clients.push({channel, stage: 'selected-proposal', result: redactCapabilities(selected)});
-    const prepared = Schema.decodeUnknownSync(Prepared)(selected);
-    const status = async (offset: number) =>
-      channel === 'cli'
-        ? (await run(['semantic', 'change', 'status', '--json'], {...common, handle: prepared.handle, offset})).value
-        : callMcp('semantic_change_status', {...common, handle: prepared.handle, offset});
-    const pages = await verifyFixtureProposal(project, sources, {[action.file]: action.after}, prepared, status, true);
     const preflight =
       channel === 'cli'
         ? (await run(['semantic', 'change', 'preflight', '--json'], {...common, handle: prepared.handle})).value
