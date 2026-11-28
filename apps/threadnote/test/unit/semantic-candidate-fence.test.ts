@@ -38,3 +38,11 @@ it('reports an incomplete snapshot instead of a fence for a missing root', () =>
   const f = fixture();
   expect(semanticCandidateMetadata([...f.candidateRoots, join(f.root, 'absent')])).toBeUndefined();
 });
+
+it('does not fence a native SDK with Git metadata that may reference files outside the candidate roots', () => {
+  const f = fixture();
+  const sdk = join(f.root, 'sdk');
+  expect(semanticCandidateMetadata(f.candidateRoots, sdk)).toMatch(/^[0-9a-f]{64}$/u);
+  writeFileSync(join(sdk, '.git'), 'gitdir: ../external');
+  expect(semanticCandidateMetadata(f.candidateRoots, sdk)).toBeUndefined();
+});

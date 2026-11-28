@@ -617,7 +617,17 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                 : reservation.release(!wireState.attempted && !startupBinding.cleanupUnknown()).pipe(Effect.ignore),
             );
             if (control) yield* control.stage('verifying-inputs');
+            const roots = semanticCandidateRoots(candidate);
+            const nativeSdk =
+              (providerId === 'gopls' || providerId === 'rust-analyzer') && 'sdkDirectory' in candidate
+                ? candidate.sdkDirectory
+                : undefined;
+            const candidateMetadata = () => semanticCandidateMetadata(roots, nativeSdk);
+            // Native startup and read-time verification use the same full verifier.
+            const startupMetadata = nativeSdk === undefined ? undefined : candidateMetadata();
             yield* verifyCandidate(candidate, providerId, true);
+            let fence =
+              startupMetadata !== undefined && candidateMetadata() === startupMetadata ? startupMetadata : undefined;
             if (control) yield* control.stage('preparing-project');
             diskBasis = yield* configurationBasis(providerId, worktree, startupBinding);
             const pythonProject =
@@ -677,19 +687,16 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               projectEpoch: reservation.generation,
             };
             let providerGuard: Effect.Effect<void, unknown> = Effect.void;
-            // One full candidate digest per session: later requests compare a metadata snapshot taken around it,
-            // and any metadata change repeats the full digest before the request continues.
-            const roots = semanticCandidateRoots(candidate);
-            let fence: string | undefined;
+            // Later requests compare metadata from around the last complete verification.
             const candidateCurrent = Effect.suspend(() => {
-              const before = semanticCandidateMetadata(roots);
+              const before = candidateMetadata();
               if (before !== undefined && before === fence) return Effect.void;
               fence = undefined;
               return verifyCandidate(candidate, providerId).pipe(
                 Effect.andThen(
                   Effect.suspend(() => {
                     if (before === undefined) return Effect.void;
-                    const after = semanticCandidateMetadata(roots);
+                    const after = candidateMetadata();
                     if (after !== before) return Effect.fail(LspFault.make({code: 'rejected'}));
                     fence = after;
                     return Effect.void;

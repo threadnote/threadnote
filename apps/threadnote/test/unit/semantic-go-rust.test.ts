@@ -2453,6 +2453,9 @@ effectIt.effect('composes owned Go rename source closure and publication through
       sdkDirectory: f.path.join(f.root, 'fixture-sdk'),
       sdkTreeDigest: sha256HexSync('fixture SDK'),
     };
+    yield* f.fs.writeFileString(candidate.executable, 'provider');
+    yield* f.fs.makeDirectory(candidate.sdkDirectory);
+    let changeDuringStartup = true;
     const principal = sha256HexSync('composed owned Go principal');
     const profileText = JSON.stringify({
       version: 1,
@@ -2470,12 +2473,25 @@ effectIt.effect('composes owned Go rename source closure and publication through
       dataHome: home,
       worktree: f.basis.worktree,
       go: candidate,
-      verifySelected: (_id, _candidate, _version, configurationOnly) =>
-        Effect.sync(() => {
-          events.push(configurationOnly ? 'verify:configuration' : 'verify:candidate');
+      verifySelected: (_id, _candidate, runtimeVersion, configurationOnly) =>
+        Effect.gen(function* () {
+          events.push(
+            configurationOnly ? 'verify:configuration' : runtimeVersion ? 'verify:startup' : 'verify:candidate',
+          );
+          if (!configurationOnly && runtimeVersion && changeDuringStartup) {
+            changeDuringStartup = false;
+            yield* f.fs.writeFileString(candidate.executable, 'changed provider');
+          }
           return sha256HexSync('stable configuration');
         }),
     }).pipe(Effect.provideService(CommandExecutor, metadata));
+    const changed = yield* coordinator.attach(f.basis, f.text, 'go');
+    expect(events).toContain('verify:startup');
+    events.length = 0;
+    yield* coordinator.use(changed.observation, 10000, () => Effect.void);
+    expect(events).toEqual(['verify:configuration', 'verify:candidate', 'verify:configuration']);
+    yield* coordinator.closeView(changed.observation);
+    events.length = 0;
     const directory = yield* f.fs
       .makeTempDirectoryScoped({directory: '/tmp', prefix: 'tn-go-compose-'})
       .pipe(Effect.flatMap(f.fs.realPath));
@@ -2507,6 +2523,12 @@ effectIt.effect('composes owned Go rename source closure and publication through
         observation: Observation,
       }),
     )(opened);
+    expect(events).toContain('verify:startup');
+    events.length = 0;
+    yield* coordinator.use(open.observation, 10000, () => Effect.void);
+    expect(events).toEqual(['verify:configuration', 'verify:configuration']);
+    // With the fence unavailable, the edit must still perform its full verification checks.
+    yield* f.fs.remove(candidate.executable);
     events.length = 0;
     const result = yield* requestSemanticEndpoint(endpoint.socket, token, {
       operation: 'agent-change',
