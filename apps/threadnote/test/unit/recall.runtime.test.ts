@@ -699,17 +699,21 @@ describe('recall runtime orchestration', () => {
         document('tax-order', 'For online orders, apply coupons to merchandise before calculating sales tax.'),
       );
       const projects = ['probe-a', 'probe-b', 'probe-c', 'probe-d', 'probe-e'];
+      const distractors = [
+        {topic: 'invoice-export', body: 'Each invoice export lists monthly totals for accounting.'},
+        {topic: 'voucher-ledger', body: 'A voucher is reconciled against the original invoice for audit.'},
+      ];
+      const distractorUris = EffectArray.map(distractors, ({topic}) => `${scope}/projects/${projects[0]}/${topic}.md`);
       for (const project of projects) {
         const directory = join(root, 'projects', project);
         yield* fs.makeDirectory(directory, {recursive: true});
         yield* Effect.forEach(
           Array.from({length: 25}, (_, index) => index),
           index => {
-            const topic = `${project}-${index}`;
-            return fs.writeFileString(
-              join(directory, `${topic}.md`),
-              document(topic, `Invoice tracking sheet ${topic} refers to database migration.`),
-            );
+            const distractor = project === projects[0] ? distractors[index] : undefined;
+            const topic = distractor?.topic ?? `${project}-${index}`;
+            const body = distractor?.body ?? `Invoice tracking sheet ${topic} refers to database migration.`;
+            return fs.writeFileString(join(directory, `${topic}.md`), document(topic, body));
           },
           {concurrency: 8, discard: true},
         );
@@ -763,6 +767,92 @@ describe('recall runtime orchestration', () => {
       expect(refined.ranked).toContainEqual(
         expect.objectContaining({uri: semanticUri, rankSignals: expect.objectContaining({semantic: 0.88})}),
       );
+      const compared = EffectArray.filter(
+        refined.ranked,
+        hit => hit.uri === semanticUri || distractorUris.includes(hit.uri),
+      );
+      expect(compared[0]?.uri).toBe(semanticUri);
+      expect(compared.slice(1)).toEqual(
+        expect.arrayContaining(
+          EffectArray.map(distractorUris, uri =>
+            expect.objectContaining({uri, rankSignals: expect.objectContaining({semantic: 0})}),
+          ),
+        ),
+      );
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+  effectIt.effect('ranks an exact identifier above a semantic lookalike', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-identifier-rank-'});
+      const config: RuntimeConfig = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'tester',
+        manifestPath: join(home, 'manifest.yaml'),
+        user: 'tester',
+      };
+      const root = join(home, 'data/local/user/tester/memories/durable');
+      const scope = 'threadnote://user/tester/memories/durable';
+      const exactUri = `${scope}/pay-431.md`;
+      const lookalikeUri = `${scope}/pay-413.md`;
+      const query = 'PAY-431';
+      const timestamp = (yield* DateTime.nowAsDate).toISOString();
+      yield* fs.makeDirectory(root, {recursive: true});
+      for (const {id, attempts} of [
+        {id: 'PAY-431', attempts: 'three'},
+        {id: 'PAY-413', attempts: 'two'},
+      ]) {
+        const topic = EffectString.toLowerCase(id);
+        yield* fs.writeFileString(
+          join(root, `${topic}.md`),
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              memoryId: `tn_identifier_rank_${topic}`,
+              sourceAgentClient: 'test',
+              status: 'active',
+              timestamp,
+              topic,
+            },
+            `${id} allows ${attempts} checkout retries before it returns a payment error.`,
+          ),
+        );
+      }
+      const snapshot = yield* loadRecallIndexData(config, {includeInactive: false});
+      const exactMatches = yield* readRecallExactMatches(config, {
+        includeInactive: false,
+        terms: exactRecallTerms(query),
+        uriScopes: [scope],
+      });
+      expect(EffectArray.map(exactMatches, match => match.uri)).toEqual([exactUri]);
+      const prepared = yield* prepareRecallSectionsWithoutInference(
+        config,
+        {
+          allowExactRescue: true,
+          allowSemanticRescue: true,
+          allowedUriScopes: [scope],
+          exactMatches,
+          feedbackQuery: query,
+          includeInactive: false,
+          limit: 2,
+          passes: [],
+          query,
+          readRecords: uris => readMemoryRecordsByUri(config, uris),
+        },
+        {
+          corpusGeneration: Option.some(snapshot.generation),
+          scores: Option.some(new Map([[lookalikeUri, 0.95]])),
+          warning: Option.none(),
+        },
+        candidates => candidates,
+      );
+      expect(prepared.ranked).toMatchObject([
+        {uri: exactUri, rankSignals: {semantic: 0}},
+        {uri: lookalikeUri, rankSignals: {exact: 0, semantic: 0.95}},
+      ]);
+      expect(prepared.ranked[0]?.rankSignals?.exact).toBeGreaterThan(0);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
   effectIt.effect('drops stale semantic scores when the ranked lexical snapshot has advanced', () =>
