@@ -32,6 +32,7 @@ import {TestClock as SemanticTestClock} from 'effect/testing';
 import {CommandCleanupUnconfirmed, CommandExecutor} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {nativeTypeScriptAssetPins} from '@threadnote/graph/typescript_native_asset_pins';
+import * as nativeTypeScriptRuntime from '@threadnote/graph/typescript_runtime';
 import {semanticTreeDigest} from '../../src/semantic/fingerprint.js';
 import * as fingerprint from '../../src/semantic/fingerprint.js';
 import {Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
@@ -61,7 +62,9 @@ import {
 } from '../../src/semantic/coordinator.js';
 import * as javaProvider from '../../src/semantic/providers/java.js';
 import * as javaRuntime from '../../src/semantic/providers/java_runtime.js';
+import * as typescriptProvider from '../../src/semantic/providers/typescript.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
+import * as semanticTransport from '../../src/semantic/lsp_transport.js';
 import {
   LspFrameDecoder,
   LspFault,
@@ -126,7 +129,7 @@ const javaCandidate = (): JavaHostCandidate => ({
     {id: 'prepared-main', metadataFile: '/prepared/model.json', metadataDigest: sha256HexSync('prepared')},
   ],
 });
-const JavaCoordinatorTestLayer = Layer.effectContext(
+const CoordinatorTestLayer = Layer.effectContext(
   Layer.build(
     Layer.mergeAll(
       admissionLayer,
@@ -356,7 +359,7 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
 });
 
 describe.skipIf(process.platform === 'win32')('Java coordinator registration', () => {
-  effectIt.layer(JavaCoordinatorTestLayer, {buildPerTest: true})(layerIt => {
+  effectIt.layer(CoordinatorTestLayer, {buildPerTest: true})(layerIt => {
     // Positive delegation requires actual source-owned host pins; this is not all-platform SDK proof.
     layerIt.effect.skipIf(javaRuntime.javaRuntimePinsForHost() === undefined)(
       'Java runtime delegates repeated proof to the host port and retains the original refusing default',
@@ -1461,6 +1464,137 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
     );
   });
 });
+effectIt.layer(CoordinatorTestLayer, {buildPerTest: true})(layerIt => {
+  layerIt.effect.skipIf(process.platform === 'win32')(
+    'checks native saved-disk context closing once and retires on configuration drift',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-context-closing-'}));
+        const project = path.join(root, 'project');
+        const home = path.join(root, 'home');
+        yield* fs.makeDirectory(project, {mode: 0o700});
+        yield* fs.makeDirectory(home, {mode: 0o700});
+        const file = path.join(project, 'a.ts');
+        const text = 'export const example = 1;\n';
+        yield* fs.writeFileString(file, text);
+        const worktree = (yield* path.toFileUrl(project)).href;
+        const uri = (yield* path.toFileUrl(file)).href;
+        const events: string[] = [];
+        let configuration = sha256HexSync('original configuration');
+        const {wire} = yield* fakeWire;
+        const assertOriginalCurrent = () => {
+          events.push('owner');
+        };
+        const mocks = [
+          vi.spyOn(nativeTypeScriptRuntime, 'recheckNativeTypeScriptExecutable').mockResolvedValue(undefined),
+          vi
+            .spyOn(semanticTransport, 'spawnLspWire')
+            .mockReturnValue(Effect.succeed({...wire, identity: 'fixture-native-owner', assertOriginalCurrent})),
+          vi.spyOn(typescriptProvider, 'makeTypeScriptSession').mockImplementation((client, options) =>
+            Effect.sync(() => {
+              expect(options.native?.assertOriginalCurrent).toBe(assertOriginalCurrent);
+              let observation: Observation | undefined;
+              const unsupported = () => Effect.die('Closing observation must only read the saved observation');
+              return {
+                upsert: (fixed: Observation) => Effect.sync(() => (observation = fixed)),
+                query: unsupported,
+                diagnostics: unsupported,
+                prepare: unsupported,
+                actions: unsupported,
+                verifyPolicy: options.verifyPolicy.pipe(Effect.andThen(Effect.sync(assertOriginalCurrent))),
+                available: Effect.sync(() => observation !== undefined),
+                project: () =>
+                  Effect.succeed({configuration: options.basis.configuration, fileCount: 1, files: [file]}),
+                invalidate: Effect.sync(() => {
+                  observation = undefined;
+                }),
+                close: client.close,
+                observation: (target: string) =>
+                  Effect.sync(() => {
+                    events.push('observation');
+                    return observation?.uri === target ? observation : undefined;
+                  }),
+              };
+            }),
+          ),
+        ];
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            for (const mock of mocks) mock.mockRestore();
+          }),
+        );
+        const coordinator = yield* makeSemanticCoordinator({
+          enabled: true,
+          dataHome: home,
+          worktree,
+          nativeCandidate: {
+            executable: path.join(root, 'tsc'),
+            executableDigest: sha256HexSync('fixture compiler'),
+            version: nativeTypeScriptAssetPins.version,
+            sdkDirectory: path.join(root, 'sdk'),
+            sdkTreeDigest: sha256HexSync('fixture SDK'),
+            sourceCommit: nativeTypeScriptAssetPins.provenance.sourceCommit,
+            sourceTree: nativeTypeScriptAssetPins.provenance.sourceTree,
+            overlaySha256: nativeTypeScriptAssetPins.provenance.overlaySha256,
+          },
+          verifySelected: (_id, _candidate, _runtime, configurationOnly) =>
+            Effect.sync(() => {
+              events.push(configurationOnly ? 'configuration' : 'candidate');
+              return configurationOnly ? configuration : sha256HexSync('fixture verification');
+            }),
+        });
+        const disk = yield* makeSemanticAgentDiskQueries(coordinator, worktree, sha256HexSync('fixture runtime'));
+        const attached = yield* disk.attachDisk(
+          {
+            version: 1,
+            repository: 'fixture',
+            worktree,
+            project: worktree,
+            configuration,
+            toolchain: sha256HexSync('fixture toolchain'),
+            provider: {id: 'typescript-native', version: nativeTypeScriptAssetPins.version, generation: 0},
+            view: {kind: 'disk', id: 'fixture', owner: 'fixture owner', epoch: 0},
+            uri,
+            content: sha256HexSync(text),
+            documentVersion: null,
+            projectEpoch: 0,
+          },
+          text,
+          'typescript',
+        );
+        const {observation} = attached;
+
+        events.length = 0;
+        expect(yield* disk.observe(observation, 1000, 'context-close')).toEqual(observation);
+        expect(events).toEqual(['candidate', 'candidate', 'owner', 'configuration', 'observation']);
+
+        events.length = 0;
+        expect(yield* disk.observe(observation, 1000)).toEqual(observation);
+        expect(events).toEqual([
+          'configuration',
+          'candidate',
+          'candidate',
+          'owner',
+          'candidate',
+          'candidate',
+          'owner',
+          'configuration',
+          'observation',
+        ]);
+
+        events.length = 0;
+        configuration = sha256HexSync('changed configuration');
+        expect(yield* disk.observe(observation, 1000, 'context-close').pipe(Effect.flip)).toMatchObject({
+          code: 'rejected',
+        });
+        expect(events).toEqual(['candidate', 'candidate', 'owner', 'configuration']);
+        expect(yield* coordinator.status).toMatchObject({sessions: 0, providers: 0});
+      }).pipe(TestClock.withLive),
+  );
+});
+
 describe('Java catalog identity', () => {
   it('catalog identity is deterministic under environment order and binds each SDK role without mutation', () => {
     fc.assert(

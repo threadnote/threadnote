@@ -939,7 +939,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
     observation: Observation,
     milliseconds: number,
     f: (api: SemanticSession) => Effect.Effect<A, E, R>,
-    afterFences = false,
+    observationPurpose?: 'observe' | 'context-close',
   ) =>
     Effect.gen(function* () {
       if (!Number.isSafeInteger(milliseconds) || milliseconds < 1 || milliseconds > 45000)
@@ -958,7 +958,14 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               return yield* SemanticSessionFault.make({reason: 'stale'});
             if (session.sources) yield* validateSemanticSource(session.sources, fixed);
             const worktree = yield* path.fromFileUrl(new URL(fixed.worktree));
-            const before = yield* configurationBasis(fixed.provider.id, worktree, session.startup);
+            // The native context close reads the saved observation only after the final owner and configuration checks.
+            const nativeContextClose =
+              observationPurpose === 'context-close' &&
+              fixed.provider.id === 'typescript-native' &&
+              fixed.view.kind === 'disk';
+            const before = nativeContextClose
+              ? session.diskBasis
+              : yield* configurationBasis(fixed.provider.id, worktree, session.startup);
             if (before !== session.diskBasis) {
               yield* retire(id, session);
               return yield* LspFault.make({code: 'rejected'});
@@ -975,21 +982,25 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                 ),
               );
             }
-            yield* session.verify.pipe(Effect.onError(() => retire(id, session).pipe(Effect.ignore)));
+            if (!nativeContextClose)
+              yield* session.verify.pipe(Effect.onError(() => retire(id, session).pipe(Effect.ignore)));
             session.lastUsed = yield* Clock.currentTimeMillis;
             const closing = Effect.gen(function* () {
               yield* session.verify.pipe(Effect.onError(() => retire(id, session).pipe(Effect.ignore)));
               if (
                 session.closing ||
-                (yield* configurationBasis(fixed.provider.id, worktree, session.startup)) !== before
+                (yield* configurationBasis(fixed.provider.id, worktree, session.startup)) !== before ||
+                (nativeContextClose && (session.closing || sessions.get(id) !== session))
               ) {
                 yield* retire(id, session);
                 return yield* LspFault.make({code: 'rejected'});
               }
             });
             // A verified observation is published after the last asynchronous host fence.
-            if (afterFences) {
+            if (observationPurpose) {
               yield* closing;
+              if (nativeContextClose && session.sources?.poisoned())
+                return yield* SemanticSessionFault.make({reason: 'stale'});
               return yield* f(session.api);
             }
             const result = yield* f(session.api);
@@ -1047,8 +1058,8 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           Effect.flatMap(outcome => takeCurrentSemanticPrepared(outcome, producer, () => sessions.get(id))),
         );
       }),
-    observe: (observation: Observation, milliseconds: number) =>
-      use(observation, milliseconds, api => api.observation(observation.uri), true),
+    observe: (observation: Observation, milliseconds: number, purpose: 'observe' | 'context-close' = 'observe') =>
+      use(observation, milliseconds, api => api.observation(observation.uri), purpose),
     status: admission.status.pipe(
       Effect.map(admission => ({
         ...admission,
@@ -1368,7 +1379,7 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
       if (body.operation === 'agent-observe') {
         if (!agentQueries) return yield* LspFault.make({code: 'prerequisite'});
         if (body.observation.view.kind === 'disk')
-          return yield* agentQueries.observe(body.observation, body.milliseconds);
+          return yield* agentQueries.observe(body.observation, body.milliseconds, 'context-close');
         if (!body.handle) return yield* SemanticSessionFault.make({reason: 'conflict'});
         const owned = yield* checkPublic(body.handle);
         return yield* owned.grant.gate.withPermit(
