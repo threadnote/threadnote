@@ -1617,13 +1617,13 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
   const canonical = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
   if (!activation && !required(metadata, marker, canonical)) return yield* skipped;
   const deferContention = !(yield* failFastIdentityPreparation);
-  const publicationFence = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  const publicationFence = <A, E, R>(effect: Effect.Effect<A, E, R>, waitForRecallLock = false) =>
     withRecallIndexLock(
       fs,
       recallIndexLockPath(path, config.agentContextHome, options.includeInactive),
       () => withCanonicalResourceMutationLock(fs, path, config.agentContextHome, config.account, effect),
       undefined,
-      false,
+      waitForRecallLock,
     ).pipe(
       Effect.catchIf(
         error => deferContention && Schema.is(FileLockTimeout)(error),
@@ -1647,8 +1647,9 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
         pointerPath: recallIndexPointerPath(path, config.agentContextHome, options.includeInactive),
       });
     });
-  // Read SQLite before taking any file lock. The prewrite metadata check protects this observation.
-  const base = {...(yield* publicationFence(capture())), metadata};
+  // Wait for the recall lock only before opening a SQLite transaction.
+  // The prewrite metadata check protects the SQLite observation.
+  const base = {...(yield* publicationFence(capture(), true)), metadata};
   if (!activation && !required(base.metadata, base.staleMarker, base.canonicalMutationGeneration))
     return yield* skipped;
   const forceReasons = recallRefreshForceReasons(options.forceRefresh === true, base.metadata);
